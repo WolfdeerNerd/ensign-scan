@@ -124,6 +124,26 @@ class ClamdClient:
         match = re.search(r"THREADS:.*?\bmax\s+(\d+)", stats)
         return int(match.group(1)) if match else None
 
+    def signature_version(self) -> int | None:
+        """The loaded signature database's version number, via VERSION.
+
+        The middle field of "ClamAV <engine>/<sig-version>/<build date>"
+        (e.g. 27455). It rises with each database release, so comparing two
+        of them says how many releases apart two scans were. None if clamd
+        is unreachable or the response doesn't parse -- "unknown", not 0.
+        """
+        try:
+            version = self._command("VERSION")
+        except OSError:
+            return None
+        parts = version.split("/")
+        if len(parts) < 3:
+            return None
+        try:
+            return int(parts[-2])
+        except ValueError:
+            return None
+
     def signature_age_days(self) -> int | None:
         """Days since the loaded signature database was built, via VERSION.
 

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ensign-scan"
+version = "0.1.0"
+description = "Local-first ClamAV file scanner for Linux: hashes files, tracks changes in a local database, and scans only what changed."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "sqlalchemy>=2.0",
+    "rich",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Security",
+    "Environment :: Console",
+]
+
+[project.scripts]
+ensign-scan = "ensign_scan.cli:main"
+
+[tool.setuptools]
+packages = ["ensign_scan"]

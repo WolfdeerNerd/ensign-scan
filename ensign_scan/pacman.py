@@ -33,6 +33,15 @@ _MISMATCH_RE = re.compile(
 )
 
 
+# Reasons that mean pacman could not READ the file, not that the file
+# differs from the package. Seen in real `pacman -Qkk` output when it is
+# run without root: root-only files can't be opened, so nothing was checked.
+UNVERIFIED_REASONS = frozenset({
+    "failed to calculate SHA256 checksum",
+    "Permission denied",
+})
+
+
 @dataclass(frozen=True)
 class PacmanMismatch:
     package: str
@@ -41,6 +50,11 @@ class PacmanMismatch:
     # True for pacman's own backup/config files (e.g. /etc/fstab) --
     # expected to be locally modified, not itself a sign of anything.
     is_backup: bool = False
+
+    @property
+    def unverified(self) -> bool:
+        """pacman couldn't read this file, so it was never actually compared."""
+        return self.reason in UNVERIFIED_REASONS
 
 
 @dataclass(frozen=True)
@@ -61,6 +75,32 @@ class PacmanVerifyResult:
 
 def available() -> bool:
     return shutil.which("pacman") is not None
+
+
+_OWNER_RE = re.compile(r"is owned by (\S+) (\S+)")
+
+
+def owner(path: str, timeout: float = 10.0) -> tuple[str, str | None]:
+    """Ask pacman which package owns a file (`pacman -Qo`). Read-only, local.
+
+    Returns (state, package): ("owned", "name version"), ("unowned", None)
+    when pacman says no package owns it, or ("unknown", None) when pacman
+    is missing, timed out, or failed -- so an error is never reported as
+    "not owned".
+    """
+    if not available():
+        return ("unknown", None)
+    try:
+        result = subprocess.run(["pacman", "-Qo", "--", path], capture_output=True,
+                                text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return ("unknown", None)
+    match = _OWNER_RE.search(result.stdout)
+    if result.returncode == 0 and match:
+        return ("owned", f"{match[1]} {match[2]}")
+    if "No package owns" in result.stderr:
+        return ("unowned", None)
+    return ("unknown", None)
 
 
 def verify_all(timeout: float = 600.0) -> PacmanVerifyResult | None:

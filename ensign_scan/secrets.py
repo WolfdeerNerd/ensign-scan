@@ -4,11 +4,12 @@ Design: three confidence tiers, not one flat list.
 
   HIGH   -- exact, canonical, tool-defined names (directories, fixed
             filenames, distinctive extensions). These essentially never
-            collide with unrelated content by accident.
+            collide with unrelated content by accident. Policy: anything
+            financial or crypto (wallets, keystores) belongs here, not
+            in MEDIUM, where the pattern is specific enough to allow it.
   MEDIUM -- naming conventions/prefixes that need directory context to
-            be trustworthy (e.g. Ethereum's UTC-- keystore prefix only
-            means something inside a keystore/ folder; id_* only means
-            something inside .ssh/).
+            be trustworthy (e.g. id_* only means something inside
+            .ssh/; a bare .pem could be a certificate or a private key).
   (anything else is NOT flagged -- bare English words like "wallet",
   "secrets", "keystore" are deliberately excluded; they were the
   source of most false positives under the old substring-matching
@@ -47,28 +48,24 @@ from enum import Enum
 # Directory names, matched as a whole path component (not substring).
 # Some are multi-segment (checked as a path substring since they're
 # specific enough not to need per-component matching).
-_HIGH_DIRS = (
+#
+# These eight lists (not tuples) are the single source of truth classify()
+# reads from. load_custom() below is the only thing that appends to them
+# after startup -- additive only, nothing else mutates these at runtime.
+_HIGH_DIRS = [
     ".ssh", ".gnupg", ".aws", ".azure", ".docker", ".kube",
     ".password-store", "exodus.wallet",
-)
-_HIGH_DIR_PATHS = (  # multi-segment, checked as substrings
+]
+_HIGH_DIR_PATHS = [  # multi-segment, checked as substrings
     ".gnupg/private-keys-v1.d", ".gnupg/openpgp-revocs.d",
     ".config/gcloud", ".electrum/wallets", ".ethereum/keystore",
     ".bitcoin", ".litecoin", ".dogecoin",
     "kwalletd", ".kde/share/apps/kwallet",  # KDE Wallet
-)
-
-_HIGH_EXTENSIONS = (
-    ".kdbx", ".kdb",
-    ".opvault", ".1pux", ".1pif", ".agilekeychain",
-    ".ppk",
-    ".keytab",
-    ".kwl",  # KDE Wallet
-)
+]
 
 # Filenames safe to treat as HIGH confidence regardless of parent dir --
 # distinctive enough that directory context isn't needed.
-_HIGH_FILENAMES = (
+_HIGH_FILENAMES = [
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ed25519_sk",
     "id_ecdsa_sk", "identity", "authorized_keys", "known_hosts",
     "pubring.kbx", "pubring.gpg", "secring.gpg", "trustdb.gpg",
@@ -81,47 +78,53 @@ _HIGH_FILENAMES = (
     ".netrc", "_netrc", ".git-credentials", ".npmrc", ".pypirc",
     ".vault-token", ".pgpass", ".my.cnf", ".s3cfg", ".boto", ".gpg-id",
     "login data", "logins.json", "key4.db", "key3.db", "krb5.keytab",
-)
+]
 
 # Filenames that are only HIGH confidence inside a specific parent dir
 # (e.g. "config" is sensitive under .kube/, meaningless anywhere else).
 # Each entry: (parent dir substring, filename).
-_HIGH_SCOPED_FILENAMES = (
+_HIGH_SCOPED_FILENAMES = [
     (".aws", "credentials"),
     (".aws", "config"),
     (".kube", "config"),
     (".ssh", "config"),
     (".docker", "config.json"),
-)
+]
+
+# Filename prefixes that are HIGH confidence, but only inside a parent dir.
+# (prefix, required parent-dir substring) -- the parent is always required.
+_HIGH_PREFIXES = [
+    ("utc--", "keystore"),      # Ethereum keystore V3 (financial/crypto: HIGH)
+]
 
 # Distinctive extensions -- unique enough to a single ecosystem that
 # they're safe as HIGH confidence without directory scoping.
-_HIGH_EXTENSIONS = (
+_HIGH_EXTENSIONS = [
     ".kdbx", ".kdb",           # KeePass 2.x / 1.x
     ".opvault", ".1pux", ".1pif", ".agilekeychain",  # 1Password
     ".ppk",                    # PuTTY
     ".keytab",                 # Kerberos
-)
+    ".kwl",                    # KDE Wallet
+]
 
 # ----------------------------------------------------------------------
 # MEDIUM confidence: conventions/prefixes that need directory context.
 # ----------------------------------------------------------------------
 
 # (prefix, required parent-dir substring or None if safe standalone)
-_MEDIUM_PREFIXES = (
-    ("utc--", "keystore"),      # Ethereum keystore V3
+_MEDIUM_PREFIXES = [
     ("id_", ".ssh"),            # custom-named SSH keys
     ("ssh_host_", "ssh"),       # host keys, usually /etc/ssh/
-)
+]
 
-_MEDIUM_EXTENSIONS = (
+_MEDIUM_EXTENSIONS = [
     (".keys", None),    # Monero -- paired with *.address.txt, but the
                         # extension alone is distinctive enough
     (".gpg", (".gnupg", ".password-store")),
     (".asc", None), (".pgp", None),
     (".pem", None), (".key", None), (".p12", None), (".pfx", None),
     (".jks", None), (".keystore", None),
-)
+]
 
 
 class Confidence(str, Enum):
@@ -151,6 +154,9 @@ def classify(path: str) -> Confidence:
         return Confidence.HIGH
     for parent, filename in _HIGH_SCOPED_FILENAMES:
         if basename == filename and parent in lower:
+            return Confidence.HIGH
+    for prefix, parent in _HIGH_PREFIXES:
+        if basename.startswith(prefix) and parent in lower:
             return Confidence.HIGH
     if any(basename.endswith(ext) for ext in _HIGH_EXTENSIONS):
         return Confidence.HIGH
@@ -191,3 +197,89 @@ def matching_reason(path: str) -> str | None:
         return None
     basename = os.path.basename(path)
     return f"{conf.value}-confidence match on {basename!r}"
+
+
+# ----------------------------------------------------------------------
+# User-supplied extensions, from [custom_secrets] in config.toml.
+# ----------------------------------------------------------------------
+
+_CUSTOM_SECRETS_KNOWN_KEYS = {
+    "high_dirs", "high_dir_paths", "high_filenames", "high_extensions",
+    "high_scoped_filenames", "high_prefixes", "medium_prefixes", "medium_extensions",
+}
+
+
+def _as_pair(entry, allow_empty_second: bool) -> tuple[str, str | None] | None:
+    """Validate a [value, parent] pair from TOML. `parent` of "" is
+    treated as None (no required parent) when allow_empty_second is True
+    -- scoped filenames always need a real parent, prefixes/extensions
+    don't have to. Returns None (and warns) on anything malformed."""
+    if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
+        print(f"[ensign] Warning: malformed custom_secrets entry {entry!r} ignored "
+              f"(expected a two-element list)")
+        return None
+    value, parent = entry
+    if not isinstance(value, str) or not value:
+        print(f"[ensign] Warning: malformed custom_secrets entry {entry!r} ignored")
+        return None
+    if parent == "" and allow_empty_second:
+        parent = None
+    elif not isinstance(parent, str):
+        print(f"[ensign] Warning: malformed custom_secrets entry {entry!r} ignored "
+              f"(second element must be a string)")
+        return None
+    return (value, parent)
+
+
+def load_custom(config) -> None:
+    """Merge config.custom_secrets into the module's pattern lists.
+
+    Additive only: a value already present (by equality) is left alone,
+    not duplicated. Malformed entries are warned about and skipped
+    individually. Each custom entry picks ONE existing tier/shape to
+    join -- there's no way from config to add a brand-new tier, a
+    multi-value required-parent (medium_extensions' (".gpg", (".gnupg",
+    ".password-store")) shape), or a tool-defined fixed extension
+    outside high_extensions/medium_extensions.
+    """
+    raw = getattr(config, "custom_secrets", None) or {}
+    for key in raw.keys() - _CUSTOM_SECRETS_KNOWN_KEYS:
+        print(f"[ensign] Warning: unknown custom_secrets key {key!r} ignored")
+
+    for value in raw.get("high_dirs", []):
+        if isinstance(value, str) and value and value.lower() not in _HIGH_DIRS:
+            _HIGH_DIRS.append(value.lower())
+    for value in raw.get("high_dir_paths", []):
+        if isinstance(value, str) and value and value.lower() not in _HIGH_DIR_PATHS:
+            _HIGH_DIR_PATHS.append(value.lower())
+    for value in raw.get("high_filenames", []):
+        if isinstance(value, str) and value and value not in _HIGH_FILENAMES:
+            _HIGH_FILENAMES.append(value.lower())
+    for value in raw.get("high_extensions", []):
+        if isinstance(value, str) and value and value not in _HIGH_EXTENSIONS:
+            _HIGH_EXTENSIONS.append(value.lower())
+
+    for entry in raw.get("high_scoped_filenames", []):
+        pair = _as_pair(entry, allow_empty_second=False)
+        if pair:
+            pair = (pair[0].lower(), pair[1].lower())
+            if pair not in _HIGH_SCOPED_FILENAMES:
+                _HIGH_SCOPED_FILENAMES.append(pair)
+    for entry in raw.get("high_prefixes", []):
+        pair = _as_pair(entry, allow_empty_second=False)
+        if pair:
+            pair = (pair[0].lower(), pair[1].lower())
+            if pair not in _HIGH_PREFIXES:
+                _HIGH_PREFIXES.append(pair)
+    for entry in raw.get("medium_prefixes", []):
+        pair = _as_pair(entry, allow_empty_second=True)
+        if pair:
+            pair = (pair[0].lower(), pair[1].lower() if pair[1] else None)
+            if pair not in _MEDIUM_PREFIXES:
+                _MEDIUM_PREFIXES.append(pair)
+    for entry in raw.get("medium_extensions", []):
+        pair = _as_pair(entry, allow_empty_second=True)
+        if pair:
+            pair = (pair[0].lower(), pair[1].lower() if pair[1] else None)
+            if pair not in _MEDIUM_EXTENSIONS:
+                _MEDIUM_EXTENSIONS.append(pair)

@@ -1,15 +1,58 @@
 """Read-only reporting queries. Nothing in here mutates the database."""
 from __future__ import annotations
 
+import datetime
 import os
 
 from rich import print
+from rich.markup import escape
+from rich.padding import Padding
+from rich.table import Table
 from sqlalchemy import func, or_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from . import secrets
+from . import explanations, pacman, secrets
 from .models import FileRecord, ScanStatus
+
+
+def _note(icon: str, text: str, label: str | None = None, indent: int = 2) -> None:
+    """Print a dim, indented note whose wrapped lines hang under the text
+    (not under the icon), so it can't visually run into the next entry."""
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(no_wrap=True)
+    grid.add_column()
+    body = f"{label}: {escape(text)}" if label else escape(text)
+    grid.add_row(f"[dim]{icon}[/dim]", f"[dim]{body}[/dim]")
+    print(Padding(grid, (0, 0, 0, indent)))
+
+
+def _human_size(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{n} B"
+
+
+def _file_facts(filepath: str) -> str:
+    """One local line of context about a flagged file: does it still exist,
+    how big, how old, and does a pacman package own it. Everything here is
+    a local stat or a read-only `pacman -Qo`; nothing leaves the machine."""
+    try:
+        st = os.lstat(filepath)
+    except OSError:
+        return "no longer on disk (or not readable now)"
+    modified = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d")
+    parts = [_human_size(st.st_size), f"modified {modified}"]
+    state, pkg = pacman.owner(filepath)
+    if state == "owned":
+        name = pkg.split()[0]
+        parts.append(f"owned by package {pkg} (check it with: pacman -Qkk {name})")
+    elif state == "unowned":
+        parts.append("not owned by any pacman package")
+    return " · ".join(parts)
 
 
 def _scope_filter(paths: list[str] | None):
@@ -27,20 +70,41 @@ def _scope_filter(paths: list[str] | None):
     return or_(*conditions)
 
 
+def _secrets_beneath(parent: str, sensitive_paths: list[str]) -> str | None:
+    """First path in `sensitive_paths` that lies anywhere under `parent`
+    (any depth), returned relative to `parent`; None if there isn't one.
+
+    Matches on `parent + "/"` as a whole prefix, so /data/pb2/x is not
+    "under" /data/pb -- a bare startswith(parent) would say it was.
+    """
+    prefix = parent.rstrip("/") + "/"
+    for path in sensitive_paths:
+        if path.startswith(prefix):
+            return path[len(prefix):]
+    return None
+
+
 def suggest_fixes(engine: Engine, top: int = 10, paths: list[str] | None = None) -> None:
     """Print copy-pasteable setfacl commands for permission error hotspots.
 
     Purely advisory — nothing here runs a permission change. Directories
     are flagged for manual review instead of getting a suggested command
-    if EITHER the directory name OR any individual file inside it matches
-    a secrets pattern — checking only the directory name would miss a
-    wallet file sitting in a generically-named folder, and checking only
-    the file would miss dotfiles (like .netrc) living loose in $HOME
-    whose "directory" is just the home folder itself.
+    if EITHER the directory name OR any file beneath it, at any depth,
+    matches a secrets pattern — checking only the directory name would
+    miss a wallet file sitting in a generically-named folder, and
+    checking only the files that errored would miss one that was already
+    reclassified, or that sits in a subdirectory: the suggested
+    `setfacl -R` recurses through the whole subtree, and its `-d` form
+    is inherited by anything created there later. Dotfiles (like .netrc)
+    living loose in $HOME are covered the same way, since their
+    "directory" is just the home folder itself.
 
-    If `paths` is given, only errors under those paths are considered —
+    If `paths` is given, only hotspots under those paths are reported —
     otherwise this reports on every error in the whole database,
-    regardless of what this particular run scanned.
+    regardless of what this particular run scanned. That scope picks
+    which hotspots to report; it deliberately does NOT narrow the
+    secrets check above, because the command would still touch
+    everything beneath the directory.
     """
     with Session(engine) as session:
         query = session.query(FileRecord.filepath, FileRecord.scan_result).filter(
@@ -60,6 +124,19 @@ def suggest_fixes(engine: Engine, top: int = 10, paths: list[str] | None = None)
 
     if not hotspots:
         return
+
+    # Every ERROR/CLASSIFIED record that looks like a secrets store,
+    # loaded once and unscoped (see the docstring). These are the files
+    # clamd currently can't read -- the ones a recursive grant would newly
+    # expose. Filtered in Python with an exact prefix match rather than
+    # SQL LIKE, where '_' and '%' in a directory name act as wildcards.
+    # Stale records are kept on purpose: with the -d default ACL, a
+    # deleted wallet that gets recreated would inherit the grant.
+    with Session(engine) as session:
+        guard_rows = session.query(FileRecord.filepath).filter(
+            FileRecord.scan_status.in_([ScanStatus.ERROR.value, ScanStatus.CLASSIFIED.value])
+        ).all()
+    sensitive_paths = sorted(p for (p,) in guard_rows if secrets.is_likely_secrets_path(p))
 
     print(f"\n=== SUGGESTED FIXES ({len(hotspots)} directories) ===")
     print("Advisory only — review each command before running it.\n")
@@ -83,10 +160,10 @@ def suggest_fixes(engine: Engine, top: int = 10, paths: list[str] | None = None)
         count = len(paths)
         label = f"{count} file" + ("s" if count != 1 else "")
         dir_match = secrets.is_likely_secrets_path(parent)
-        file_match = next((p for p in paths if secrets.is_likely_secrets_path(p)), None)
-        if dir_match or file_match:
+        beneath = None if dir_match else _secrets_beneath(parent, sensitive_paths)
+        if dir_match or beneath:
             print(f"  [yellow]! {parent}[/yellow]  ({label})")
-            reason = f"directory name" if dir_match else f"contains {os.path.basename(file_match)}"
+            reason = "directory name" if dir_match else f"contains {beneath}"
             print(f"    Looks like a secrets/credentials store ({reason}) — review manually.\n")
         else:
             print(f"  {parent}  ({label})")
@@ -135,6 +212,63 @@ def error_summary(engine: Engine, top: int = 10, paths: list[str] | None = None)
         print(f"  {count:>6}  {parent}")
 
 
+def unreadable_report(unreadable: dict[str, str], top: int = 10) -> None:
+    """Print the directories Ensign could not look inside during this run.
+
+    These are blind spots, not errors on a file: nothing under them was
+    hashed or scanned. Unlike the other reports this isn't a database
+    query -- the walk retries every directory on every run, so the list
+    is rebuilt each time and there's nothing to store.
+
+    A path with a listed ancestor is dropped: the ancestor already
+    explains why it was never reached. (A directory that can be listed
+    but not entered fails again one level down, for instance.)
+    """
+    if not unreadable:
+        return
+
+    shown: list[str] = []
+    for path in sorted(unreadable):
+        if not any(path.startswith(kept.rstrip("/") + "/") for kept in shown):
+            shown.append(path)
+
+    print(f"\n=== UNREADABLE DIRECTORIES ({len(shown)}) ===")
+    print("Ensign could not look inside these, so nothing in them was scanned.")
+    for path in shown[:top]:
+        print(f"  {escape(path)}")
+        print(f"    {unreadable[path]}")
+    if len(shown) > top:
+        print(f"  … and {len(shown) - top} more (all are in the error log)")
+
+
+def _print_unverified(unverified) -> None:
+    """Files pacman could not read. These were never compared against the
+    package, so they are NOT mismatches -- reported separately, grouped by
+    package so a root-only package doesn't bury the real findings."""
+    n = len(unverified)
+    print(f"\n-- {n} file{'s' if n != 1 else ''} pacman could not verify (not mismatches) --")
+    if os.geteuid() == 0:
+        print("  pacman could not read these even as root; the files may be missing or damaged.")
+    else:
+        print("  pacman wasn't run as root, so root-only files could not be opened. To check "
+              "them, run: sudo pacman -Qkk")
+    by_pkg: dict[str, list] = {}
+    for m in unverified:
+        by_pkg.setdefault(m.package, []).append(m)
+    for pkg, items in sorted(by_pkg.items()):
+        reasons = sorted({m.reason for m in items})
+        print(f"  {escape(pkg)}: {len(items)} file{'s' if len(items) != 1 else ''} "
+              f"({escape(', '.join(reasons))})")
+        for m in items[:3]:
+            print(f"    {escape(m.filepath)}")
+        if len(items) > 3:
+            print(f"    … and {len(items) - 3} more")
+    for reason in sorted({m.reason for m in unverified}):
+        note = explanations.explain_pacman_reason(reason)
+        if note:
+            _note("ⓘ", f"{reason}: {note}")
+
+
 def pacman_report(engine: Engine, result) -> None:
     """Print pacman -Qkk mismatches, cross-referenced against Ensign's
     own tracked files where possible. Purely informational."""
@@ -161,7 +295,8 @@ def pacman_report(engine: Engine, result) -> None:
             for row in session.query(FileRecord.filepath, FileRecord.scan_status)
         }
 
-    real = [m for m in result.mismatches if not m.is_backup]
+    unverified = [m for m in result.mismatches if m.unverified and not m.is_backup]
+    real = [m for m in result.mismatches if not m.is_backup and not m.unverified]
     backups = [m for m in result.mismatches if m.is_backup]
 
     if real:
@@ -169,8 +304,16 @@ def pacman_report(engine: Engine, result) -> None:
         for m in real:
             status = known.get(m.filepath)
             tracked = f"Ensign last saw this file: {status}" if status else "not tracked by Ensign"
-            print(f"  {m.package}: {m.filepath}")
-            print(f"    {m.reason} — {tracked}")
+            print(f"  {escape(m.package)}: {escape(m.filepath)}")
+            print(f"    {escape(m.reason)} — {tracked}")
+            reason_note = explanations.explain_pacman_reason(m.reason)
+            if reason_note:
+                _note("ⓘ", reason_note, indent=4)
+    elif unverified:
+        print("\nNo files differ from pacman's records.")
+
+    if unverified:
+        _print_unverified(unverified)
 
     if backups:
         # pacman marks these files "backup" specifically so it won't
@@ -210,7 +353,11 @@ def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, in
     return {"total": total, **{s.value: counts.get(s.value, 0) for s in ScanStatus}}
 
 
-def list_infected(engine: Engine, paths: list[str] | None = None) -> list[dict]:
+def list_infected(engine: Engine, paths: list[str] | None = None,
+                  files_per_threat: int = 25) -> list[dict]:
+    """Print infected files grouped by threat name, so a signature that hits
+    many files (a game's assets, say) is explained once, not once per file.
+    Returns one dict per infected file, as before."""
     with Session(engine) as session:
         query = session.query(
             FileRecord.filepath,
@@ -227,14 +374,34 @@ def list_infected(engine: Engine, paths: list[str] | None = None) -> list[dict]:
         print("No infected files found")
         return []
 
-    print("\n=== INFECTED FILES ===")
+    groups: dict[str | None, list] = {}
+    for row in rows:
+        groups.setdefault(row.threat_name, []).append(row)
+    ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0] or ""))
+
+    print(f"\n=== INFECTED FILES ({len(rows)} files, {len(groups)} "
+          f"{'threat' if len(groups) == 1 else 'threats'}) ===")
     results = []
-    for filepath, threat, scanned, detail in rows:
-        print(f"\nFile: {filepath}")
-        print(f"Threat: {threat}")
-        print(f"Scanned: {scanned}")
-        print(f"Details: {(detail or '')[:200]}")
-        results.append({"filepath": filepath, "threat": threat, "scanned": scanned})
+    for threat, group in ordered:
+        group.sort(key=lambda r: r.filepath)
+        count = f"{len(group)} file{'s' if len(group) != 1 else ''}"
+        print(f"\nThreat: {escape(str(threat))}  ({count})")
+        explanation = explanations.explain_threat(threat)
+        if explanation:
+            _note("ⓘ", explanation.description)
+            if explanation.false_positive_note:
+                label = "Hint" if explanation.decoded else "Known false positive"
+                _note("›", explanation.false_positive_note, label=label)
+        for i, (filepath, _t, scanned, detail) in enumerate(group):
+            if i < files_per_threat:
+                print(f"\n  File: {escape(filepath)}")
+                print(f"  Scanned: {scanned}")
+                print(f"  Details: {escape((detail or '')[:200])}")
+                _note("›", _file_facts(filepath), label="Context", indent=2)
+            elif i == files_per_threat:
+                print(f"\n  … and {len(group) - files_per_threat} more files with this "
+                      f"threat (all are recorded in the database)")
+            results.append({"filepath": filepath, "threat": threat, "scanned": scanned})
     return results
 
 

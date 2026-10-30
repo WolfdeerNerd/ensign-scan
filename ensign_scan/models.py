@@ -44,6 +44,19 @@ class FileRecord(Base):
     # change detection is a plain == with no float/timezone loss.
     mtime_ns = Column(Integer)
 
+    # Exact nanosecond ctime (inode change time). Unlike mtime, a process
+    # can't set ctime backwards with utimensat(); any content write, chmod,
+    # chown or rename bumps it. Checked alongside (size, mtime_ns) so a
+    # file edited and then given back its old mtime still gets rescanned.
+    # NULL on rows from before this column existed; those get rescanned once.
+    ctime_ns = Column(Integer)
+
+    # Version of the ClamAV signature database the last real verdict was
+    # produced under (clamd's VERSION). Lets Ensign rescan files that were
+    # clean under an older database. NULL = unknown (older rows, or clamd
+    # didn't report a version).
+    sig_version = Column(Integer)
+
     scan_status = Column(String, default=ScanStatus.PENDING.value, index=True)
     scan_result = Column(Text)
     threat_name = Column(String)

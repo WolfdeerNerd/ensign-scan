@@ -34,6 +34,8 @@ def make_engine(db_url: str) -> Engine:
 def _migrate(engine: Engine) -> None:
     """Add columns that create_all() won't add to pre-existing tables."""
     _ensure_column(engine, "files", "mtime_ns", "INTEGER")
+    _ensure_column(engine, "files", "ctime_ns", "INTEGER")
+    _ensure_column(engine, "files", "sig_version", "INTEGER")
     _ensure_column(engine, "directories", "mtime_ns", "INTEGER")
 
 

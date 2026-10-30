@@ -19,3 +19,9 @@ error_logs.txt
 # Editor/OS cruft
 .DS_Store
 *.swp
+
+# Build pipline
+build/
+dist/
+*.egg-info/
+*.kate-swp

@@ -50,6 +50,17 @@ def safe_stat(path: Path) -> os.stat_result | None:
         return None
 
 
+def stat_or_error(path: Path) -> tuple[os.stat_result | None, OSError | None]:
+    """Like safe_stat, but returns the failure instead of logging it, so
+    the caller can tell "the file is gone / the symlink is broken"
+    (FileNotFoundError) from a real refusal like PermissionError. Follows
+    symlinks, same as safe_stat. The caller decides what to log."""
+    try:
+        return os.stat(path), None
+    except OSError as exc:
+        return None, exc
+
+
 def is_scannable(st: os.stat_result) -> bool:
     """True only for regular, non-empty files.
 

@@ -2,14 +2,20 @@
 
 Greetings!
 
-Ensign was originally a personal project. I liked clamscan, but I noticed it would keep breaking on certain files in my system — permission denials when clamd's own user couldn't read a path, files rejected outright for exceeding clamd's size limit, files that simply couldn't be hashed, and a genuinely bizarre recursive mess with Steam's Proton Z: drive that kept re-scanning snapshots of snapshots of itself (more on that further down). On top of that, temp files have a way of vanishing between one moment and the next — the world of seemingly quantum temp files is terrifying.
+Ensign was originally a personal project. I liked clamscan, but I noticed it would keep breaking on certain files in my system — permission denials when clamd's own user couldn't read a path, files rejected outright for exceeding clamd's size limit, broken symlinks pointing at files that no longer exist, and a genuinely bizarre recursive mess with Steam's Proton Z: drive that kept re-scanning snapshots of snapshots of itself (more on that further down). On top of that, temp files have a way of vanishing between one moment and the next — the world of seemingly quantum temp files is terrifying.
 
-I decided to make a logic brain for this madness, Ensign. The idea was for Ensign to walk the entire system and log every file in an SQLAlchemy database. That database file is kept locally on **your** system. The db includes the id, filepath, filename, file hash, file size, modification time (mtime_ns), scan status, scan result, threat name, last time file was scanned, file creation time, and 'last updated at time' of each file logged in the db.
+I decided to make a logic brain for this madness, Ensign. The idea was for Ensign to walk the entire system and log every file in an SQLAlchemy database. That database file is kept locally on **your** system. The db includes the id, filepath, filename, file hash, file size, modification time (mtime_ns), inode change time (ctime_ns), the version of ClamAV's signature database it was last scanned under, scan status, scan result, threat name, last time file was scanned, file creation time, and 'last updated at time' of each file logged in the db.
 
 The idea was to be as paranoid as possible when designing this. That being said, it is completely possible that someone one else will notice something I missed and that in itself, is okay.
 
 ## Disclaimer
+Ensign is an independent project. It is not affiliated with Ensign InfoSecurity, The Ensign Group, the U.S. Navy or the U.S. Government.
+
 Parts of this repo were written with assistance of Claude. The architecture and design decisions were made by me. Feel free to scrutinize this code, I welcome any flaws that are found. This project is not perfect, the same way I am not. A wise man loves correction, a fool abhors it.
+
+## License
+
+Ensign is released under the MIT License. See the `LICENSE` file.
 
 ## Requirements
 
@@ -63,14 +69,8 @@ If clamd can't be reached to ask, Ensign falls back to a safe default of 5 worke
 
 **First quick scan:** Before scanning everything, test your setup on one folder.
 
-1. Make sure ClamAV's daemon is running (Ensign tells you if it isn't):
-   ```
-   sudo systemctl start clamav-daemon
-   ```
-2. Run Ensign on a small tree, as your own username:
-   ```
-   python3 path/to/main.py ~/Downloads
-   ```
+1. Make sure ClamAV's daemon is running (Ensign tells you if it isn't): `sudo systemctl start clamav-daemon`
+2. Run Ensign on a small tree, as your own username: `python3 path/to/main.py ~/Downloads`
 3. If you see permission errors, see Permissions Setup above, then run it again.
 
 For a full scan, you only need to run:
@@ -79,6 +79,8 @@ python3 path/to/main.py
 ```
 
 This scans everything listed in your config's `scan_targets`, runs the infected/error/stale rescan passes, prints a summary and error breakdown, and sends a desktop notification when it's done (if one is available).
+
+While it runs, the bottom line of the terminal shows live progress: files done out of files to process, a bar and percentage, an estimated time remaining (ETA), how many infected files and errors have turned up so far, and the worker count. Each file's result scrolls past above it. The ETA follows the pace of roughly the last minute, so it tracks the current speed, and it shows `--` for the first few seconds or whenever nothing is finishing. When the scan is done, the ETA is replaced by the total time it took. On a narrow terminal the line drops detail instead of wrapping: the worker count goes first, then the full words shrink to symbols, and only on a very narrow one the ETA. When the output isn't a terminal (a scheduled service, or piped to a file), the line is printed once at the end instead of being redrawn.
 
 ### Targeting and behavior flags
 
@@ -101,14 +103,81 @@ These run one job and exit — no full scan.
 | `python3 main.py --verify-pacman` | Cross-check installed files against pacman's own checksums, flag mismatches (Arch only, can be slow) |
 | `python3 main.py --suggest-fixes` | Print setfacl commands for current permission errors, optionally scoped to given targets |
 
+### Only one run at a time
+
+Before it scans, purges or retries errors, Ensign takes a lock: a small file called `ensign.lock` in your data directory (`~/.local/share/ensign/` unless you've set a custom `data_dir`). If another Ensign already holds it, the new one prints which process has it, exits with code 75 and scans nothing. That way a scheduled run and a manual run can't overlap and scan the same files twice.
+
+- **The lock frees itself.** It belongs to the running process, so it is released when that process ends, even after a crash or `kill -9`. There is never a stale lock to clean up.
+- **Leave the file in place.** Deleting `ensign.lock` while a run is using it can let a second run start.
+- **Read-only commands skip it.** `--verify-pacman` and `--suggest-fixes` only read the database, so they can run while a scan is going.
+
 ### If a suggested fix doesn't seem to work
 
-If you apply a suggested 'setfactl' command and the same error keeps popping showing up on a later run, the file may have been deleted since Ensign last saw it - common with temp files, downloads that get cleaned up, or build artifacts. A permission fix can't help a file that no longer exists. 
+If you apply a suggested 'setfacl' command and the same error keeps showing up on a later run, the file may have been deleted since Ensign last saw it - common with temp files, downloads that get cleaned up, or build artifacts. A permission fix can't help a file that no longer exists. 
 
 Run: 
     `python3 main.py --purge-missing`
 to clear out stale records, then run a normal scan again to re-establish a clean baseline. 
 
+
+## What Gets Rescanned
+
+After the first full scan, Ensign sends a file to ClamAV again only when something suggests it needs it. A file is rescanned when:
+
+- **Its size or modification time changed.**
+- **Its inode change time (ctime) changed.** A program can set a file's modification time back to what it was, but it can't do that to ctime. So a file that was edited and then given its old timestamp back is still caught. The side effect is that `chmod`, `chown` and renaming a file also change ctime, so they trigger a rescan too.
+- **It was last scanned clean under an out-of-date signature database.** A file ClamAV called clean yesterday can match a signature released today. `rescan_after_signature_updates` in your config sets how many signature updates behind a clean file can fall before it is scanned again. Updates arrive about once a day, so the number is roughly days: the default `7` re-checks everything about weekly, and `31` about monthly. The allowed range is 7 to 31 (a value outside it is clamped, with a warning), or `0` to turn this off. Each pass sends every out-of-date file through clamd again, which on a machine with millions of files takes a while, so pick the longest interval you are comfortable with.
+
+The first run after upgrading from a version that didn't track ctime or signature versions scans every file once. After that it settles back to scanning only what changed.
+
+## Alerts
+
+When a scan ends with infected files, Ensign sends a critical desktop notification (needs `notify-send`). That alert behaves differently from the normal ones, because an alert that sits on top of a game until you tab out and dismiss it is a nuisance.
+
+- **It closes itself** after `infected_alert_seconds` (default `60`). `0` leaves it up until you dismiss it. KDE Plasma ignores the timeout that `notify-send` sets on critical alerts, so Ensign closes the alert itself over D-Bus with `gdbus`.
+- **By default it only does that while a Steam game is running.** With `infected_alert_only_while_gaming = true`, a scan you start yourself in a terminal leaves the alert up for you to come back to, unless a Steam game is running (Ensign looks for Steam's `reaper SteamLaunch AppId=` process). Steam open and idle doesn't count. `false` always auto-closes.
+- **Runs with no terminal always auto-close.** A scheduled run (a service or cron job) has nobody to come back to the alert.
+- **A new infected alert replaces the previous one** instead of stacking up. Ensign remembers the last alert's ID in `alert_state.json` in the data directory, and only trusts it within the same boot. If that file is root-owned (see the first-run note under Usage), replacement quietly stops working.
+
+## Logs
+
+Errors are written to one log file per run: `<data_dir>/logs/ensign-YYYYMMDD-HHMMSS.log`, which is `~/.local/share/ensign/logs/` unless you've set a custom `data_dir`. A run with no errors leaves no file.
+
+- **Repeats are collapsed.** The first 20 occurrences of each distinct error are logged in full, then only counted, with a one-line total at the end of the run. One repeating problem (Ensign once logged 302,289 "stat failed" lines for broken symlinks) can't fill the disk.
+- **Old logs are deleted automatically.** Runs older than `log_keep_days` (default `90`) go first. If the folder is still over `log_max_total_mb` (default `2048`), the oldest go next, so the size limit wins. `0` turns either rule off. Only files named `ensign-*.log` in that folder are ever deleted.
+- Older versions wrote one `error_logs.txt` file. It is no longer used and can be deleted.
+
+## Explaining Findings
+
+When a scan finds an infected file, or `--verify-pacman` finds a mismatch, Ensign prints a short `ⓘ` note under it saying what the threat name or mismatch reason generally means. The point is to help you tell a false positive from something worth chasing.
+
+- **Curated notes first.** Ensign ships a small table of researched notes, and you can add your own (see Customizing below).
+- **Everything else is decoded from the name.** ClamAV names follow `Platform.Category.Name-SignatureID-Revision`, so for a name with no curated note Ensign describes what the name says. A Windows-only signature on Linux, for example, gets a **Hint** that it is often a false positive. A hint is a pointer, not a verdict.
+- **Findings are grouped by threat name,** so a signature that hits many files is explained once. Each file gets a context line: size, last modified date, and whether a pacman package owns it.
+- **All local and advisory.** Nothing is looked up online, and the notes never change a scan result.
+
+## Customizing
+
+Three optional sections in your `config.toml` extend Ensign's built-in lists. They are **additive only**: your entries are added, never replace a built-in one, and an entry that collides with a built-in is ignored with a warning.
+
+```
+[custom_threats."Win.Malware.Example-1234567-0"]
+description = "What this signature generally means."
+false_positive_note = "Optional: when it's commonly a false positive."
+
+[custom_pacman_reasons]
+"Some new mismatch type" = "What this pacman -Qkk reason means."
+
+[custom_secrets]
+high_dirs = ["myvault"]
+high_prefixes = [["mywallet_", "wallets"]]
+```
+
+- **`[custom_threats]`** adds a note for a threat name. The name must match exactly, including the numbers.
+- **`[custom_pacman_reasons]`** adds a note for a `pacman -Qkk` mismatch reason.
+- **`[custom_secrets]`** adds paths that look like secrets stores. The keys are `high_dirs`, `high_dir_paths`, `high_filenames`, `high_extensions`, `high_scoped_filenames`, `high_prefixes`, `medium_prefixes` and `medium_extensions`. A HIGH match means a permission-denied file is classified as expected instead of reported as an error, and neither tier will get a `setfacl` fix suggested for it. See `ensign_scan/secrets.py` for what the tiers mean.
+
+The first time you run Ensign it writes a starter `config.toml` with all of these documented as comments. `config.example.toml` in the repo has the same content.
 
 ## Querying the Database Directly
 
@@ -126,7 +195,7 @@ See what's been classified (permission denied on a path that looks like a secret
 sqlite3 ~/.local/share/ensign/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='classified';"
 ```
 
-The list of paths/filenames/extensions used to make that call isn't arbitrary — see `docs/Classified_Paths_Research.md` for the sourcing behind each entry, and `ensign/secrets.py` for the confidence tiers and how the two different call sites use them.
+The list of paths/filenames/extensions used to make that call isn't arbitrary — see `docs/Classified_Paths_Research.md` for the sourcing behind each entry, and `ensign_scan/secrets.py` for the confidence tiers and how the two different call sites use them.
 
 See infected files and what triggered them:
 ```
@@ -159,4 +228,4 @@ That way there's no endless cascade of walking a single directory. Symlinked dir
 
 
 ### Last Note
-This readme will be updated when needed. IE. FAQ questions that keep getting asked, or something needs further explanation.
+This readme will be updated when needed. IE. FAQ questions that keep getting asked, or something needs further explanation. 
