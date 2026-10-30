@@ -8,6 +8,8 @@ I decided to make a logic brain for this madness, Ensign. The idea was for Ensig
 
 The idea was to be as paranoid as possible when designing this. That being said, it is completely possible that someone one else will notice something I missed and that in itself, is okay.
 
+**Status: alpha.** Ensign has so far been tested only by its author, on Arch Linux. Expect rough edges, and read its reports as advice, not verdicts.
+
 ## Disclaimer
 Ensign is an independent project. It is not affiliated with Ensign InfoSecurity, The Ensign Group, the U.S. Navy or the U.S. Government.
 
@@ -17,7 +19,38 @@ Parts of this repo were written with assistance of Claude. The architecture and 
 
 Ensign is released under the MIT License. See the `LICENSE` file.
 
+## Installation
+
+Ensign needs Python 3.11 or newer and ClamAV with its daemon (`clamd`) running.
+
+**With pipx (recommended on Arch):**
+```
+sudo pacman -S --needed python-pipx clamav
+pipx install ensign-scan
+```
+Arch marks the system Python as externally managed, so a plain `pip install` outside a virtual environment is refused. pipx installs Ensign into its own isolated environment and puts the `ensign-scan` command on your `PATH`. Update it later with `pipx upgrade ensign-scan`.
+
+**With pip, in a virtual environment (any distro):**
+```
+python3 -m venv ~/.venvs/ensign
+~/.venvs/ensign/bin/pip install ensign-scan
+~/.venvs/ensign/bin/ensign-scan --help
+```
+
+**From a git clone** (to read or change the code, or to run the latest commit before a release):
+```
+git clone https://github.com/WolfdeerNerd/ensign-scan.git
+cd ensign-scan
+sudo pacman -S --needed python-sqlalchemy python-rich clamav
+python3 main.py --help
+```
+`main.py` runs straight from the clone with no install step. The Requirements section below has the pip alternative. If you want the `ensign-scan` command from a clone, install it into a virtual environment with `pip install .` from the repo folder.
+
+Either way, read the first-run note under Usage before your first scan.
+
 ## Requirements
+
+This section is for running Ensign from a source checkout; an installed copy (above) pulls in its own dependencies.
 
 To get started with Ensign you need Python 3.11 or newer, SQLAlchemy, and rich. Ensign requires Python 3.11+ specifically for the `tomllib` module, used for config parsing.
 
@@ -40,6 +73,34 @@ Ensign's core scanning, hashing, and database tracking are plain Python + SQLAlc
 The one exception is `--verify-pacman`, which cross-checks files against `pacman -Qkk`'s own integrity data — that's an Arch-only feature by nature (there's no equivalent on Debian/Fedora/etc.). If `pacman` isn't found on the system, Ensign detects that and skips the check cleanly rather than erroring; every other command works the same regardless of distro.
 
 `setfacl` (used for the permission-fix suggestions) and `notify-send` (desktop notifications) aren't Arch-specific either — both are standard Linux tooling available on most major distros, just under different package names (e.g. Debian/Ubuntu: `acl` and `libnotify-bin`).
+
+## What Ensign Touches, and What It Can't See
+
+### Network
+
+Ensign makes no network connections. It talks to clamd over a local Unix socket (`clamd_socket` in your config) and nothing else. Virus-signature updates come from ClamAV's own `freshclam`, a separate program that you run or schedule yourself. It is the only networked part of the setup, and it is not part of Ensign.
+
+### Programs Ensign runs
+
+| Program | When | What for |
+|---|---|---|
+| `clamscan` | Only for a file clamd rejects as over its size limit | Scans that one file with the command-line scanner, which has no such limit |
+| `pacman -Qkk` | Only with `--verify-pacman` | Read-only integrity check of installed files |
+| `pacman -Qo <file>` | When listing infected files | Read-only lookup of which package owns a flagged file |
+| `notify-send` | At the end of a run, if installed | Desktop notification |
+| `gdbus` | After an infected-files alert | Closes that notification after its timeout |
+| `pgrep` | When sending an infected-files alert | Checks whether a Steam game is running (see Alerts) |
+
+Ensign never changes permissions. It prints `setfacl` commands for you to review and run yourself. It also never deletes, quarantines or edits a file: it reports.
+
+### What Ensign can't see
+
+- **Files clamd can't read.** clamd runs as the `clamav` user, so a file that user can't open is not scanned. It is recorded as `error`, or as `classified` when its path looks like a secrets store (see Permissions Setup).
+- **Directories Ensign can't enter.** They are skipped, and each run ends with an "UNREADABLE DIRECTORIES" section listing them. The list is rebuilt every run, so nothing about it is stored in the database.
+- **Symlinked directories.** They are never walked into (see the Proton note below). Symlinks to individual files are followed and scanned.
+- **Excluded paths, and unchanged snapshot subtrees.** Whatever you list under `excludes` is not scanned, and subtrees under `snapshot_roots` are skipped while their modification time is unchanged.
+- **Files that vanish mid-scan.** Temp files and browser caches come and go; they are counted as skipped, not as errors.
+- **Anything ClamAV has no signature for.** Ensign is a file scanner built on ClamAV. It doesn't look at memory or running processes, and a clean result means "no known signature matched", not "safe".
 
 ## Permissions Setup
 
@@ -64,6 +125,8 @@ Worker count is either set explicitly (`max_workers` in config) or resolved auto
 If clamd can't be reached to ask, Ensign falls back to a safe default of 5 workers rather than guessing wildly. And no matter how constrained the machine — single core, a very low `MaxThreads` on clamd — the worker count can never drop below 1. **Ensign will always run, even on modest hardware;** it just scans one file at a time in that case rather than failing or requiring a separate no-threading mode.
 
 ## Usage
+
+The examples below are written as `python3 main.py` (running from a checkout). If you installed Ensign, use `ensign-scan` instead: `ensign-scan --help`, `ensign-scan ~/Downloads`, and so on.
 
 **First run: don't use `sudo`.** Run Ensign under your own username the first time. Ensign creates its config, database and log files on first run, and whoever runs it owns them. If the first run is as root, those files end up owned by root and your username can't use them afterwards. If that happens, delete the root-created files (the database in `~/.local/share/ensign/` and the config in `~/.config/ensign/`) and run Ensign once under your own username to recreate them.
 
@@ -91,6 +154,7 @@ While it runs, the bottom line of the terminal shows live progress: files done o
 | `python3 main.py --no-scan` | Hash and record files, skip ClamAV entirely |
 | `python3 main.py --skip-rescans` | Skip the infected/error/stale rescan passes at the end |
 | `python3 main.py --config PATH` | Use an alternate config file (default: `~/.config/ensign/config.toml`) |
+| `ENSIGN_CONFIG=PATH python3 main.py` | The same as `--config`, set through an environment variable. If both are given, `--config` wins |
 
 ### Standalone maintenance commands
 
