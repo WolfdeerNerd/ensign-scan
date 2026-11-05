@@ -481,6 +481,26 @@ assert len(secrets._HIGH_DIRS) == _before, "re-loading the same custom_secrets m
 
 print("secrets.py load_custom() test passed ✓")
 
+# Malformed entries: the warning says WHERE the entry is, never what's in it.
+# These patterns describe where secrets live, and warnings can end up in the
+# systemd journal, so the pattern text itself must never be printed.
+_cfg_bad = Config(custom_secrets={
+    "high_prefixes": [["okprefix_", "okparent"], ["LEAKMARK_onlyone"]],   # #2: not a pair
+    "medium_prefixes": [["", "LEAKMARK_parent"]],                          # #1: empty first element
+    "high_scoped_filenames": [["LEAKMARK_name", 42]],                       # #1: second not a string
+})
+_buf_bad = io.StringIO()
+with contextlib.redirect_stdout(_buf_bad):
+    secrets.load_custom(_cfg_bad)
+_bad_out = _buf_bad.getvalue()
+assert "LEAKMARK" not in _bad_out, f"a custom_secrets pattern was printed: {_bad_out}"
+assert "custom_secrets.high_prefixes entry #2 is malformed (expected a two-element list)" in _bad_out, _bad_out
+assert "custom_secrets.medium_prefixes entry #1 is malformed (first element must be a non-empty string)" in _bad_out, _bad_out
+assert "custom_secrets.high_scoped_filenames entry #1 is malformed (second element must be a string)" in _bad_out, _bad_out
+assert _bad_out.count("is malformed") == 3, "the valid entry must not warn"
+assert secrets.classify("/home/user/okparent/okprefix_x") == Confidence.HIGH, "valid entries next to bad ones still load"
+print("secrets.py malformed-entry warnings test passed ✓")
+
 
 # --- logsetup.py: per-run files, repeat collapsing, pruning ------------
 import logging as _logging

@@ -209,24 +209,30 @@ _CUSTOM_SECRETS_KNOWN_KEYS = {
 }
 
 
-def _as_pair(entry, allow_empty_second: bool) -> tuple[str, str | None] | None:
+def _as_pair(entry, allow_empty_second: bool, key: str, index: int) -> tuple[str, str | None] | None:
     """Validate a [value, parent] pair from TOML. `parent` of "" is
     treated as None (no required parent) when allow_empty_second is True
     -- scoped filenames always need a real parent, prefixes/extensions
-    don't have to. Returns None (and warns) on anything malformed."""
+    don't have to. Returns None (and warns) on anything malformed.
+
+    The warning names WHERE the bad entry is (`key`, 1-based `index`),
+    never what it contains. These entries describe where the user keeps
+    secrets (e.g. ["mywallet_", "wallets"]); printing them would put that
+    map into the terminal, and into the systemd journal when Ensign runs
+    as a service, where other users in groups like wheel or adm can read it.
+    """
+    where = f"custom_secrets.{key} entry #{index}"
     if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
-        print(f"[ensign] Warning: malformed custom_secrets entry {entry!r} ignored "
-              f"(expected a two-element list)")
+        print(f"[ensign] Warning: {where} is malformed (expected a two-element list) -- ignored")
         return None
     value, parent = entry
     if not isinstance(value, str) or not value:
-        print(f"[ensign] Warning: malformed custom_secrets entry {entry!r} ignored")
+        print(f"[ensign] Warning: {where} is malformed (first element must be a non-empty string) -- ignored")
         return None
     if parent == "" and allow_empty_second:
         parent = None
     elif not isinstance(parent, str):
-        print(f"[ensign] Warning: malformed custom_secrets entry {entry!r} ignored "
-              f"(second element must be a string)")
+        print(f"[ensign] Warning: {where} is malformed (second element must be a string) -- ignored")
         return None
     return (value, parent)
 
@@ -259,26 +265,26 @@ def load_custom(config) -> None:
         if isinstance(value, str) and value and value not in _HIGH_EXTENSIONS:
             _HIGH_EXTENSIONS.append(value.lower())
 
-    for entry in raw.get("high_scoped_filenames", []):
-        pair = _as_pair(entry, allow_empty_second=False)
+    for index, entry in enumerate(raw.get("high_scoped_filenames", []), start=1):
+        pair = _as_pair(entry, allow_empty_second=False, key="high_scoped_filenames", index=index)
         if pair:
             pair = (pair[0].lower(), pair[1].lower())
             if pair not in _HIGH_SCOPED_FILENAMES:
                 _HIGH_SCOPED_FILENAMES.append(pair)
-    for entry in raw.get("high_prefixes", []):
-        pair = _as_pair(entry, allow_empty_second=False)
+    for index, entry in enumerate(raw.get("high_prefixes", []), start=1):
+        pair = _as_pair(entry, allow_empty_second=False, key="high_prefixes", index=index)
         if pair:
             pair = (pair[0].lower(), pair[1].lower())
             if pair not in _HIGH_PREFIXES:
                 _HIGH_PREFIXES.append(pair)
-    for entry in raw.get("medium_prefixes", []):
-        pair = _as_pair(entry, allow_empty_second=True)
+    for index, entry in enumerate(raw.get("medium_prefixes", []), start=1):
+        pair = _as_pair(entry, allow_empty_second=True, key="medium_prefixes", index=index)
         if pair:
             pair = (pair[0].lower(), pair[1].lower() if pair[1] else None)
             if pair not in _MEDIUM_PREFIXES:
                 _MEDIUM_PREFIXES.append(pair)
-    for entry in raw.get("medium_extensions", []):
-        pair = _as_pair(entry, allow_empty_second=True)
+    for index, entry in enumerate(raw.get("medium_extensions", []), start=1):
+        pair = _as_pair(entry, allow_empty_second=True, key="medium_extensions", index=index)
         if pair:
             pair = (pair[0].lower(), pair[1].lower() if pair[1] else None)
             if pair not in _MEDIUM_EXTENSIONS:
