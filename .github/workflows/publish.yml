@@ -4,6 +4,12 @@ on:
   release:
     types: [published]
 
+# Least privilege for every job's GITHUB_TOKEN: read the repo, nothing else.
+# A job with its own `permissions:` block gets ONLY what that block lists
+# (it replaces this, it doesn't add to it) -- see the publish job below.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write
+      id-token: write   # trusted publishing: lets PyPI verify this run. No checkout here, so no contents: read
     steps:
       - uses: actions/download-artifact@v4
         with:
