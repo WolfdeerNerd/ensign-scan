@@ -16,11 +16,13 @@ if sys.version_info < (3, 11):
 
 import argparse
 import time
+from builtins import print as builtin_print
+from importlib.metadata import PackageNotFoundError, version as dist_version
 
 from rich import print
 
 from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
-from ensign_scan import explanations, logsetup, notify, pacman, secrets
+from ensign_scan import diagnostics, explanations, logsetup, notify, pacman, secrets
 from ensign_scan.runlock import AlreadyRunning, RunLock
 from ensign_scan.reports import error_summary, list_infected, pacman_report, scan_summary, suggest_fixes, unreadable_report
 from ensign_scan.scanner import Scanner
@@ -28,8 +30,24 @@ from ensign_scan.scanner import Scanner
 EXIT_BUSY = 75  # sysexits EX_TEMPFAIL: another Ensign holds the lock; try again later
 
 
+def ensign_version() -> str:
+    """The installed ensign-scan version, read from package metadata.
+
+    pyproject.toml stays the single source of truth: installing the package
+    records its version, and this reads it back. Running straight from a
+    source checkout that was never installed has no metadata, so say so
+    instead of guessing.
+    """
+    try:
+        return dist_version("ensign-scan")
+    except PackageNotFoundError:
+        return "unknown (not installed; running from source)"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Hash and ClamAV-scan the system.")
+    parser.add_argument("--version", action="version",
+                        version=f"ensign-scan {ensign_version()}")
     parser.add_argument("targets", nargs="*",
                         help="Directories to scan (default: scan_targets from config)")
     parser.add_argument("--config", metavar="PATH",
@@ -44,6 +62,9 @@ def parse_args() -> argparse.Namespace:
                         help="Retry only files currently marked ERROR, then exit (no full scan)")
     parser.add_argument("--verify-pacman", action="store_true",
                         help="Check installed files against pacman's records, then exit (Arch only, can be slow)")
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="Print versions, settings and counts for a bug report, then exit. "
+                             "Contains no paths, usernames, hostnames or file names.")
     parser.add_argument("--suggest-fixes", action="store_true",
                         help="Print suggested setfacl fixes for current errors, then exit (no full scan). "
                              "Scoped to any targets given.")
@@ -67,6 +88,11 @@ def greet(config: Config) -> None:
 
 def main() -> int:
     args = parse_args()
+    # Before anything that writes (starter config, logs, database) or prints
+    # personal details (the greeting): diagnostics must be read-only and clean.
+    if args.diagnostics:
+        builtin_print(diagnostics.report(args.config))
+        return 0
     if not args.config:
         ensure_default_config()
     config = Config.load(args.config)

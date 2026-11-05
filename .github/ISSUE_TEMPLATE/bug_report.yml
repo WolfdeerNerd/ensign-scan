@@ -1,0 +1,65 @@
+name: Bug report
+description: Ensign crashed or behaved incorrectly.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy first.** Ensign output can contain file paths, your username,
+        hostname, and the locations of credential stores. Replace them with
+        placeholders such as `/home/USER/...` and `HOST` before pasting.
+        **Never attach scanned files or your Ensign database.**
+
+        Wrong detection results go in the "Detection result" form instead.
+        Security problems go through private reporting (see SECURITY.md).
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: >-
+        Paste the output of `ensign-scan --diagnostics`. It contains versions,
+        settings and counts only: no paths, usernames, hostnames or file names.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Sanitized output or traceback
+      description: Redact paths, usernames, hostnames, and secrets-store locations.
+      render: text
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed usernames, hostnames, and personal file paths.
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md).
+          required: true

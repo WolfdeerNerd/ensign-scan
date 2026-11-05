@@ -1,0 +1,96 @@
+name: Detection result
+description: Ensign flagged a clean file, or missed a malicious one.
+title: "[Detection]: "
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Privacy first.** Ensign output can contain file paths, your username,
+        hostname, and the locations of credential stores. Replace them with
+        placeholders such as `/home/USER/...` and `HOST` before pasting.
+
+        **Never attach the file itself**, and never your Ensign database.
+        For a missed malicious file, uploading it here would spread malware.
+        Share its SHA-256 hash instead.
+
+        **Is it ClamAV's signature?** If the threat name does not end in
+        `.UNOFFICIAL`, it comes from ClamAV's official database, and only
+        ClamAV can fix it. Please report it to ClamAV first (links are on the
+        "New issue" page). You can still file here so it can be noted.
+
+  - type: dropdown
+    id: result-kind
+    attributes:
+      label: What happened?
+      options:
+        - False positive - Ensign flagged a file that is clean
+        - False negative - Ensign missed a file that is malicious
+    validations:
+      required: true
+
+  - type: dropdown
+    id: result-source
+    attributes:
+      label: Which check produced the result?
+      options:
+        - ClamAV scan (threat name)
+        - Package verification (--verify-pacman)
+        - Secrets classification
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: threat-name
+    attributes:
+      label: Threat name or result text
+      description: Copy it exactly as Ensign printed it. Leave empty for a false negative.
+      placeholder: Html.Phishing.SVGDynamicFunction
+
+  - type: textarea
+    id: file-description
+    attributes:
+      label: What is the file?
+      description: >-
+        Describe it without revealing private paths, such as its type, where it came
+        from, and why you believe it is clean or malicious.
+      placeholder: Minified JavaScript from the Vue npm package, installed by Vite.
+    validations:
+      required: true
+
+  - type: input
+    id: sha256
+    attributes:
+      label: SHA-256 of the file (optional)
+      description: Output of `sha256sum <file>`. Only the hash, not the path.
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: >-
+        Paste the output of `ensign-scan --diagnostics`. It contains versions,
+        settings and counts only: no paths, usernames, hostnames or file names.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Sanitized Ensign output
+      description: The relevant lines only, with personal details redacted.
+      render: text
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed usernames, hostnames, and personal file paths.
+          required: true
+        - label: I did not attach the file or my Ensign database.
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md).
+          required: true

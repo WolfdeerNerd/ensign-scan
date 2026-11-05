@@ -689,18 +689,20 @@ print("vanished-file logging test passed ✓")
 assert _sc._process_all([_pd2 / "ok.txt", _pd2 / "bad.txt", _pd2 / "gone.txt"], True, "Scan Progress") == [_h, _sc.process_file(_pd2 / "bad.txt"), None]
 print("progress line test passed ✓")
 
-# narrow terminal: the bar shrinks and the worker count goes, but the counts stay
+# narrow terminal: the counts and worker number go together, the progress stays
 _bufn = _io.StringIO()
 _conn = _Console(file=_bufn, force_terminal=False, width=60)
 with RunProgress("Scan Progress", 10, workers=8, console=_conn) as _barn:
     for _st in ["infected", "error"] + ["clean"] * 8:
         _barn.advance(_st)
 _ln = [l for l in _bufn.getvalue().splitlines() if "Scan Progress" in l][0]
-assert len(_ln) <= 60 and "! : 1" in _ln and "✗ : 1" in _ln and "workers" not in _ln, _ln
+assert len(_ln) <= 60, _ln
+assert "10 of 10 files" in _ln and "100%" in _ln and "took" in _ln, _ln
+assert "infected" not in _ln and "errors" not in _ln and "workers" not in _ln, _ln
 print("progress narrow-width test passed ✓")
 
-# the wording follows the terminal width. Rendered mid-run (not started, so
-# nothing is drawn until we ask): ETA + words + workers -> drop workers -> symbols -> drop ETA
+# the line follows the terminal width. Rendered mid-run (not started, so
+# nothing is drawn until we ask): full line -> ETA only -> bar alone
 def _midrun_line(width):
     b = _io.StringIO()
     c = _Console(file=b, force_terminal=False, width=width)
@@ -711,11 +713,10 @@ def _midrun_line(width):
     line = b.getvalue().rstrip("\n")
     assert len(line) <= width, (width, len(line), line)
     return line
-_w1, _w2, _w3, _w4 = _midrun_line(110), _midrun_line(90), _midrun_line(72), _midrun_line(58)
-assert "ETA -- | infected : 1 | errors : 1 | workers : 8" in _w1, _w1
-assert "ETA -- | infected : 1 | errors : 1" in _w2 and "workers" not in _w2, _w2
-assert "ETA -- | ! : 1 | ✗ : 1" in _w3 and "infected" not in _w3, _w3
-assert "! : 1 | ✗ : 1" in _w4 and "ETA" not in _w4, _w4
+_w1, _w2, _w3 = _midrun_line(110), _midrun_line(80), _midrun_line(50)
+assert "33% | ETA -- | infected : 1 | errors : 1 | workers : 8" in _w1, _w1
+assert _w2.endswith("33% | ETA --"), _w2                 # counts and workers gone together
+assert _w3.endswith("33%") and "|" not in _w3, _w3       # bar alone, no dangling separator
 print("progress width-tiers test passed ✓")
 
 # ETA: driven by a fake clock, based on the last minute's pace, honest when it can't know

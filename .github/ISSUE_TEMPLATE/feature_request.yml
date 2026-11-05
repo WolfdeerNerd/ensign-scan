@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest an idea or improvement for Ensign.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ensign has three fixed design rules: everything stays **local**, it is
+        **advisory-only** (it prints recommendations and never changes your
+        system), and it prefers **precision over coverage** (fewer false
+        positives over catching more). Ideas that break these rules will be declined.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation, not the solution yet.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or tools, and why they fall short.
+
+  - type: checkboxes
+    id: design-rules
+    attributes:
+      label: Design rules
+      options:
+        - label: This idea keeps all data on the machine (no network lookups).
+          required: true
+        - label: This idea does not require Ensign to change system state on its own.
+          required: true

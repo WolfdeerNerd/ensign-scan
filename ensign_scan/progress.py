@@ -2,7 +2,14 @@
 
     ✓ notes.txt ................ 3f2a9c1e5b7d4e8a… clean
     ✓ photo.jpg ................ 91c0d4ee7a31b2f0… clean
-    Scan Progress: 1,234 of 5,678 files [########------------]  21%  ! 2  ✗ 3  · 8 workers
+    Scan Progress: 1,234 of 5,678 files [########------------]  21% | ETA 14m | infected : 2 | errors : 3 | workers : 8
+
+In a narrow window the counts go and the line keeps to the progress itself:
+
+    Scan Progress: 1,234 of 5,678 files [########------------]  21% | ETA 14m
+
+Nothing is lost by hiding the counts there: infected files and errors still
+print in their own colors in the per-file lines above, and in the summary.
 
 The bar is plain ASCII, in the style of pacman's, and is drawn here rather
 than by a ready-made widget so its look and its width are ours to control.
@@ -115,17 +122,17 @@ class RunProgress:
         rate = (done - done0) / (now - t0)
         return f"ETA {_fmt_duration((self._total - done) / rate)}"
 
-    def _detail(self, infected: int, errors: int, eta: str | None, *, words: bool, workers: bool) -> Text:
-        """What follows the bar, in the colors of the per-file lines (red
-        infected, yellow error). `words` picks the label text; the symbols
-        are the same ones the per-file lines use."""
+    def _detail(self, infected: int, errors: int, eta: str | None, *, counts: bool) -> Text:
+        """What follows the bar: the ETA, then (if `counts`) the infected and
+        error counts in the colors of the per-file lines (red infected,
+        yellow error) and the worker count. Empty if there is nothing to show."""
         parts = [Text(eta)] if eta else []
-        parts += [
-            Text.assemble(("infected" if words else "!", "red"), f" : {infected:,}"),
-            Text.assemble(("errors" if words else "✗", "yellow"), f" : {errors:,}"),
-        ]
-        if workers:
-            parts.append(Text(f"workers : {self._workers}"))
+        if counts:
+            parts += [
+                Text.assemble(("infected", "red"), f" : {infected:,}"),
+                Text.assemble(("errors", "yellow"), f" : {errors:,}"),
+                Text(f"workers : {self._workers}"),
+            ]
         return _SEP.join(parts)
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
@@ -138,18 +145,21 @@ class RunProgress:
 
         head = f"{self._label}: {done:,} of {self._total:,} files "
         percent = f" {int(fraction * 100):>3}%"
-        bar_end = Text.assemble(percent, _SEP)
+
+        def tail(d: Text) -> Text:
+            # The separator only when something follows it: no dangling " | ".
+            return Text.assemble(percent, _SEP, d) if d.plain else Text(percent)
 
         def room_for(d: Text) -> int:
-            return options.max_width - len(head) - len(bar_end.plain) - len(d.plain) - 2  # 2 = the brackets
+            return options.max_width - len(head) - len(tail(d).plain) - 2  # 2 = the brackets
 
-        # Use the richest form that still leaves the bar _BAR_MIN room. What
-        # goes first is what matters least: the worker count (it never
-        # changes), then the full words, and only on a very narrow terminal
-        # the ETA. The infected/error counts are the last thing to go.
-        for eta_text, words, workers in ((eta, True, True), (eta, True, False),
-                                         (eta, False, False), (None, False, False)):
-            detail = self._detail(infected, errors, eta_text, words=words, workers=workers)
+        # Use the richest form that still leaves the bar _BAR_MIN room. When the
+        # full line doesn't fit, the counts and worker number go all at once and
+        # the line keeps to the progress itself; only on a very narrow terminal
+        # does the ETA go too. Dropping them one at a time made the line jump
+        # between several cluttered forms while the window was being resized.
+        for eta_text, counts in ((eta, True), (eta, False), (None, False)):
+            detail = self._detail(infected, errors, eta_text, counts=counts)
             if room_for(detail) >= _BAR_MIN:
                 break
         width = max(5, min(_BAR_MAX, room_for(detail)))
@@ -161,8 +171,7 @@ class RunProgress:
         line.append("#" * filled, style="green")
         line.append("-" * (width - filled), style="dim")
         line.append("]")
-        line.append_text(bar_end)
-        line.append_text(detail)
+        line.append_text(tail(detail))
         yield line
 
     def __enter__(self) -> "RunProgress":

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/WolfdeerNerd/ensign-scan/security/advisories/new
+    about: Never report security bugs in public issues. See SECURITY.md.
+  - name: ClamAV false positive (ClamAV's own signature)
+    url: https://www.clamav.net/reports/fp
+    about: Ensign flagged a clean file and the threat name comes from ClamAV's official signatures. Report it to ClamAV directly.
+  - name: ClamAV missed malware
+    url: https://www.clamav.net/reports/malware
+    about: ClamAV reported a known-malicious file as clean. Report it to ClamAV directly.

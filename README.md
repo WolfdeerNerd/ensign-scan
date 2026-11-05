@@ -143,13 +143,14 @@ python3 path/to/main.py
 
 This scans everything listed in your config's `scan_targets`, runs the infected/error/stale rescan passes, prints a summary and error breakdown, and sends a desktop notification when it's done (if one is available).
 
-While it runs, the bottom line of the terminal shows live progress: files done out of files to process, a bar and percentage, an estimated time remaining (ETA), how many infected files and errors have turned up so far, and the worker count. Each file's result scrolls past above it. The ETA follows the pace of roughly the last minute, so it tracks the current speed, and it shows `--` for the first few seconds or whenever nothing is finishing. When the scan is done, the ETA is replaced by the total time it took. On a narrow terminal the line drops detail instead of wrapping: the worker count goes first, then the full words shrink to symbols, and only on a very narrow one the ETA. When the output isn't a terminal (a scheduled service, or piped to a file), the line is printed once at the end instead of being redrawn.
+While it runs, the bottom line of the terminal shows live progress: files done out of files to process, a bar and percentage, an estimated time remaining (ETA), how many infected files and errors have turned up so far, and the worker count. Each file's result scrolls past above it. The ETA follows the pace of roughly the last minute, so it tracks the current speed, and it shows `--` for the first few seconds or whenever nothing is finishing. When the scan is done, the ETA is replaced by the total time it took. On a narrow terminal the line keeps to the progress itself instead of wrapping: the infected and error counts and the worker count drop out together, leaving the bar, percentage and ETA, and only on a very narrow one does the ETA go too. Nothing is lost by that: infected files and errors still show in color in the per-file lines above it, and in the summary at the end. When the output isn't a terminal (a scheduled service, or piped to a file), the line is printed once at the end instead of being redrawn.
 
 ### Targeting and behavior flags
 
 | Command | What it does |
 |---|---|
 | `python3 main.py --help` | Show all available flags and exit |
+| `python3 main.py --version` | Show the installed version and exit |
 | `python3 main.py ~/Downloads` | Scan just that one tree instead of everything in config |
 | `python3 main.py --no-scan` | Hash and record files, skip ClamAV entirely |
 | `python3 main.py --skip-rescans` | Skip the infected/error/stale rescan passes at the end |
@@ -166,6 +167,7 @@ These run one job and exit — no full scan.
 | `python3 main.py --rescan-errors` | Retry only files currently marked `ERROR` |
 | `python3 main.py --verify-pacman` | Cross-check installed files against pacman's own checksums, flag mismatches (Arch only, can be slow) |
 | `python3 main.py --suggest-fixes` | Print setfacl commands for current permission errors, optionally scoped to given targets |
+| `python3 main.py --diagnostics` | Print versions, settings and counts for a bug report. Contains no paths, usernames, hostnames or file names, and writes nothing |
 
 ### Only one run at a time
 
@@ -173,7 +175,7 @@ Before it scans, purges or retries errors, Ensign takes a lock: a small file cal
 
 - **The lock frees itself.** It belongs to the running process, so it is released when that process ends, even after a crash or `kill -9`. There is never a stale lock to clean up.
 - **Leave the file in place.** Deleting `ensign.lock` while a run is using it can let a second run start.
-- **Read-only commands skip it.** `--verify-pacman` and `--suggest-fixes` only read the database, so they can run while a scan is going.
+- **Read-only commands skip it.** `--verify-pacman`, `--suggest-fixes` and `--diagnostics` only read the database, so they can run while a scan is going.
 
 ### If a suggested fix doesn't seem to work
 
@@ -292,6 +294,18 @@ Hence why for this build, I've opted to set followlinks to False in the walk fun
 
 That way there's no endless cascade of walking a single directory. Symlinked directories are skipped entirely now — the walk sees them but never descends in. Individual files that happen to be symlinks (like a shortcut to a document) are still followed and scanned through to their real target, same as before — it's only symlinked directories that stopped getting wandered into.
 
+
+## Reporting Bugs and Security Issues
+
+**Security vulnerabilities:** please don't open a public issue. Report them privately through the repository's **Security** tab (Advisories → Report a vulnerability). `SECURITY.md` explains what counts as a security bug for Ensign and what to expect after you report one.
+
+**Bugs, false positives and feature ideas:** open an issue and pick the matching form. The bug and detection forms ask for the output of:
+```
+ensign-scan --diagnostics
+```
+It reports versions, settings and counts only: no paths, usernames, hostnames or file names. Anything else you paste (output, tracebacks) can contain those, so please redact them first, and never attach a scanned file or your Ensign database.
+
+If a flagged file's threat name doesn't end in `.UNOFFICIAL`, the signature is ClamAV's own, and only ClamAV can fix it. The issue page links to their report forms.
 
 ### Last Note
 This readme will be updated when needed. IE. FAQ questions that keep getting asked, or something needs further explanation. 
