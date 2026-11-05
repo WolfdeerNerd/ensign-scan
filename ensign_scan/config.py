@@ -140,7 +140,20 @@ class Config:
             data = tomllib.load(f)
 
         # Per-machine overrides: [hosts.<hostname>] beats top level.
-        host_overrides = data.pop("hosts", {}).get(HOSTNAME, {})
+        # TOML allows any value type here, so check before trusting it.
+        # A malformed section is an error, not a warning: skipping it would
+        # run without this machine's excludes/scan_targets, and you'd think
+        # the scan was doing what the file says.
+        hosts = data.pop("hosts", {})
+        if not isinstance(hosts, dict):
+            raise ValueError(
+                f"{cfg_path}: 'hosts' must be a table of [hosts.<hostname>] "
+                f"sections, got {type(hosts).__name__}")
+        host_overrides = hosts.get(HOSTNAME, {})
+        if not isinstance(host_overrides, dict):
+            raise ValueError(
+                f"{cfg_path}: [hosts.{HOSTNAME}] must be a table of settings, "
+                f"got {type(host_overrides).__name__}")
         merged = {**data, **host_overrides}
         return cls._from_dict(merged, source=str(cfg_path))
 

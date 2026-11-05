@@ -61,6 +61,23 @@ try:
 except FileNotFoundError:
     pass
 
+# 3b. Malformed hosts values -> clear ValueError, not a crash or a silent skip
+for bad, expect in (
+    ('hosts = "oops"', "'hosts' must be a table"),
+    ('hosts = [1, 2]', "'hosts' must be a table"),
+    (f'[hosts]\n"{HOSTNAME}" = 5', f"[hosts.{HOSTNAME}] must be a table"),
+):
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write(bad + "\n")
+    try:
+        Config.load(f.name)
+        raise AssertionError(f"should have raised ValueError for: {bad!r}")
+    except ValueError as e:
+        assert expect in str(e), (bad, str(e))
+    finally:
+        os.unlink(f.name)
+print("malformed hosts test passed ✓")
+
 # 4. Tilde expansion
 assert _expand("~") == HOME
 assert _expand("~/x") == HOME / "x"
