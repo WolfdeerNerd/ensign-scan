@@ -298,7 +298,10 @@ class ClamdClient:
         response = b"".join(chunks).rstrip(b"\0").decode(errors="replace").strip()
         if not response:
             return ScanOutcome(ScanStatus.ERROR, f"{label}: no reply from clamd ERROR")
-        return _outcome(_FD_LABEL_RE.sub(f"{label}:", response, count=1))
+        # A function, not a replacement string: re.sub reads backslashes in
+        # a replacement string as escapes, so a file named "a\1b" would
+        # raise and stop the whole scan.
+        return _outcome(_FD_LABEL_RE.sub(lambda _m: f"{label}:", response, count=1))
 
 
 def _outcome(response: str) -> ScanOutcome:

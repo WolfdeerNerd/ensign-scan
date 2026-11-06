@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy import Column, DateTime, Integer, String, Text, and_
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -30,6 +30,20 @@ class ScanStatus(str, Enum):
     # ERROR so it naturally drops out of error_summary() and
     # suggest_fixes() without either needing to special-case it.
     CLASSIFIED = "classified"
+
+
+def path_under(column, directory: str):
+    """SQL condition: `column` is a path inside `directory` (at any depth).
+
+    Not LIKE: in LIKE, "_" and "%" are wildcards and SQLite matches ASCII
+    case-insensitively, so "~/my_docs/%" also matched "~/myXdocs" and
+    "~/My_Docs". Instead this is a range on the text itself. Every path
+    inside "/a/b" starts with "/a/b/", and sorts at or after "/a/b/" but
+    before "/a/b0" -- "0" is the character right after "/". Exact, case-
+    sensitive, and able to use the column's index.
+    """
+    base = directory.rstrip("/") + "/"
+    return and_(column >= base, column < base[:-1] + "0")
 
 
 class FileRecord(Base):

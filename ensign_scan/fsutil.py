@@ -11,6 +11,8 @@ import os
 import stat as statmod
 from pathlib import Path
 
+from rich.markup import escape
+
 log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 1024 * 1024  # 1 MiB reads; 8 KiB was syscall-heavy on big files
@@ -73,6 +75,19 @@ def is_scannable(st: os.stat_result) -> bool:
     S_ISSOCK/S_ISFIFO/S_ISBLK/S_ISCHR checks.
     """
     return statmod.S_ISREG(st.st_mode) and st.st_size > 0
+
+
+def shown(text: object) -> str:
+    """Make a string from the filesystem safe to print through rich.
+
+    Paths and file names are chosen by whoever created the file, and rich
+    reads "[...]" in printed text as markup: a directory named "a[" holding
+    one named "b]" gives a path containing "[/b]", which makes rich raise
+    and stop the report, and a file named "x[black on black]" hides the
+    rest of its own line -- including the verdict. Newlines are shown as
+    "\\n" so a name can't start a fake line of output.
+    """
+    return escape(str(text).replace("\r", "\\r").replace("\n", "\\n"))
 
 
 class NotScannable(OSError):

@@ -11,6 +11,7 @@ send() can instead close the notification itself after a delay, over D-Bus.
 """
 from __future__ import annotations
 
+import html
 import json
 import os
 import shutil
@@ -23,6 +24,20 @@ _MAX_NAMES_SHOWN = 3
 
 def available() -> bool:
     return shutil.which("notify-send") is not None
+
+
+def _body_text(name: str) -> str:
+    """A file name made safe for a notification body.
+
+    Notification servers render a small HTML subset in the body -- bold,
+    italics, links (the freedesktop notification spec's "body-markup") --
+    so a file named '<a href=...>' would put a link written by whoever
+    named the file into Ensign's own infected-file alert. Escaping makes it
+    plain text. Line breaks are shown as a visible symbol so a name can't
+    add fake lines to the alert.
+    """
+    flat = name.replace("\r", "␍").replace("\n", "␤")
+    return html.escape(flat, quote=False)
 
 
 def build_message(summary: dict, infected: list[dict]) -> tuple[str, str, str]:
@@ -51,7 +66,7 @@ def build_message(summary: dict, infected: list[dict]) -> tuple[str, str, str]:
         f"Errors: {error_count}"
     ]
     if infected:
-        names = [i["filepath"].split("/")[-1] for i in infected[:_MAX_NAMES_SHOWN]]
+        names = [_body_text(i["filepath"].split("/")[-1]) for i in infected[:_MAX_NAMES_SHOWN]]
         line = "Infected: " + ", ".join(names)
         if len(infected) > _MAX_NAMES_SHOWN:
             line += f" (+{len(infected) - _MAX_NAMES_SHOWN} more)"
