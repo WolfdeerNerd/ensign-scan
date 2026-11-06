@@ -3,6 +3,10 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  # Manual fallback if a release event is missed. Pick the release TAG
+  # (e.g. v0.3.1) as the ref, not a branch: the pypi environment only
+  # deploys from v* tags, so a branch run stops before publishing.
+  workflow_dispatch:
 
 # Least privilege for every job's GITHUB_TOKEN: read the repo, nothing else.
 # A job with its own `permissions:` block gets ONLY what that block lists
