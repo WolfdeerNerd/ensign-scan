@@ -31,27 +31,79 @@ def _strip_ansi(text: str) -> str:
 FAKE_SIG_VERSION = [27455]
 
 
-class FakeClamdHandler(socketserver.StreamRequestHandler):
+def read_command(sock) -> str:
+    """Read one clamd command byte by byte, up to its \\0 or \\n.
+
+    One byte at a time on purpose: a FILDES descriptor arrives attached to
+    the byte right after the command, and a bigger read() would swallow
+    that byte and silently drop the descriptor with it."""
+    buf = b""
+    while True:
+        b = sock.recv(1)
+        if not b or b in (b"\0", b"\n"):
+            break
+        buf += b
+    text = buf.decode()
+    return text[1:] if text[:1] in ("n", "z") else text
+
+
+def reply(sock, command_was_z: bool, text: str) -> None:
+    sock.sendall((text + ("\0" if command_was_z else "\n")).encode())
+
+
+def fake_verdict(path: str) -> str:
+    if "toolarge" in path:
+        return "size limit exceeded. ERROR"
+    if "evil" in path:
+        return "Eicar-Test-Signature FOUND"
+    return "OK"
+
+
+# Every path the fake clamd was asked about, by either transport: tests
+# use it to prove a credential file was never sent to clamd at all.
+SEEN_BY_CLAMD: list[str] = []
+
+
+class FakeClamdHandler(socketserver.BaseRequestHandler):
+    """Speaks enough of the clamd protocol for Ensign: PING, STATS,
+    VERSION, VERSIONCOMMANDS, SCAN <path>, and FILDES (descriptor passed
+    as SCM_RIGHTS). For FILDES it finds the file's path through
+    /proc/self/fd, so the same path-based fake verdicts apply."""
+    fildes = True  # set False on a subclass to emulate a clamd without FILDES
+
     def handle(self):
-        data = self.rfile.readline().decode().strip()
-        if data.startswith("n"):
-            data = data[1:]
+        sock = self.request
+        first = sock.recv(1, socket.MSG_PEEK)
+        is_z = first == b"z"
+        data = read_command(sock)
         if data == "PING":
-            self.wfile.write(b"PONG\n")
+            reply(sock, is_z, "PONG")
         elif data == "STATS":
-            self.wfile.write(b"POOLS: 1\nTHREADS: live 1 idle 0 max 12 idle-timeout 30\nEND\n")
+            sock.sendall(b"POOLS: 1\nTHREADS: live 1 idle 0 max 12 idle-timeout 30\nEND\n")
         elif data == "VERSION":
             from datetime import datetime, timedelta
             build_date = (datetime.now() - timedelta(days=5)).strftime("%a %b %d %H:%M:%S %Y")
-            self.wfile.write(f"ClamAV 1.2.0/{FAKE_SIG_VERSION[0]}/{build_date}\n".encode())
+            reply(sock, is_z, f"ClamAV 1.2.0/{FAKE_SIG_VERSION[0]}/{build_date}")
+        elif data == "VERSIONCOMMANDS":
+            cmds = "SCAN QUIT PING VERSION VERSIONCOMMANDS STATS" + (" FILDES" if self.fildes else "")
+            reply(sock, is_z, f"ClamAV 1.2.0/{FAKE_SIG_VERSION[0]}/x| COMMANDS: {cmds}")
         elif data.startswith("SCAN "):
             path = data[5:]
-            if "toolarge" in path:
-                self.wfile.write(f"{path}: size limit exceeded. ERROR\n".encode())
-            elif "evil" in path:
-                self.wfile.write(f"{path}: Eicar-Test-Signature FOUND\n".encode())
-            else:
-                self.wfile.write(f"{path}: OK\n".encode())
+            SEEN_BY_CLAMD.append(path)
+            reply(sock, is_z, f"{path}: {fake_verdict(path)}")
+        elif data == "FILDES" and self.fildes:
+            _msg, fds, _flags, _addr = socket.recv_fds(sock, 1, 1)
+            if not fds:
+                return  # real clamd waits silently here; the client times out
+            fd = fds[0]
+            try:
+                path = os.readlink(f"/proc/self/fd/{fd}")
+                SEEN_BY_CLAMD.append(path)
+                reply(sock, is_z, f"fd[{fd}]: {fake_verdict(path)}")
+            finally:
+                os.close(fd)
+        else:
+            reply(sock, is_z, "UNKNOWN COMMAND")
 
 
 def main():
@@ -216,116 +268,31 @@ def main():
     print("\n--- Rescan infected ---")
     scanner.rescan_infected()
 
-    print("\n--- suggest_fixes: secrets-path guard ---")
+    print("\n--- suggest_fixes: lists refusals, never prints a permission change ---")
     from ensign_scan.models import FileRecord, ScanStatus as SS, utcnow
     from ensign_scan.reports import suggest_fixes
     from sqlalchemy.orm import Session as _Session
     import io, contextlib
 
-    # suggest_fixes() checks lexists() before suggesting a command, so
-    # these need to be real files on disk -- not just DB rows -- or
-    # they'll be (correctly) routed to the stale-record/--purge-missing
-    # branch instead of the command-suggestion branch this test checks.
-    cache_file = tmp / "home_u" / ".cache" / "app" / "reg.bin"
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text("cached data")
-
-    wallet_file = tmp / "home_u" / ".local" / "share" / "kwalletd" / "kdewallet.kwl"
-    wallet_file.parent.mkdir(parents=True, exist_ok=True)
-    wallet_file.write_text("encrypted wallet data")
-
+    refused = tmp / "home_u" / ".cache" / "app" / "reg.bin"
+    refused.parent.mkdir(parents=True, exist_ok=True)
+    refused.write_text("cached data")
+    gone = tmp / "home_u" / "tmpbuild" / "obj.o"   # never created: a stale row
     with _Session(scanner.engine) as session:
-        session.add(FileRecord(filepath=str(cache_file), filename="reg.bin",
-                                file_hash="x", scan_status=SS.ERROR.value,
-                                scan_result=f"{cache_file}: Access denied. ERROR",
-                                last_scanned=utcnow()))
-        session.add(FileRecord(filepath=str(wallet_file),
-                                filename="kdewallet.kwl", file_hash="x",
-                                scan_status=SS.ERROR.value,
-                                scan_result=f"{wallet_file}: Access denied. ERROR",
-                                last_scanned=utcnow()))
+        for path in (refused, gone):
+            session.add(FileRecord(filepath=str(path), filename=path.name, file_hash="x",
+                                   scan_status=SS.ERROR.value,
+                                   scan_result=f"{path}: Access denied. ERROR",
+                                   last_scanned=utcnow()))
         session.commit()
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        suggest_fixes(scanner.engine)
-    output = " ".join(_strip_ansi(buf.getvalue()).split())  # normalize whitespace: rich wraps lines to console width
-    assert "setfacl" in output and str(cache_file.parent) in output, "should suggest a command for a normal cache dir"
-    assert "kwalletd" in output and "review manually" in output.lower(), "should flag, not suggest, a wallet-like path"
-    assert "setfacl" not in output.split("kwalletd")[1].split("!")[0], "must not print a command for the wallet path"
-
-    print("\n--- suggest_fixes: secrets guard covers the whole subtree ---")
-    # setfacl -R recurses, and -d is inherited by new files, so the guard
-    # has to look beneath a hotspot, not just at the files that errored
-    # in it. Each case runs suggest_fixes scoped to its own directory so
-    # the rows other tests left in this DB don't leak into the output.
-    g = tmp / "g"
-
-    def _guard_row(path, status):
-        return FileRecord(filepath=str(path), filename=Path(path).name, file_hash="x",
-                          scan_status=status.value, scan_result=f"{path}: Access denied. ERROR",
-                          last_scanned=utcnow())
-
-    def _real(path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("x")
-        return path
-
-    def _run(scope):
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            suggest_fixes(scanner.engine, paths=[str(scope)])
-        return " ".join(_strip_ansi(buf.getvalue()).split())
-
-    def _cmd(d):
-        return f"setfacl -R -m g:clamav:rX '{d}'"
-
-    # A: a CLASSIFIED wallet deeper in the tree, only an ordinary file
-    # directly in the hotspot.
-    pa_err = _real(g / "pa" / "notes.txt")
-    _real(g / "pa" / "vault" / ".ssh" / "id_rsa")
-    # B: the same wallet name next to the hotspot and in an unrelated
-    # dir -- one shares a prefix ("pb2" vs "pb") but is not beneath it.
-    pb_err = _real(g / "pb" / "data.txt")
-    # C: a deep ERROR (not CLASSIFIED) file that matches at MEDIUM.
-    pc_err = _real(g / "pc" / "a.txt")
-    pc_pem = _real(g / "pc" / "sub" / "server.pem")
-    # D: a hotspot scoped down to one exact file, with a wallet beneath
-    # it that is outside that scope.
-    pd_err = _real(g / "pd" / "x.txt")
-    # E: a CLASSIFIED record whose file is gone.
-    pe_err = _real(g / "pe" / "y.txt")
-
-    with _Session(scanner.engine) as session:
-        for p in (pa_err, pb_err, pc_err, pc_pem, pd_err, pe_err):
-            session.add(_guard_row(p, SS.ERROR))
-        session.add(_guard_row(g / "pa" / "vault" / ".ssh" / "id_rsa", SS.CLASSIFIED))
-        session.add(_guard_row(g / "pb2" / ".ssh" / "id_rsa", SS.CLASSIFIED))
-        session.add(_guard_row(g / "elsewhere" / ".ssh" / "id_rsa", SS.CLASSIFIED))
-        session.add(_guard_row(g / "pd" / "vault" / ".ssh" / "id_rsa", SS.CLASSIFIED))
-        session.add(_guard_row(g / "pe" / "gone" / ".ssh" / "id_rsa", SS.CLASSIFIED))
-        session.commit()
-
-    out_a = _run(g / "pa")
-    assert "review manually" in out_a and "vault/.ssh/id_rsa" in out_a, \
-        "a CLASSIFIED wallet deeper in the subtree must stop the command"
-    assert "setfacl" not in out_a, "no command may be printed over a subtree holding a wallet"
-
-    out_b = _run(g / "pb")
-    assert _cmd(g / "pb") in out_b, \
-        "an unrelated wallet, or one in a sibling that merely shares the name prefix, must not block the command"
-    assert "review manually" not in out_b
-
-    out_c = _run(g / "pc")
-    assert "sub/server.pem" in out_c and "setfacl" not in out_c, \
-        "a deep ERROR file matching at MEDIUM must stop the command too"
-
-    out_d = _run(g / "pd" / "x.txt")
-    assert "review manually" in out_d and "setfacl" not in out_d, \
-        "narrowing the report's scope must not narrow the guard"
-
-    out_e = _run(g / "pe")
-    assert "review manually" in out_e and "setfacl" not in out_e, \
-        "a stale CLASSIFIED record still blocks: -d would grant it if the file came back"
+        suggest_fixes(scanner.engine, paths=[str(tmp / "home_u")])
+    output = " ".join(_strip_ansi(buf.getvalue()).split())
+    assert str(refused.parent) in output, "a directory with refused files is listed"
+    assert "setfacl" not in output and "chmod" not in output, "no permission change is ever suggested"
+    assert "no longer on disk" in output and "--purge-missing" in output, "stale rows point at --purge-missing"
+    assert "--rescan-errors" in output
 
     print("\n--- unreadable directories: reported, not silently skipped ---")
     from ensign_scan.reports import unreadable_report
@@ -448,20 +415,27 @@ def main():
     finally:
         os.environ["PATH"] = old_path
 
-    print("\n--- secrets-pattern reclassification (CLASSIFIED, not ERROR) ---")
+    print("\n--- credential files: never opened, never sent to clamd ---")
 
-    class DenyHandler(socketserver.StreamRequestHandler):
+    class PathOnlyDenyHandler(FakeClamdHandler):
+        """A clamd without FILDES whose clamav user can read nothing:
+        Ensign must fall back to path SCAN, and every SCAN is refused."""
+        fildes = False
+
         def handle(self):
-            data = self.rfile.readline().decode().strip()
-            if data.startswith("n"):
-                data = data[1:]
+            sock = self.request
+            is_z = sock.recv(1, socket.MSG_PEEK) == b"z"
+            data = read_command(sock)
             if data == "PING":
-                self.wfile.write(b"PONG\n")
+                reply(sock, is_z, "PONG")
+            elif data == "VERSIONCOMMANDS":
+                reply(sock, is_z, "ClamAV 1.2.0/1/x| COMMANDS: SCAN PING VERSION VERSIONCOMMANDS")
             elif data.startswith("SCAN "):
-                self.wfile.write(f"{data[5:]}: Access denied. ERROR\n".encode())
+                SEEN_BY_CLAMD.append(data[5:])
+                reply(sock, is_z, f"{data[5:]}: Access denied. ERROR")
 
     sock_path3 = str(tmp / "clamd3.sock")
-    server3 = socketserver.ThreadingUnixStreamServer(sock_path3, DenyHandler)
+    server3 = socketserver.ThreadingUnixStreamServer(sock_path3, PathOnlyDenyHandler)
     threading.Thread(target=server3.serve_forever, daemon=True).start()
 
     config3 = Config(
@@ -482,8 +456,13 @@ def main():
     normal_file = normal_dir / "regular_document.txt"
     normal_file.write_text("nothing special")
 
-    scanner3.process_file(wallet_file, scan=True)
+    SEEN_BY_CLAMD.clear()
+    scanner3.prepare_clamd()
+    assert scanner3._transport == "path", "a clamd without FILDES falls back to path SCAN"
+    assert scanner3.process_file(wallet_file, scan=True) == "", "a credential file is recorded without a hash"
     scanner3.process_file(normal_file, scan=True)
+    assert str(wallet_file) not in SEEN_BY_CLAMD, "a credential file must never be sent to clamd"
+    assert str(normal_file) in SEEN_BY_CLAMD
 
     from ensign_scan.models import FileRecord as _FR
     from ensign_scan.reports import error_summary as _es, suggest_fixes as _sf, scan_summary as _ss
@@ -491,10 +470,11 @@ def main():
     with _S2(scanner3.engine) as session:
         wrec = session.query(_FR).filter(_FR.filepath == str(wallet_file)).first()
         nrec = session.query(_FR).filter(_FR.filepath == str(normal_file)).first()
-        assert wrec.scan_status == ScanStatus.CLASSIFIED.value, \
-            "permission-denied on a secrets-pattern path should be reclassified"
+        assert wrec.scan_status == ScanStatus.CLASSIFIED.value
+        assert wrec.file_hash == "", "no hash of a credential file is stored"
+        assert "contents never read" in wrec.scan_result
         assert nrec.scan_status == ScanStatus.ERROR.value, \
-            "permission-denied on an ordinary path must stay a real error"
+            "permission-denied on an ordinary path is a real error"
 
     buf2 = io.StringIO()
     with contextlib.redirect_stdout(buf2):

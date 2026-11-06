@@ -15,22 +15,35 @@ Design: three confidence tiers, not one flat list.
   source of most false positives under the old substring-matching
   approach and add negligible real coverage.)
 
-Used two ways, at two different confidence thresholds:
-  - reports.py (suggest_fixes): gates whether to print a ready-to-run
-    setfacl command. A missed real secret here is the costly mistake
-    (Ensign would suggest granting clamd group read access to actual
-    credentials), so this call site checks at the WIDER threshold
-    (HIGH or MEDIUM) -- when in doubt, don't suggest the command.
-  - scanner.py (process_file): reclassifies a permission-denied result
-    as CLASSIFIED (expected) instead of ERROR (chased). A false match
-    here just hides a real permission problem behind "expected, not a
-    bug," so this call site checks at the NARROWER threshold (HIGH
-    only) -- when in doubt, leave it as a real error to look at.
+How it's used: skip_reason() decides, BEFORE a file is opened, whether
+Ensign should leave its contents alone entirely -- no hash, no scan.
+That uses HIGH only. Skipping is a coverage loss, so it is reserved for
+names that are essentially never anything but credential material;
+a MEDIUM match (a bare .pem, a custom-named id_* key) is still opened
+and scanned. (MEDIUM currently has no other consumer; it is kept for
+the planned folder-level aggregation.)
 
-Deliberately conservative either way: this is a deny-list, not a
-guarantee. It will miss a secrets store whose name doesn't match
-anything here (a custom password manager with an obscure directory
-name, for instance). That's an accepted, known gap -- see:
+Why skip at all: a key, keyring, wallet or vault is what malware
+*steals*, not where it hides, so scanning its contents finds almost
+nothing -- and reading it, and storing its hash, is exposure for no
+gain (a hash of a short secret, like a .netrc password, can be
+brute-forced offline). Theft of these files is caught by watching who
+opens them, not by reading them.
+
+Two deliberate exceptions, so the skip can't become a hiding place:
+  - Executables. Credential files are never executable; an executable
+    in a secrets location is exactly what an attacker would plant
+    there, so it is scanned like anything else.
+  - INTEGRITY_WATCHED files (authorized_keys, ~/.ssh/config, ~/.ssh/rc).
+    These hold no secrets but are classic persistence points: an added
+    key or a ProxyCommand runs the attacker's code. They are hashed,
+    scanned, and reported when they change.
+
+Deliberately conservative: this is a deny-list, not a guarantee. It
+will miss a secrets store whose name doesn't match anything here (a
+custom password manager with an obscure directory name, for instance),
+and that file will simply be scanned. That's an accepted, known gap --
+see:
 
 docs/Classified_Paths_Research.md
 
@@ -176,22 +189,52 @@ def classify(path: str) -> Confidence:
 
 
 def is_likely_secrets_path(path: str) -> bool:
-    """HIGH or MEDIUM confidence. Used by suggest_fixes() (reports.py):
-    the wider threshold, since a missed match there means Ensign could
-    suggest a live setfacl command opening a real secrets directory."""
+    """HIGH or MEDIUM confidence."""
     return classify(path) != Confidence.NONE
 
 
 def is_high_confidence_secrets_path(path: str) -> bool:
-    """HIGH confidence only. Used by process_file()'s permission-denial
-    reclassification (scanner.py): the narrower threshold, since a
-    false match there just hides a real permission error as expected."""
+    """HIGH confidence only -- the tier skip_reason() acts on."""
     return classify(path) == Confidence.HIGH
 
 
+# ----------------------------------------------------------------------
+# Skip-before-open, and the persistence files that are never skipped.
+# ----------------------------------------------------------------------
+
+# Files directly inside a .ssh directory that hold no secrets but decide
+# what runs: authorized_keys/authorized_keys2 (who may log in), config
+# (ProxyCommand / LocalCommand run programs), rc (runs on every login).
+INTEGRITY_WATCHED = ("authorized_keys", "authorized_keys2", "config", "rc")
+
+SKIP_REASON = "Not scanned: path matches a credential pattern, contents never read"
+
+
+def is_integrity_watched(path: str) -> bool:
+    """True for an INTEGRITY_WATCHED file whose parent directory is .ssh."""
+    parts = _parts(path)
+    return len(parts) >= 2 and parts[-2] == ".ssh" and parts[-1] in INTEGRITY_WATCHED
+
+
+def skip_reason(path: str, real_path: str, st_mode: int) -> str | None:
+    """Why Ensign should not open this file at all, or None to scan it.
+
+    Called before the file is opened, so it may only use the path, the
+    symlink-resolved path, and stat() metadata -- never contents.
+    `real_path` matters because symlinks are followed: a link named
+    "notes.txt" pointing at ~/.ssh/id_ed25519 must be skipped too.
+    """
+    if is_integrity_watched(path) or is_integrity_watched(real_path):
+        return None
+    if st_mode & 0o111:
+        return None  # credential files are never executable; scan it
+    if classify(path) == Confidence.HIGH or classify(real_path) == Confidence.HIGH:
+        return SKIP_REASON
+    return None
+
+
 def matching_reason(path: str) -> str | None:
-    """Human-readable reason for a match, or None. For explaining a
-    flagged directory in suggest_fixes()'s output."""
+    """Human-readable reason for a match, or None."""
     conf = classify(path)
     if conf == Confidence.NONE:
         return None

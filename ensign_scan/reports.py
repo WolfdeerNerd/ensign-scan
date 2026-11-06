@@ -12,7 +12,8 @@ from sqlalchemy import func, or_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from . import explanations, pacman, secrets
+from . import explanations, pacman
+from .clamd import is_permission_error
 from .models import FileRecord, ScanStatus
 
 
@@ -70,41 +71,27 @@ def _scope_filter(paths: list[str] | None):
     return or_(*conditions)
 
 
-def _secrets_beneath(parent: str, sensitive_paths: list[str]) -> str | None:
-    """First path in `sensitive_paths` that lies anywhere under `parent`
-    (any depth), returned relative to `parent`; None if there isn't one.
-
-    Matches on `parent + "/"` as a whole prefix, so /data/pb2/x is not
-    "under" /data/pb -- a bare startswith(parent) would say it was.
-    """
-    prefix = parent.rstrip("/") + "/"
-    for path in sensitive_paths:
-        if path.startswith(prefix):
-            return path[len(prefix):]
-    return None
-
-
 def suggest_fixes(engine: Engine, top: int = 10, paths: list[str] | None = None) -> None:
-    """Print copy-pasteable setfacl commands for permission error hotspots.
+    """Report files clamd was refused, grouped by directory. Advisory only.
 
-    Purely advisory — nothing here runs a permission change. Directories
-    are flagged for manual review instead of getting a suggested command
-    if EITHER the directory name OR any file beneath it, at any depth,
-    matches a secrets pattern — checking only the directory name would
-    miss a wallet file sitting in a generically-named folder, and
-    checking only the files that errored would miss one that was already
-    reclassified, or that sits in a subdirectory: the suggested
-    `setfacl -R` recurses through the whole subtree, and its `-d` form
-    is inherited by anything created there later. Dotfiles (like .netrc)
-    living loose in $HOME are covered the same way, since their
-    "directory" is just the home folder itself.
+    Ensign passes clamd an open descriptor for each file (see clamd.py),
+    so clamd needs no permission on your files, and a permission-denied
+    result should be rare. When one does show up, the cause is almost
+    always outside Ensign's reach:
 
-    If `paths` is given, only hotspots under those paths are reported —
-    otherwise this reports on every error in the whole database,
-    regardless of what this particular run scanned. That scope picks
-    which hotspots to report; it deliberately does NOT narrow the
-    secrets check above, because the command would still touch
-    everything beneath the directory.
+      * AppArmor/SELinux confining clamd: a policy can refuse even a
+        descriptor that was handed to it.
+      * a clamd without FILDES, so Ensign fell back to path scanning and
+        clamd had to open files itself (the run warns about this).
+      * rows from before this version, not yet retried.
+
+    This no longer prints setfacl commands. A recursive grant gave the
+    clamav user standing read access to everything under a directory --
+    including excluded trees, directories Ensign couldn't list, and files
+    created later -- and no check could see all of that ahead of time.
+    Records whose files are gone are pointed at --purge-missing instead.
+
+    If `paths` is given, only files under those paths are reported.
     """
     with Session(engine) as session:
         query = session.query(FileRecord.filepath, FileRecord.scan_result).filter(
@@ -117,58 +104,53 @@ def suggest_fixes(engine: Engine, top: int = 10, paths: list[str] | None = None)
 
     hotspots: dict[str, list[str]] = {}
     for filepath, result in rows:
-        text = (result or "").lower()
-        if "denied" in text or "permission" in text:
-            parent = os.path.dirname(filepath)
-            hotspots.setdefault(parent, []).append(filepath)
+        if is_permission_error(result or ""):
+            hotspots.setdefault(os.path.dirname(filepath), []).append(filepath)
 
     if not hotspots:
         return
 
-    # Every ERROR/CLASSIFIED record that looks like a secrets store,
-    # loaded once and unscoped (see the docstring). These are the files
-    # clamd currently can't read -- the ones a recursive grant would newly
-    # expose. Filtered in Python with an exact prefix match rather than
-    # SQL LIKE, where '_' and '%' in a directory name act as wildcards.
-    # Stale records are kept on purpose: with the -d default ACL, a
-    # deleted wallet that gets recreated would inherit the grant.
-    with Session(engine) as session:
-        guard_rows = session.query(FileRecord.filepath).filter(
-            FileRecord.scan_status.in_([ScanStatus.ERROR.value, ScanStatus.CLASSIFIED.value])
-        ).all()
-    sensitive_paths = sorted(p for (p,) in guard_rows if secrets.is_likely_secrets_path(p))
+    print(f"\n=== FILES CLAMD COULD NOT READ ({len(hotspots)} directories) ===")
+    print("clamd was refused these files even though Ensign passed it an open handle.")
+    print("Usually AppArmor/SELinux confining clamd, or a clamd that can't receive")
+    print("open files (the run warns if so). Ensign doesn't suggest permission changes.\n")
 
-    print(f"\n=== SUGGESTED FIXES ({len(hotspots)} directories) ===")
-    print("Advisory only — review each command before running it.\n")
-
-    for parent, paths in sorted(hotspots.items(), key=lambda kv: -len(kv[1]))[:top]:
-        missing = [p for p in  paths if not os.path.lexists(p)]
-        present = [p for p in paths if p not in missing]
-
-        if missing and not present:
-            # Every file in this hotspot is gone -- a setfacl fix would
-            # be useless advice. Point at --purge-missing instead.
-            count = len(missing)
-            label = f"{count} file" + ("s" if count != 1 else "")
-            print(f"    {parent} ({label})")
-            print(f"        File{'s' if count != 1 else ''} no longer ")
-            print(f"        exist{'s' if count == 1 else ''} on disk - this looks like ")
-            print(f"        a stale record, not a permission issue.")
-            print(f"        Run: python3 main.py --purge-missing\n")
-            continue
-
-        count = len(paths)
+    stale_only = 0
+    for parent, files in sorted(hotspots.items(), key=lambda kv: -len(kv[1]))[:top]:
+        present = [p for p in files if os.path.lexists(p)]
+        count = len(files)
         label = f"{count} file" + ("s" if count != 1 else "")
-        dir_match = secrets.is_likely_secrets_path(parent)
-        beneath = None if dir_match else _secrets_beneath(parent, sensitive_paths)
-        if dir_match or beneath:
-            print(f"  [yellow]! {parent}[/yellow]  ({label})")
-            reason = "directory name" if dir_match else f"contains {beneath}"
-            print(f"    Looks like a secrets/credentials store ({reason}) — review manually.\n")
+        if not present:
+            stale_only += 1
+            print(f"  {escape(parent)}  ({label}, no longer on disk)")
         else:
-            print(f"  {parent}  ({label})")
-            print(f"    sudo setfacl -R -m g:clamav:rX '{parent}'")
-            print(f"    sudo setfacl -R -d -m g:clamav:rX '{parent}'\n")
+            print(f"  {escape(parent)}  ({label})")
+    print()
+    if stale_only:
+        print("Records for files that no longer exist: clear them with --purge-missing.")
+    print("Once the cause is fixed, retry these with: --rescan-errors")
+
+
+def integrity_report(changes) -> None:
+    """Print SSH files (authorized_keys, ~/.ssh/config, ~/.ssh/rc) whose
+    contents changed, or that appeared, since the last run. `changes` is
+    Scanner.integrity_changes.
+
+    These aren't malware signatures; they're the places an intruder edits
+    to get back in (an added key) or to run code (a ProxyCommand, an rc
+    script). A change you made yourself is expected -- this just makes
+    sure no change goes unnoticed.
+    """
+    if not changes:
+        return
+    print(f"\n[bold yellow]=== SSH FILES CHANGED SINCE LAST RUN ({len(changes)}) ===[/bold yellow]")
+    print("If you didn't make these changes, inspect them now.\n")
+    for change in sorted(changes, key=lambda c: c.path):
+        print(f"  [yellow]![/yellow] {escape(change.path)}")
+        if change.old_hash:
+            print(f"      was {change.old_hash[:16]}…  now {change.new_hash[:16]}…")
+        else:
+            print(f"      new file since the last run ({change.new_hash[:16]}…)")
 
 
 def error_summary(engine: Engine, top: int = 10, paths: list[str] | None = None) -> None:

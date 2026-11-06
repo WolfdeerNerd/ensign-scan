@@ -72,7 +72,7 @@ Ensign's core scanning, hashing, and database tracking are plain Python + SQLAlc
 
 The one exception is `--verify-pacman`, which cross-checks files against `pacman -Qkk`'s own integrity data — that's an Arch-only feature by nature (there's no equivalent on Debian/Fedora/etc.). If `pacman` isn't found on the system, Ensign detects that and skips the check cleanly rather than erroring; every other command works the same regardless of distro.
 
-`setfacl` (used for the permission-fix suggestions) and `notify-send` (desktop notifications) aren't Arch-specific either — both are standard Linux tooling available on most major distros, just under different package names (e.g. Debian/Ubuntu: `acl` and `libnotify-bin`).
+`notify-send` (desktop notifications) isn't Arch-specific either — it's standard Linux tooling available on most major distros, just under a different package name (e.g. Debian/Ubuntu: `libnotify-bin`).
 
 ## What Ensign Touches, and What It Can't See
 
@@ -91,30 +91,34 @@ Ensign makes no network connections. It talks to clamd over a local Unix socket 
 | `gdbus` | After an infected-files alert | Closes that notification after its timeout |
 | `pgrep` | When sending an infected-files alert | Checks whether a Steam game is running (see Alerts) |
 
-Ensign never changes permissions. It prints `setfacl` commands for you to review and run yourself. It also never deletes, quarantines or edits a file: it reports.
+Ensign never changes permissions, and never asks you to. It also never deletes, quarantines or edits a file: it reports.
 
 ### What Ensign can't see
 
-- **Files clamd can't read.** clamd runs as the `clamav` user, so a file that user can't open is not scanned. It is recorded as `error`, or as `classified` when its path looks like a secrets store (see Permissions Setup).
+- **Credential files, on purpose.** Keys, keyrings, wallets and password vaults are recorded as `classified` and never opened (see How clamd Reads Your Files).
+- **Files you can't read.** Ensign opens each file as you, so a file your user can't open isn't scanned.
 - **Directories Ensign can't enter.** They are skipped, and each run ends with an "UNREADABLE DIRECTORIES" section listing them. The list is rebuilt every run, so nothing about it is stored in the database.
 - **Symlinked directories.** They are never walked into (see the Proton note below). Symlinks to individual files are followed and scanned.
 - **Excluded paths, and unchanged snapshot subtrees.** Whatever you list under `excludes` is not scanned, and subtrees under `snapshot_roots` are skipped while their modification time is unchanged.
 - **Files that vanish mid-scan.** Temp files and browser caches come and go; they are counted as skipped, not as errors.
 - **Anything ClamAV has no signature for.** Ensign is a file scanner built on ClamAV. It doesn't look at memory or running processes, and a clean result means "no known signature matched", not "safe".
 
-## Permissions Setup
+## How clamd Reads Your Files
 
-When building Ensign, I ran into errors concerning file permissions. Turns out that the ClamAV daemon requires permissions, as it operates under the user `clamav`. The daemon needs this whenever it needs to traverse directories.
+clamd runs as its own unprivileged user, `clamav`, not as you. Ensign doesn't ask clamd to open your files. It opens each file itself, as you, and passes clamd the already-open file over the local socket (clamd's `FILDES` command; `clamdscan --fdpass` does the same thing). The kernel checks *your* permission when Ensign opens the file, and clamd gets a handle to that one file for that one scan, with no permission on anything else. So:
 
-To solve this I had to run the two following commands:
-```
-sudo setfacl -R -m g:clamav:rX /path/to/hotspot
-sudo setfacl -R -d -m g:clamav:rX /path/to/hotspot
-```
-- The first command allows the group `clamav` to read the files in the directory.
-- The second command makes it default for any new files in the same directory.
+- **No permission setup is needed.** Earlier versions suggested `setfacl` commands granting the `clamav` group read access to whole directory trees. That's no longer needed, and Ensign no longer suggests it: a recursive grant gave `clamav` standing access to everything under a directory, including files created later, which is far more than a scan needs. If you applied those grants before, you can remove them with `sudo setfacl -R -x g:clamav <dir>` and `sudo setfacl -R -d -x g:clamav <dir>`.
+- **The hash and the verdict are for the same file.** Ensign hashes the file and clamd scans it through the same open handle, so the file can't be swapped in between.
+- **Ensign refuses a clamd running as root.** clamd parses untrusted files, and ClamAV advises against running it as root. If yours does, Ensign stops before scanning anything and tells you how to fix it (`User clamav` in `clamd.conf`).
+- **A clamd without `FILDES`** (rare; it needs a local socket and a build with descriptor passing) makes Ensign fall back to asking clamd to open files itself. The run warns you, and files the `clamav` user can't read are recorded as errors.
 
-**A note on updates:** Permissions can get reset when programs or games update, because an update may replace files or directories with fresh copies that don't carry the ACL you set. If permission errors come back after an update, run the two commands again on the affected folder (`python3 main.py --suggest-fixes` prints the right commands for the current errors).
+**Credential files are never opened.** A file whose path matches a high-confidence credential pattern (SSH and GPG private keys, password-manager vaults, crypto wallets, cloud credentials; see `ensign_scan/secrets.py`) is recorded as `classified` without being read, hashed or sent to clamd. Those files are what malware *steals*, not where it hides, so scanning them finds almost nothing, while reading them and storing their hash is exposure for no gain. Three exceptions keep this from becoming a hiding place:
+
+- **Executables are always scanned**, even in `~/.ssh`. Credential files are never executable, so an executable there is exactly what an intruder would plant.
+- **`~/.ssh/authorized_keys`, `authorized_keys2`, `config` and `rc` are scanned and watched.** They hold no secrets, but they decide who can log in and what runs, so an intruder edits them to get back in. If one changes between runs, or appears where it didn't exist before, the run ends with an "SSH FILES CHANGED SINCE LAST RUN" section. A change you made yourself shows up there too; it's there so no change goes unnoticed.
+- **A file ClamAV already found infected is always rescanned**, even if its name looks like a credential file, so a found infection can't quietly turn into "classified".
+
+The first run after upgrading to this version removes the hashes older versions stored for credential files (overwriting them on disk, not just deleting the rows) and rescans files that were permission errors before. A backup or filesystem snapshot of the database taken earlier still holds the old hashes.
 
 ## Threading & Worker Sizing
 
@@ -134,7 +138,7 @@ The examples below are written as `python3 main.py` (running from a checkout). I
 
 1. Make sure ClamAV's daemon is running (Ensign tells you if it isn't): `sudo systemctl start clamav-daemon`
 2. Run Ensign on a small tree, as your own username: `python3 path/to/main.py ~/Downloads`
-3. If you see permission errors, see Permissions Setup above, then run it again.
+3. If clamd couldn't read some files, the run ends with a "FILES CLAMD COULD NOT READ" section saying what usually causes it.
 
 For a full scan, you only need to run:
 ```
@@ -166,7 +170,7 @@ These run one job and exit — no full scan.
 | `python3 main.py --purge-missing` | Remove DB records for files that no longer exist on disk |
 | `python3 main.py --rescan-errors` | Retry only files currently marked `ERROR` |
 | `python3 main.py --verify-pacman` | Cross-check installed files against pacman's own checksums, flag mismatches (Arch only, can be slow) |
-| `python3 main.py --suggest-fixes` | Print setfacl commands for current permission errors, optionally scoped to given targets |
+| `python3 main.py --suggest-fixes` | List files clamd could not read, grouped by directory, optionally scoped to given targets |
 | `python3 main.py --diagnostics` | Print versions, settings and counts for a bug report. Contains no paths, usernames, hostnames or file names, and writes nothing |
 
 ### Only one run at a time
@@ -177,13 +181,12 @@ Before it scans, purges or retries errors, Ensign takes a lock: a small file cal
 - **Leave the file in place.** Deleting `ensign.lock` while a run is using it can let a second run start.
 - **Read-only commands skip it.** `--verify-pacman`, `--suggest-fixes` and `--diagnostics` only read the database, so they can run while a scan is going.
 
-### If a suggested fix doesn't seem to work
+### If clamd still can't read some files
 
-If you apply a suggested 'setfacl' command and the same error keeps showing up on a later run, the file may have been deleted since Ensign last saw it - common with temp files, downloads that get cleaned up, or build artifacts. A permission fix can't help a file that no longer exists. 
+Since clamd reads files through the handle Ensign passes it, a "could not read" result usually means something outside Ensign is stopping clamd: most often an AppArmor or SELinux policy confining it, which can refuse even a handle that was handed over. Check the kernel log during a scan (`journalctl -k | grep -i -e apparmor -e avc`). Once it's fixed, retry with `python3 main.py --rescan-errors`.
 
-Run: 
+If the listed files no longer exist (temp files, cleaned-up downloads, build artifacts), they're stale records. Run:
     `python3 main.py --purge-missing`
-to clear out stale records, then run a normal scan again to re-establish a clean baseline. 
 
 
 ## What Gets Rescanned
@@ -241,7 +244,7 @@ high_prefixes = [["mywallet_", "wallets"]]
 
 - **`[custom_threats]`** adds a note for a threat name. The name must match exactly, including the numbers.
 - **`[custom_pacman_reasons]`** adds a note for a `pacman -Qkk` mismatch reason.
-- **`[custom_secrets]`** adds paths that look like secrets stores. The keys are `high_dirs`, `high_dir_paths`, `high_filenames`, `high_extensions`, `high_scoped_filenames`, `high_prefixes`, `medium_prefixes` and `medium_extensions`. A HIGH match means a permission-denied file is classified as expected instead of reported as an error, and neither tier will get a `setfacl` fix suggested for it. See `ensign_scan/secrets.py` for what the tiers mean.
+- **`[custom_secrets]`** adds paths that look like secrets stores. The keys are `high_dirs`, `high_dir_paths`, `high_filenames`, `high_extensions`, `high_scoped_filenames`, `high_prefixes`, `medium_prefixes` and `medium_extensions`. A HIGH match means the file is recorded as `classified` and never opened (see How clamd Reads Your Files); a MEDIUM match is still scanned. See `ensign_scan/secrets.py` for what the tiers mean.
 
 The first time you run Ensign it writes a starter `config.toml` with all of these documented as comments. `config.example.toml` in the repo has the same content.
 
@@ -256,7 +259,7 @@ See the details behind current errors:
 sqlite3 ~/.local/share/ensign/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='error';"
 ```
 
-See what's been classified (permission denied on a path that looks like a secrets store — expected, not chased as an error):
+See what's been classified (credential files Ensign deliberately never opened):
 ```
 sqlite3 ~/.local/share/ensign/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='classified';"
 ```

@@ -674,9 +674,13 @@ class _FakeClamd:
     def ping(self): return True
     def max_threads(self): return 4
     def signature_version(self): return 7
+    def daemon_uid(self): return 990       # an unprivileged clamav user
+    def supports_fildes(self): return True
     def scan(self, path):
         if path.name.startswith("bad"): return _SO(_SS3.INFECTED, "x: Eicar FOUND", "Eicar")
         return _SO(_SS3.CLEAN, "x: OK", None)
+    def scan_fd(self, fd, label):
+        return self.scan(_P2(label))
 _pd2 = _P2(_tf2.mkdtemp())
 (_pd2 / "ok.txt").write_text("fine"); (_pd2 / "bad.txt").write_text("eicar")
 _sc = Scanner(Config(db_url=f"sqlite:///{_pd2}/t.db", log_file=_pd2 / "e.txt", max_workers=2), clamd=_FakeClamd())

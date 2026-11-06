@@ -1,9 +1,33 @@
-"""Minimal clamd unix-socket client, plus a clamscan CLI fallback."""
+"""Minimal clamd unix-socket client, plus a clamscan CLI fallback.
+
+How clamd gets at a file
+------------------------
+clamd runs as its own unprivileged user (`clamav`), not as you. There are
+two ways to hand it a file:
+
+  * SCAN <path>  -- clamd opens the path itself, as `clamav`. Anything
+                    `clamav` can't read comes back "Permission denied",
+                    and the only fix is granting `clamav` standing read
+                    access (ACLs), which reaches far more than one file.
+  * FILDES       -- Ensign opens the file as you, then passes clamd the
+                    already-open descriptor over the Unix socket
+                    (SCM_RIGHTS). The kernel checked *your* permission at
+                    open(); clamd gets a handle to that one file, for that
+                    one scan, and no permission on anything. This is what
+                    `clamdscan --fdpass` does.
+
+Ensign uses FILDES whenever clamd supports it, and falls back to SCAN
+(with a warning) when it doesn't. It refuses to send anything to a clamd
+running as root: clamd parses untrusted files, and ClamAV itself advises
+against running it as root.
+"""
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +36,11 @@ from pathlib import Path
 from .models import ScanStatus
 
 _FOUND_RE = re.compile(r":\s+(.+?)\s+FOUND")
+
+# clamd labels a FILDES reply with its own descriptor number ("fd[10]: OK"),
+# not a path. Swapped for the real path so stored results and reports read
+# the same whichever way a file was scanned.
+_FD_LABEL_RE = re.compile(r"^fd\[\d+\]:")
 
 # clamd's wording for "file too large to scan" is inconsistent across
 # versions -- some report it plainly, others substitute the misleading
@@ -166,21 +195,150 @@ class ClamdClient:
             return None
         return (datetime.now() - built).days
 
-    def scan(self, filepath: Path | str) -> ScanOutcome:
-        """Scan one file via clamd's SCAN command.
+    # -- what the daemon can do, and who it runs as --------------------
 
-        clamd reads the file itself, so it needs read permission on the
-        path (see the ACL notes in the README).
+    def commands(self) -> set[str] | None:
+        """The commands this clamd recognizes, via VERSIONCOMMANDS.
+
+        Reply format: "ClamAV 1.5.4/27455/<date>| COMMANDS: SCAN QUIT ...".
+        None if clamd is unreachable or the reply has no COMMANDS list.
+        A listed command can still be switched off in clamd.conf; scan_fd()
+        reports that case as an ERROR outcome rather than hiding it.
+        """
+        try:
+            reply = self._command("VERSIONCOMMANDS")
+        except OSError:
+            return None
+        _, sep, listed = reply.partition("COMMANDS:")
+        return set(listed.split()) if sep else None
+
+    def supports_fildes(self) -> bool:
+        cmds = self.commands()
+        return cmds is not None and "FILDES" in cmds
+
+    def daemon_uid(self) -> int | None:
+        """Effective UID clamd is running as right now, or None if unknown.
+
+        Asks the kernel who is on the other end of the socket (SO_PEERCRED)
+        and then reads that process's *current* UID from /proc. The /proc
+        step matters: SO_PEERCRED reports credentials from when the socket
+        was set up, and a clamd that starts as root and then drops to
+        `User clamav` would still look like root from SO_PEERCRED alone.
+
+        When systemd socket activation owns the socket, the peer is PID 1
+        (systemd itself), so the clamd process is looked up by name instead.
+        None means "couldn't tell" (no /proc access, e.g. mounted with
+        hidepid), which callers must not read as "safe" or "root".
+        """
+        pid = None
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(self.timeout)
+                sock.connect(self.socket_path)
+                raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                      struct.calcsize("3i"))
+                pid, _uid, _gid = struct.unpack("3i", raw)
+        except OSError:
+            return None
+        if pid and pid > 1:
+            uid = _effective_uid(pid)
+            if uid is not None:
+                return uid
+        # Socket activation (pid 1) or an unreadable peer: find clamd by name.
+        uids = [u for u in (_effective_uid(p) for p in _pids_named("clamd")) if u is not None]
+        if not uids:
+            return None
+        return 0 if 0 in uids else uids[0]
+
+    # -- scanning ------------------------------------------------------
+
+    def scan(self, filepath: Path | str) -> ScanOutcome:
+        """Scan one file via clamd's SCAN command (path mode).
+
+        clamd opens the path itself, so this only works for files the
+        `clamav` user can read. Used only when clamd doesn't support
+        FILDES; scan_fd() is the normal path.
         """
         try:
             response = self._command(f"SCAN {filepath}")
         except OSError as exc:
             return ScanOutcome(ScanStatus.ERROR, f"Scan error: {exc}")
+        return _outcome(response)
 
-        if response.endswith("OK"):
-            return ScanOutcome(ScanStatus.CLEAN, response)
-        if "FOUND" in response:
-            match = _FOUND_RE.search(response)
-            threat = match.group(1) if match else "Unknown"
-            return ScanOutcome(ScanStatus.INFECTED, response, threat)
-        return ScanOutcome(ScanStatus.ERROR, response)
+    def scan_fd(self, fd: int, label: str) -> ScanOutcome:
+        """Scan an already-open file by passing its descriptor (FILDES).
+
+        `fd` must be a read-only descriptor for a regular file, opened by
+        the caller (fsutil.open_for_scan does both checks). The command
+        and the descriptor go in two sends, the way clamd's own clients do
+        it: "zFILDES\\0", then one dummy byte carrying the fd as SCM_RIGHTS
+        ancillary data. The kernel gives clamd its own copy of the
+        descriptor; the caller still owns and closes `fd`.
+
+        clamd never replies if the descriptor doesn't arrive -- it just
+        waits -- so the socket timeout is what ends a stuck request.
+        `label` (normally the path) replaces clamd's "fd[N]" in the reply.
+        """
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(self.timeout)
+                sock.connect(self.socket_path)
+                sock.sendall(b"zFILDES\0")
+                socket.send_fds(sock, [b"\0"], [fd])
+                chunks: list[bytes] = []
+                while True:
+                    data = sock.recv(4096)
+                    if not data:
+                        break
+                    chunks.append(data)
+                    if data.endswith(b"\0"):
+                        break
+        except OSError as exc:
+            return ScanOutcome(ScanStatus.ERROR, f"{label}: Scan error (fd passing): {exc} ERROR")
+        response = b"".join(chunks).rstrip(b"\0").decode(errors="replace").strip()
+        if not response:
+            return ScanOutcome(ScanStatus.ERROR, f"{label}: no reply from clamd ERROR")
+        return _outcome(_FD_LABEL_RE.sub(f"{label}:", response, count=1))
+
+
+def _outcome(response: str) -> ScanOutcome:
+    """Turn one clamd scan reply into a ScanOutcome."""
+    if response.endswith("OK"):
+        return ScanOutcome(ScanStatus.CLEAN, response)
+    if "FOUND" in response:
+        match = _FOUND_RE.search(response)
+        threat = match.group(1) if match else "Unknown"
+        return ScanOutcome(ScanStatus.INFECTED, response, threat)
+    return ScanOutcome(ScanStatus.ERROR, response)
+
+
+def _effective_uid(pid: int) -> int | None:
+    """A process's effective UID from /proc/<pid>/status ("Uid:" line:
+    real, effective, saved, filesystem). None if it can't be read."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("Uid:"):
+                    return int(line.split()[2])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _pids_named(name: str) -> list[int]:
+    """PIDs whose /proc/<pid>/comm is exactly `name`."""
+    pids = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/comm") as f:
+                if f.read().strip() == name:
+                    pids.append(int(entry))
+        except OSError:
+            continue
+    return pids
