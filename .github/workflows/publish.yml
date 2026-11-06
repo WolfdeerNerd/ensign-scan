@@ -11,7 +11,13 @@ permissions:
   contents: read
 
 jobs:
+  # The full test suite, on every supported Python, before anything is built.
+  # If it fails, build never starts and nothing reaches PyPI.
+  test:
+    uses: ./.github/workflows/tests.yml
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

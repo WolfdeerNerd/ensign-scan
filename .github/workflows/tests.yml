@@ -1,0 +1,58 @@
+name: Tests
+
+# Runs the test suite on every PR and every push to main, and is also
+# called by publish.yml so a release can't publish unless it passes.
+on:
+  push:
+    branches: [main]   # PR branches are covered by pull_request; no double runs
+  pull_request:
+  workflow_call:
+
+# Least privilege: the tests only need to read the repo.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # finish every version, so a failure shows which ones break
+      matrix:
+        python: ["3.11", "3.12", "3.13"]   # 3.11 is Ensign's minimum (tomllib)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # tests never push; don't leave a token on disk
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements.txt
+      # Every *_test.py in the repo root, so a new test file is picked up
+      # without editing this workflow. No real clamd is needed: the tests
+      # use an in-process fake, and the live check skips itself unless
+      # ENSIGN_TEST_CLAMD_SOCKET is set. The runner is not root, which
+      # fdpass_test.py needs (it checks that Ensign refuses a root clamd).
+      - name: Run the test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tests=(*_test.py)
+          (( ${#tests[@]} )) || { echo "::error::no *_test.py files found"; exit 1; }
+          for t in "${tests[@]}"; do
+            echo "::group::$t"
+            python "$t"
+            echo "::endgroup::"
+          done
+
+  # One stable check name for the branch ruleset to require. Requiring the
+  # matrix jobs directly would break whenever the Python versions change.
+  passed:
+    name: Tests passed
+    if: always()
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every Python version passed
+        run: test "${{ needs.test.result }}" = "success"

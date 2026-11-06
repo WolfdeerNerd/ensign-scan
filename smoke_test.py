@@ -76,6 +76,8 @@ class FakeClamdHandler(socketserver.BaseRequestHandler):
         first = sock.recv(1, socket.MSG_PEEK)
         is_z = first == b"z"
         data = read_command(sock)
+        if not data:
+            return  # a connection that sends nothing, like daemon_uid()'s peer check
         if data == "PING":
             reply(sock, is_z, "PONG")
         elif data == "STATS":
