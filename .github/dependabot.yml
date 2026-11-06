@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Keeps the SHA-pinned actions in .github/workflows/ current. Each update
+  # arrives as a PR, so it has to pass "Tests passed" before it can merge.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
