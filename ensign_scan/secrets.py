@@ -59,8 +59,8 @@ from enum import Enum
 # ----------------------------------------------------------------------
 
 # Directory names, matched as a whole path component (not substring).
-# Some are multi-segment (checked as a path substring since they're
-# specific enough not to need per-component matching).
+# Some are multi-segment: those must appear as whole components, in
+# order (".gnupg/private-keys-v1.d"), never as a fragment of a name.
 #
 # These eight lists (not tuples) are the single source of truth classify()
 # reads from. load_custom() below is the only thing that appends to them
@@ -69,7 +69,7 @@ _HIGH_DIRS = [
     ".ssh", ".gnupg", ".aws", ".azure", ".docker", ".kube",
     ".password-store", "exodus.wallet",
 ]
-_HIGH_DIR_PATHS = [  # multi-segment, checked as substrings
+_HIGH_DIR_PATHS = [  # whole path components, in order (see _has_run)
     ".gnupg/private-keys-v1.d", ".gnupg/openpgp-revocs.d",
     ".config/gcloud", ".electrum/wallets", ".ethereum/keystore",
     ".bitcoin", ".litecoin", ".dogecoin",
@@ -95,7 +95,7 @@ _HIGH_FILENAMES = [
 
 # Filenames that are only HIGH confidence inside a specific parent dir
 # (e.g. "config" is sensitive under .kube/, meaningless anywhere else).
-# Each entry: (parent dir substring, filename).
+# Each entry: (the folder the file sits directly in, filename).
 _HIGH_SCOPED_FILENAMES = [
     (".aws", "credentials"),
     (".aws", "config"),
@@ -105,7 +105,7 @@ _HIGH_SCOPED_FILENAMES = [
 ]
 
 # Filename prefixes that are HIGH confidence, but only inside a parent dir.
-# (prefix, required parent-dir substring) -- the parent is always required.
+# (prefix, a folder name somewhere above the file) -- the parent is always required.
 _HIGH_PREFIXES = [
     ("utc--", "keystore"),      # Ethereum keystore V3 (financial/crypto: HIGH)
 ]
@@ -150,6 +150,19 @@ def _parts(path: str) -> list[str]:
     return path.lower().replace("\\", "/").split("/")
 
 
+def _has_run(parts: list[str], entry: str) -> bool:
+    """True if `entry`'s components ("a/b") appear in `parts` consecutively,
+    each as a WHOLE component.
+
+    Not a substring test: a credential match now means the file is never
+    scanned, so ".bitcoin" must not match ".bitcoin-notes", nor "kwalletd"
+    a folder called "kwalletd-src", nor ".ssh" a ".sshfs-cache".
+    """
+    run = [c for c in entry.lower().split("/") if c]
+    n = len(run)
+    return n > 0 and any(parts[i:i + n] == run for i in range(len(parts) - n + 1))
+
+
 def classify(path: str) -> Confidence:
     """Classify how confidently `path` looks like a secrets/credentials
     store. See module docstring for what each tier means and how the
@@ -161,15 +174,19 @@ def classify(path: str) -> Confidence:
     # -- HIGH --
     if any(part == d for part in parts for d in _HIGH_DIRS):
         return Confidence.HIGH
-    if any(d in lower for d in _HIGH_DIR_PATHS):
+    if any(_has_run(parts, d) for d in _HIGH_DIR_PATHS):
         return Confidence.HIGH
     if basename in _HIGH_FILENAMES:
         return Confidence.HIGH
+    folders = parts[:-1]
     for parent, filename in _HIGH_SCOPED_FILENAMES:
-        if basename == filename and parent in lower:
+        # The file sits directly in `parent` (".ssh/config", not any "config"
+        # somewhere under a path that merely contains ".ssh").
+        run = [c for c in parent.lower().split("/") if c]
+        if basename == filename and run and folders[-len(run):] == run:
             return Confidence.HIGH
     for prefix, parent in _HIGH_PREFIXES:
-        if basename.startswith(prefix) and parent in lower:
+        if basename.startswith(prefix) and _has_run(folders, parent):
             return Confidence.HIGH
     if any(basename.endswith(ext) for ext in _HIGH_EXTENSIONS):
         return Confidence.HIGH

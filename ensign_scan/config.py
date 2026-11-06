@@ -19,7 +19,7 @@ import os
 import pwd
 import socket
 import tomllib
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -307,11 +307,11 @@ excludes = [
 #
 # [custom_secrets]
 # high_dirs = ["myvault"]                        # whole path component
-# high_dir_paths = ["myapp/keys"]                # multi-segment substring
+# high_dir_paths = ["myapp/keys"]                # whole folder names, in order
 # high_filenames = ["my_custom_key"]              # exact filename, any dir
 # high_extensions = [".mysecret"]
-# high_scoped_filenames = [["myapp", "config"]]   # [required parent substring, filename]
-# high_prefixes = [["mywallet_", "wallets"]]     # [prefix, required parent substring]
+# high_scoped_filenames = [["myapp", "config"]]   # [folder it sits directly in, filename]
+# high_prefixes = [["mywallet_", "wallets"]]     # [prefix, folder name somewhere above it]
 # medium_prefixes = [["myprefix_", "somedir"]]    # [prefix, required parent substring or ""]
 # medium_extensions = [[".maybesecret", ""]]      # [extension, required parent substring or ""]
 

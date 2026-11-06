@@ -147,4 +147,43 @@ assert outcome.raw == f"{weird}: OK", outcome.raw
 server.shutdown()
 print("backslash name test passed ✓")
 
+# ----------------------------------------------------------------------
+# 7. Credential paths match whole components, never fragments
+#    (a HIGH match means the file is never scanned)
+# ----------------------------------------------------------------------
+from ensign_scan.secrets import Confidence, classify  # noqa: E402
+
+not_secrets = [
+    "/h/notes/.bitcoin-notes/todo.md",
+    "/h/Downloads/.dogecoin-memes/meme.png",
+    "/h/mnt/.sshfs-cache/proj/config",
+    "/h/old/.kube-backup/config",
+    "/h/.config/gcloud-sdk-docs/readme.txt",
+    "/h/app/.gnupg-tools/private-keys-v1.d-notes.txt",
+    "/h/eth/keystore-backup/UTC--notes.txt",
+]
+for path in not_secrets:
+    assert classify(path) != Confidence.HIGH, f"fragment match would hide {path}"
+still_secrets = [
+    "/h/.bitcoin/wallet.dat", "/h/.ssh/config", "/h/.kube/config",
+    "/h/.gnupg/private-keys-v1.d/A.key", "/h/.config/gcloud/credentials.db",
+    "/h/.ethereum/keystore/UTC--2020-01-01T00-00-00.0Z--abc",
+    "/h/.kde/share/apps/kwallet/x", "/h/.local/share/kwalletd/kdewallet.kwl",
+]
+for path in still_secrets:
+    assert classify(path) == Confidence.HIGH, f"real credential path missed: {path}"
+print("whole-component secrets test passed ✓")
+
+# ----------------------------------------------------------------------
+# 8. Snapshot roots: "/snaps" is not "/snaps2"
+# ----------------------------------------------------------------------
+from ensign_scan.config import Config  # noqa: E402
+from ensign_scan.scanner import Scanner  # noqa: E402
+
+snap = Scanner(Config(db_url=f"sqlite:///{tmp / 'snap.db'}", log_file=tmp / "snap.log",
+                      snapshot_roots=("/x/snaps/",)))
+assert snap._is_snapshot_dir(Path("/x/snaps")) and snap._is_snapshot_dir(Path("/x/snaps/1/a"))
+assert not snap._is_snapshot_dir(Path("/x/snaps2/a")), "a sibling sharing the prefix is not a snapshot root"
+print("snapshot root test passed ✓")
+
 print("\nAll hardening tests passed ✓")

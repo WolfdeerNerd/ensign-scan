@@ -375,7 +375,15 @@ class Scanner:
     # ------------------------------------------------------------------
 
     def _is_snapshot_dir(self, path: Path) -> bool:
-        return any(str(path).startswith(r) for r in self.config.snapshot_roots)
+        """True if path is a snapshot root or inside one. Matched on a whole
+        path component, like _is_excluded: "/snaps" must not also match
+        "/snaps2", whose subtrees would then be pruned on an unchanged
+        directory mtime -- and a file edited in place doesn't change that."""
+        text = str(path)
+        return any(
+            text == root or text.startswith(root + "/")
+            for root in (r.rstrip("/") for r in self.config.snapshot_roots)
+        )
 
     def _should_prune(self, path: Path, stats: TreeStats) -> bool:
         if not self._is_snapshot_dir(path):
