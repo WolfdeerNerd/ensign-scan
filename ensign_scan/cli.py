@@ -15,6 +15,7 @@ if sys.version_info < (3, 11):
     raise SystemExit(1)
 
 import argparse
+import os
 import time
 from builtins import print as builtin_print
 from importlib.metadata import PackageNotFoundError, version as dist_version
@@ -23,6 +24,7 @@ from rich import print
 
 from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
 from ensign_scan import diagnostics, explanations, logsetup, notify, pacman, secrets
+from ensign_scan.fsutil import shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
 from ensign_scan.reports import error_summary, integrity_report, list_infected, pacman_report, scan_summary, suggest_fixes, unreadable_report
 from ensign_scan.scanner import ClamdRunsAsRoot, Scanner
@@ -81,13 +83,18 @@ def greet(config: Config) -> None:
     print("-" * 71)
     print(" I, Ensign, will start scanning your system shortly…")
     print(f" Host:     {HOSTNAME}")
-    print(f" Config:   {config.source}")
-    print(f" Database: {config.data_dir / 'system.db'}")
+    print(f" Config:   {shown(config.source)}")
+    print(f" Database: {shown(config.data_dir / 'system.db')}")
     print("-" * 71)
 
 
 def main() -> int:
     args = parse_args()
+    # Absolute, normalized paths: the database, the excludes and the scoped
+    # reports all work on absolute paths, so "cd ~ && ensign-scan Downloads"
+    # must mean /home/you/Downloads -- not "Downloads", which would be
+    # stored relative to wherever you stood and would slip past every exclude.
+    args.targets = [os.path.abspath(t) for t in args.targets]
     # Before anything that writes (starter config, logs, database) or prints
     # personal details (the greeting): diagnostics must be read-only and clean.
     if args.diagnostics:
@@ -101,8 +108,11 @@ def main() -> int:
     setup_logging(config)
 
     # The read-only reports never write to the database, so they don't need
-    # the lock and can run alongside a scan.
-    if args.verify_pacman or args.suggest_fixes:
+    # the lock and can run alongside a scan. run() handles --purge-missing
+    # and --rescan-errors first, so with either one also given, the run
+    # writes and must take the lock like any other.
+    writes = args.purge_missing or args.rescan_errors
+    if (args.verify_pacman or args.suggest_fixes) and not writes:
         return run(args, config)
 
     lock = RunLock(config.data_dir / "ensign.lock")
@@ -111,7 +121,7 @@ def main() -> int:
     except AlreadyRunning as busy:
         who = f"pid {busy.holder_pid}" if busy.holder_pid else "another process"
         print(f"[yellow]Ensign is already running ({who}). Not starting a second one.[/yellow]")
-        print(f"  Lock: {busy.path}")
+        print(f"  Lock: {shown(busy.path)}")
         return EXIT_BUSY
     try:
         return run(args, config)
@@ -157,7 +167,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
 
     if scan and not scanner.clamd.ping():
         print("[red]✗ clamd is not answering on its socket.[/red]")
-        print(f"  Socket: {config.clamd_socket}")
+        print(f"  Socket: {shown(config.clamd_socket)}")
         print("  Start it with: sudo systemctl start clamav-daemon")
         return 1
     if scan:
@@ -177,7 +187,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
     unreadable: dict[str, str] = {}
     missing: set[str] = set()
     for target in targets:
-        print(f"\nChecking [violet]{target}[/violet]:")
+        print(f"\nChecking [violet]{shown(target)}[/violet]:")
         stats = scanner.scan_tree(target, scan=scan)
         unreadable.update(stats.unreadable_dirs)
         missing |= stats.missing

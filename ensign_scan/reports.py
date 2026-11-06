@@ -5,7 +5,6 @@ import datetime
 import os
 
 from rich import print
-from rich.markup import escape
 from rich.padding import Padding
 from rich.table import Table
 from sqlalchemy import func, or_
@@ -14,7 +13,8 @@ from sqlalchemy.orm import Session
 
 from . import explanations, pacman
 from .clamd import is_permission_error
-from .models import FileRecord, ScanStatus
+from .fsutil import shown
+from .models import FileRecord, ScanStatus, path_under
 
 
 def _note(icon: str, text: str, label: str | None = None, indent: int = 2) -> None:
@@ -23,7 +23,7 @@ def _note(icon: str, text: str, label: str | None = None, indent: int = 2) -> No
     grid = Table.grid(padding=(0, 1))
     grid.add_column(no_wrap=True)
     grid.add_column()
-    body = f"{label}: {escape(text)}" if label else escape(text)
+    body = f"{label}: {shown(text)}" if label else shown(text)
     grid.add_row(f"[dim]{icon}[/dim]", f"[dim]{body}[/dim]")
     print(Padding(grid, (0, 0, 0, indent)))
 
@@ -67,7 +67,7 @@ def _scope_filter(paths: list[str] | None):
     for p in paths:
         text = str(p).rstrip("/")
         conditions.append(FileRecord.filepath == text)
-        conditions.append(FileRecord.filepath.like(f"{text}/%"))
+        conditions.append(path_under(FileRecord.filepath, text))
     return or_(*conditions)
 
 
@@ -122,9 +122,9 @@ def suggest_fixes(engine: Engine, top: int = 10, paths: list[str] | None = None)
         label = f"{count} file" + ("s" if count != 1 else "")
         if not present:
             stale_only += 1
-            print(f"  {escape(parent)}  ({label}, no longer on disk)")
+            print(f"  {shown(parent)}  ({label}, no longer on disk)")
         else:
-            print(f"  {escape(parent)}  ({label})")
+            print(f"  {shown(parent)}  ({label})")
     print()
     if stale_only:
         print("Records for files that no longer exist: clear them with --purge-missing.")
@@ -146,7 +146,7 @@ def integrity_report(changes) -> None:
     print(f"\n[bold yellow]=== SSH FILES CHANGED SINCE LAST RUN ({len(changes)}) ===[/bold yellow]")
     print("If you didn't make these changes, inspect them now.\n")
     for change in sorted(changes, key=lambda c: c.path):
-        print(f"  [yellow]![/yellow] {escape(change.path)}")
+        print(f"  [yellow]![/yellow] {shown(change.path)}")
         if change.old_hash:
             print(f"      was {change.old_hash[:16]}…  now {change.new_hash[:16]}…")
         else:
@@ -188,10 +188,10 @@ def error_summary(engine: Engine, top: int = 10, paths: list[str] | None = None)
     print(f"\n=== ERROR BREAKDOWN ({len(rows)} files) ===")
     print("By cause:")
     for message, count in sorted(causes.items(), key=lambda kv: -kv[1])[:top]:
-        print(f"  {count:>6}  {message[:90]}")
+        print(f"  {count:>6}  {shown(message[:90])}")
     print("Directory hotspots:")
     for parent, count in sorted(dirs.items(), key=lambda kv: -kv[1])[:top]:
-        print(f"  {count:>6}  {parent}")
+        print(f"  {count:>6}  {shown(parent)}")
 
 
 def unreadable_report(unreadable: dict[str, str], top: int = 10) -> None:
@@ -209,18 +209,18 @@ def unreadable_report(unreadable: dict[str, str], top: int = 10) -> None:
     if not unreadable:
         return
 
-    shown: list[str] = []
+    listed: list[str] = []
     for path in sorted(unreadable):
-        if not any(path.startswith(kept.rstrip("/") + "/") for kept in shown):
-            shown.append(path)
+        if not any(path.startswith(kept.rstrip("/") + "/") for kept in listed):
+            listed.append(path)
 
-    print(f"\n=== UNREADABLE DIRECTORIES ({len(shown)}) ===")
+    print(f"\n=== UNREADABLE DIRECTORIES ({len(listed)}) ===")
     print("Ensign could not look inside these, so nothing in them was scanned.")
-    for path in shown[:top]:
-        print(f"  {escape(path)}")
-        print(f"    {unreadable[path]}")
-    if len(shown) > top:
-        print(f"  … and {len(shown) - top} more (all are in the error log)")
+    for path in listed[:top]:
+        print(f"  {shown(path)}")
+        print(f"    {shown(unreadable[path])}")
+    if len(listed) > top:
+        print(f"  … and {len(listed) - top} more (all are in the error log)")
 
 
 def _print_unverified(unverified) -> None:
@@ -239,10 +239,10 @@ def _print_unverified(unverified) -> None:
         by_pkg.setdefault(m.package, []).append(m)
     for pkg, items in sorted(by_pkg.items()):
         reasons = sorted({m.reason for m in items})
-        print(f"  {escape(pkg)}: {len(items)} file{'s' if len(items) != 1 else ''} "
-              f"({escape(', '.join(reasons))})")
+        print(f"  {shown(pkg)}: {len(items)} file{'s' if len(items) != 1 else ''} "
+              f"({shown(', '.join(reasons))})")
         for m in items[:3]:
-            print(f"    {escape(m.filepath)}")
+            print(f"    {shown(m.filepath)}")
         if len(items) > 3:
             print(f"    … and {len(items) - 3} more")
     for reason in sorted({m.reason for m in unverified}):
@@ -286,8 +286,8 @@ def pacman_report(engine: Engine, result) -> None:
         for m in real:
             status = known.get(m.filepath)
             tracked = f"Ensign last saw this file: {status}" if status else "not tracked by Ensign"
-            print(f"  {escape(m.package)}: {escape(m.filepath)}")
-            print(f"    {escape(m.reason)} — {tracked}")
+            print(f"  {shown(m.package)}: {shown(m.filepath)}")
+            print(f"    {shown(m.reason)} — {tracked}")
             reason_note = explanations.explain_pacman_reason(m.reason)
             if reason_note:
                 _note("ⓘ", reason_note, indent=4)
@@ -307,7 +307,7 @@ def pacman_report(engine: Engine, result) -> None:
         for m in backups:
             by_path.setdefault(m.filepath, []).append(m.reason)
         for path, reasons in by_path.items():
-            print(f"  {path}  ({', '.join(reasons)})")
+            print(f"  {shown(path)}  ({shown(', '.join(reasons))})")
 
 
 def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, int]:
@@ -367,7 +367,7 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
     for threat, group in ordered:
         group.sort(key=lambda r: r.filepath)
         count = f"{len(group)} file{'s' if len(group) != 1 else ''}"
-        print(f"\nThreat: {escape(str(threat))}  ({count})")
+        print(f"\nThreat: {shown(str(threat))}  ({count})")
         explanation = explanations.explain_threat(threat)
         if explanation:
             _note("ⓘ", explanation.description)
@@ -376,9 +376,9 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
                 _note("›", explanation.false_positive_note, label=label)
         for i, (filepath, _t, scanned, detail) in enumerate(group):
             if i < files_per_threat:
-                print(f"\n  File: {escape(filepath)}")
+                print(f"\n  File: {shown(filepath)}")
                 print(f"  Scanned: {scanned}")
-                print(f"  Details: {escape((detail or '')[:200])}")
+                print(f"  Details: {shown((detail or '')[:200])}")
                 _note("›", _file_facts(filepath), label="Context", indent=2)
             elif i == files_per_threat:
                 print(f"\n  … and {len(group) - files_per_threat} more files with this "
@@ -393,13 +393,13 @@ def file_info(engine: Engine, filepath: str) -> None:
             FileRecord.filepath == filepath
         ).first()
         if record is None:
-            print(f"File not found in database: {filepath}")
+            print(f"File not found in database: {shown(filepath)}")
             return
         print("\n=== FILE INFO ===")
-        print(f"Path: {record.filepath}")
+        print(f"Path: {shown(record.filepath)}")
         print(f"Hash: {record.file_hash}")
         print(f"Size: {record.file_size} bytes")
         print(f"Scan Status: {record.scan_status}")
         if record.threat_name:
-            print(f"Threat: {record.threat_name}")
+            print(f"Threat: {shown(record.threat_name)}")
         print(f"Last Scanned: {record.last_scanned}")

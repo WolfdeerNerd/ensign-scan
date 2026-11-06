@@ -44,8 +44,8 @@ from . import secrets
 from .clamd import ClamdClient, ScanOutcome, clamscan_cli_available, is_size_limit_error, scan_with_clamscan_cli
 from .config import Config
 from .db import make_engine
-from .fsutil import NotScannable, is_scannable, open_for_scan, safe_lstat, sha256_fd, stat_or_error
-from .models import DirectoryRecord, FileRecord, ScanStatus, utcnow
+from .fsutil import NotScannable, is_scannable, open_for_scan, safe_lstat, sha256_fd, shown, stat_or_error
+from .models import DirectoryRecord, FileRecord, ScanStatus, path_under, utcnow
 from .progress import RunProgress
 
 log = logging.getLogger(__name__)
@@ -200,10 +200,10 @@ class Scanner:
 
     def scan_tree(self, root: Path | str, scan: bool = True) -> TreeStats:
         """Scan every new or changed regular file under `root`."""
-        root = Path(root)
+        root = Path(os.path.abspath(root))  # stored paths must be absolute; see cli.main
         stats = TreeStats()
         if not root.is_dir():
-            print(f"[yellow]Skipping {root}: not a directory[/yellow]")
+            print(f"[yellow]Skipping {shown(root)}: not a directory[/yellow]")
             return stats
 
         if scan:
@@ -363,12 +363,11 @@ class Scanner:
 
     def _load_known_files(self, root: Path) -> dict[str, _Known]:
         # One query up front instead of one query per file during the walk.
-        prefix = str(root).rstrip("/") + "/"
         with Session(self.engine) as session:
             rows = session.query(
                 FileRecord.filepath, FileRecord.file_size, FileRecord.mtime_ns,
                 FileRecord.ctime_ns, FileRecord.scan_status, FileRecord.sig_version,
-            ).filter(FileRecord.filepath.like(f"{prefix}%")).all()
+            ).filter(path_under(FileRecord.filepath, str(root))).all()
         return {row[0]: _Known(*row[1:]) for row in rows if row[2] is not None}
 
     # ------------------------------------------------------------------
@@ -513,7 +512,7 @@ class Scanner:
             # legitimately large file still gets a real verdict instead
             # of a permanent error.
             if clamscan_cli_available():
-                print(f"[dim]→ {path.name} exceeds clamd's size limit, falling back to clamscan CLI…[/dim]")
+                print(f"[dim]→ {shown(path.name)} exceeds clamd's size limit, falling back to clamscan CLI…[/dim]")
                 outcome = scan_with_clamscan_cli(path)
             elif not self._warned_no_clamscan_cli:
                 print("[yellow]! Some files exceed clamd's size limit and the 'clamscan' CLI "
@@ -523,7 +522,7 @@ class Scanner:
         try:
             previous_hash = self._upsert_file(path, st, digest, outcome)
         except Exception as exc:
-            print(f"[red]✗ DB error on {path.name}: {exc}[/red]")
+            print(f"[red]✗ DB error on {shown(path.name)}: {shown(exc)}[/red]")
             log.error("%s: %s", path, exc)
             return None, "failed"
 
@@ -540,7 +539,7 @@ class Scanner:
 
         status = outcome.status.value if outcome else ScanStatus.PENDING.value
         symbol = _STATUS_SYMBOLS.get(status, "?")
-        print(f"{symbol} {path.name:.<50} {digest[:16]}… {status}")
+        print(f"{symbol} {shown(path.name):.<50} {digest[:16]}… {status}")
         return digest, status
 
     def _known_infected(self, path: Path) -> bool:
@@ -563,11 +562,11 @@ class Scanner:
         try:
             self._upsert_file(path, st, "", outcome)
         except Exception as exc:
-            print(f"[red]✗ DB error on {path.name}: {exc}[/red]")
+            print(f"[red]✗ DB error on {shown(path.name)}: {shown(exc)}[/red]")
             log.error("%s: %s", path, exc)
             return None, "failed"
         status = ScanStatus.CLASSIFIED.value
-        print(f"{_STATUS_SYMBOLS[status]} {path.name:.<50} {'not read':<17} {status}")
+        print(f"{_STATUS_SYMBOLS[status]} {shown(path.name):.<50} {'not read':<17} {status}")
         return "", status
 
     def _upsert_file(
