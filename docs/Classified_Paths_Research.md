@@ -1,5 +1,7 @@
 # Canonical Secrets, Credentials, Wallet & Keyring Storage Filenames — A Detection Reference for Ensign
 
+> **Update (Nov 2026):** how Ensign *uses* these patterns has changed since this was written. It no longer suggests `setfacl` commands or reclassifies permission-denied errors: clamd now receives an open file handle from Ensign instead of opening files itself. A HIGH-confidence match is now skipped before it's opened (no hash, no scan), except for executables and the watched SSH files (`authorized_keys`, `~/.ssh/config`, `~/.ssh/rc`). See "How clamd Reads Your Files" in the README. The sourcing below still defines the pattern lists themselves.
+
 ## TL;DR
 - This report catalogs ~70 high-confidence, real-world filenames, directory names, and extensions used by SSH, GPG, cryptocurrency wallets, password managers, cloud CLIs, container tooling, browsers, and shell/environment secret conventions — split into **exact fixed strings** (safe to match with string equality: `id_rsa`, `wallet.dat`, `pubring.kbx`, `credentials`, `config.json`, `.vault-token`, etc.) and **naming conventions/prefixes** (require pattern matching: Ethereum `UTC--*` keystore files, `*.kdbx`, `*.keys`, `*.seco`, `*.ppk`).
 - For Ensign's two use cases, a path is treated as a likely sensitive store when it matches an exact fixed directory (`.ssh/`, `.gnupg/`, `.aws/`, `.gnupg/private-keys-v1.d/`), an exact fixed filename, or a strongly-scoped extension/prefix — and, on those paths, `setfacl` suggestions are suppressed and permission-denied errors are reclassified as benign.
