@@ -1,10 +1,10 @@
-# Ensign
+# Ensign — local-first ClamAV file scanner for Linux
 
 Greetings!
 
 Ensign was originally a personal project. I liked clamscan, but I noticed it would keep breaking on certain files in my system — permission denials when clamd's own user couldn't read a path, files rejected outright for exceeding clamd's size limit, broken symlinks pointing at files that no longer exist, and a genuinely bizarre recursive mess with Steam's Proton Z: drive that kept re-scanning snapshots of snapshots of itself (more on that further down). On top of that, temp files have a way of vanishing between one moment and the next — the world of seemingly quantum temp files is terrifying.
 
-I decided to make a logic brain for this madness, Ensign. The idea was for Ensign to walk the entire system and log every file in an SQLAlchemy database. That database file is kept locally on **your** system. The db includes the id, filepath, filename, file hash, file size, modification time (mtime_ns), inode change time (ctime_ns), the version of ClamAV's signature database it was last scanned under, scan status, scan result, threat name, last time file was scanned, file creation time, and 'last updated at time' of each file logged in the db.
+I decided to make a logic brain for this madness, Ensign. The idea was for Ensign to walk the entire system and log every file in an SQLAlchemy database. That database file is kept locally on **your** system. The db includes the id, filepath, filename, file hash (left blank for credential files, which Ensign never reads), file size, modification time (mtime_ns), inode change time (ctime_ns), the version of ClamAV's signature database it was last scanned under, scan status, scan result, threat name, last time file was scanned, file creation time, and 'last updated at time' of each file logged in the db.
 
 The idea was to be as paranoid as possible when designing this. That being said, it is completely possible that someone one else will notice something I missed and that in itself, is okay.
 
@@ -118,7 +118,7 @@ clamd runs as its own unprivileged user, `clamav`, not as you. Ensign doesn't as
 - **`~/.ssh/authorized_keys`, `authorized_keys2`, `config` and `rc` are scanned and watched.** They hold no secrets, but they decide who can log in and what runs, so an intruder edits them to get back in. If one changes between runs, or appears where it didn't exist before, the run ends with an "SSH FILES CHANGED SINCE LAST RUN" section. A change you made yourself shows up there too; it's there so no change goes unnoticed.
 - **A file ClamAV already found infected is always rescanned**, even if its name looks like a credential file, so a found infection can't quietly turn into "classified".
 
-The first run after upgrading to this version removes the hashes older versions stored for credential files (overwriting them on disk, not just deleting the rows) and rescans files that were permission errors before. A backup or filesystem snapshot of the database taken earlier still holds the old hashes.
+The first run after upgrading from 0.2.x or earlier removes the hashes older versions stored for credential files (overwriting them on disk, not just deleting the rows) and rescans files that were permission errors before. A backup or filesystem snapshot of the database taken earlier still holds the old hashes. Don't run an older Ensign against the same database afterwards: it hashes every file it scans, credential files included, and would store those hashes again.
 
 ## Threading & Worker Sizing
 
@@ -264,7 +264,7 @@ See what's been classified (credential files Ensign deliberately never opened):
 sqlite3 ~/.local/share/ensign/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='classified';"
 ```
 
-The list of paths/filenames/extensions used to make that call isn't arbitrary — see `docs/Classified_Paths_Research.md` for the sourcing behind each entry, and `ensign_scan/secrets.py` for the confidence tiers and how the two different call sites use them.
+The list of paths/filenames/extensions used to make that call isn't arbitrary — see `docs/Classified_Paths_Research.md` for the sourcing behind each entry, and `ensign_scan/secrets.py` for the confidence tiers and how `skip_reason()` uses them.
 
 See infected files and what triggered them:
 ```
