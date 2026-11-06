@@ -23,11 +23,12 @@ class ScanStatus(str, Enum):
     INFECTED = "infected"
     ERROR = "error"
     PENDING = "pending"
-    # Permission was denied, but the path matches a known secrets
-    # pattern (wallets, SSH/GPG keys, etc) -- treated as expected, not
-    # an error to chase. Distinct from ERROR so it naturally drops out
-    # of error_summary() and suggest_fixes() without either needing to
-    # special-case it.
+    # The path matches a high-confidence credential pattern (wallets,
+    # SSH/GPG keys, password vaults, ...), so Ensign deliberately never
+    # opened it: no hash (file_hash is ""), no clamd verdict. Decided from
+    # the path and stat() alone -- see secrets.skip_reason(). Distinct from
+    # ERROR so it naturally drops out of error_summary() and
+    # suggest_fixes() without either needing to special-case it.
     CLASSIFIED = "classified"
 
 

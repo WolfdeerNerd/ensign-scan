@@ -24,8 +24,8 @@ from rich import print
 from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
 from ensign_scan import diagnostics, explanations, logsetup, notify, pacman, secrets
 from ensign_scan.runlock import AlreadyRunning, RunLock
-from ensign_scan.reports import error_summary, list_infected, pacman_report, scan_summary, suggest_fixes, unreadable_report
-from ensign_scan.scanner import Scanner
+from ensign_scan.reports import error_summary, integrity_report, list_infected, pacman_report, scan_summary, suggest_fixes, unreadable_report
+from ensign_scan.scanner import ClamdRunsAsRoot, Scanner
 
 EXIT_BUSY = 75  # sysexits EX_TEMPFAIL: another Ensign holds the lock; try again later
 
@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
                         help="Print versions, settings and counts for a bug report, then exit. "
                              "Contains no paths, usernames, hostnames or file names.")
     parser.add_argument("--suggest-fixes", action="store_true",
-                        help="Print suggested setfacl fixes for current errors, then exit (no full scan). "
+                        help="List files clamd could not read, grouped by directory, then exit (no full scan). "
                              "Scoped to any targets given.")
     return parser.parse_args()
 
@@ -119,6 +119,17 @@ def main() -> int:
         lock.release()
 
 
+def clamd_is_safe(scanner: Scanner) -> bool:
+    """Check clamd once before any file is sent to it. False (with the
+    reason printed) if it runs as root -- Ensign then scans nothing."""
+    try:
+        scanner.prepare_clamd()
+    except ClamdRunsAsRoot as exc:
+        print(f"[red]✗ {exc}[/red]")
+        return False
+    return True
+
+
 def run(args: argparse.Namespace, config: Config) -> int:
     greet(config)
 
@@ -129,6 +140,8 @@ def run(args: argparse.Namespace, config: Config) -> int:
     if args.rescan_errors:
         if not scanner.clamd.ping():
             print("[red]✗ clamd is not answering on its socket.[/red]")
+            return 1
+        if not clamd_is_safe(scanner):
             return 1
         scanner.rescan_errors()
         return 0
@@ -148,6 +161,8 @@ def run(args: argparse.Namespace, config: Config) -> int:
         print("  Start it with: sudo systemctl start clamav-daemon")
         return 1
     if scan:
+        if not clamd_is_safe(scanner):
+            return 1
         print("[green]✓ clamd is up.[/green]")
         if config.signature_max_age_days > 0:
             sig_age = scanner.clamd.signature_age_days()
@@ -180,6 +195,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
         print(f"Broken symlinks / vanished files skipped: {len(missing)}")
     error_summary(scanner.engine, paths=args.targets or None)
     unreadable_report(unreadable)
+    integrity_report(scanner.integrity_changes)
     infected = list_infected(scanner.engine, paths=args.targets or None)
     suggest_fixes(scanner.engine, paths=args.targets or None)
     notify.send(summary, infected, config.infected_alert_seconds,

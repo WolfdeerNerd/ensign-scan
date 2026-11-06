@@ -5,10 +5,19 @@
 
         walk -> prune unchanged snapshot subtrees -> stat each file
             -> skip files whose (size, mtime, ctime) match the DB
-            -> hash + clamd-scan the rest in a thread pool -> upsert
+            -> for the rest, in a thread pool:
+                 credential file? -> record as CLASSIFIED, never opened
+                 otherwise        -> open once as the user -> hash it
+                                     -> pass that same descriptor to clamd
+                                     -> upsert
 
     Each file is visited exactly once per run. Unchanged files cost one
     stat() call and nothing else — no reads, no hashing, no clamd.
+
+    clamd never opens your files itself (see clamd.py): Ensign opens each
+    one with your permissions and hands clamd the open descriptor, so no
+    ACL or group grant is needed, and clamd can't read anything Ensign
+    didn't give it.
 
     Symlinks to regular files ARE followed and scanned (via safe_stat, not
     safe_lstat) -- a symlink is a common, low-effort way for something to
@@ -21,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -31,14 +41,35 @@ from rich import print
 from sqlalchemy.orm import Session
 
 from . import secrets
-from .clamd import ClamdClient, ScanOutcome, clamscan_cli_available, is_permission_error, is_size_limit_error, scan_with_clamscan_cli
+from .clamd import ClamdClient, ScanOutcome, clamscan_cli_available, is_size_limit_error, scan_with_clamscan_cli
 from .config import Config
 from .db import make_engine
-from .fsutil import is_scannable, safe_lstat, sha256_file, stat_or_error
+from .fsutil import NotScannable, is_scannable, open_for_scan, safe_lstat, sha256_fd, stat_or_error
 from .models import DirectoryRecord, FileRecord, ScanStatus, utcnow
 from .progress import RunProgress
 
 log = logging.getLogger(__name__)
+
+
+class ClamdRunsAsRoot(RuntimeError):
+    """clamd is running as root; Ensign refuses to send it anything."""
+
+
+ROOT_CLAMD_MESSAGE = (
+    "clamd is running as root. Ensign won't send it any files: clamd parses "
+    "untrusted content, so a flaw in it would run with full control of the "
+    "machine, and ClamAV itself advises against running it as root. Set "
+    "'User clamav' in clamd.conf, then: sudo systemctl restart clamav-daemon"
+)
+
+
+@dataclass(frozen=True)
+class IntegrityChange:
+    """An INTEGRITY_WATCHED file (authorized_keys, ~/.ssh/config, ...)
+    whose contents differ from the last run."""
+    path: str
+    old_hash: str
+    new_hash: str
 
 _STATUS_SYMBOLS = {
     ScanStatus.CLEAN.value: "[green]✓[/green]",
@@ -92,6 +123,43 @@ class Scanner:
         # stamped with the same (possibly slightly old, never too new)
         # version -- if clamd reloads mid-run, the next run rescans.
         self._sig_version: int | None = None
+        # How files reach clamd: "fd" (FILDES, the normal case) or "path"
+        # (SCAN, when clamd lacks FILDES). Decided once, by prepare_clamd().
+        self._transport: str | None = None
+        self._prepare_lock = threading.Lock()
+        # Watched SSH files that changed this run; appended from worker
+        # threads, read by the CLI after the scan.
+        self.integrity_changes: list[IntegrityChange] = []
+        self._integrity_lock = threading.Lock()
+        # Watched files that didn't exist at the last scan of a tree that
+        # had been scanned before: a new authorized_keys is a change too.
+        self._watched_new: set[str] = set()
+
+    def prepare_clamd(self) -> None:
+        """Check clamd once, before the first file is sent to it.
+
+        Raises ClamdRunsAsRoot if clamd runs as root (fail closed: no
+        fallback, nothing is scanned). Otherwise picks the transport:
+        FILDES when the daemon offers it, else path SCAN with a warning,
+        since then clamd can only scan what the clamav user can read.
+        """
+        with self._prepare_lock:  # worker threads may all arrive at once
+            if self._transport is None:
+                self._transport = self._choose_transport()
+
+    def _choose_transport(self) -> str:
+        uid = self.clamd.daemon_uid()
+        if uid == 0:
+            raise ClamdRunsAsRoot(ROOT_CLAMD_MESSAGE)
+        if uid is None:
+            print("[yellow]! Couldn't confirm which user clamd runs as (no access to "
+                  "its /proc entry). Continuing; check with: ps -o user= -C clamd[/yellow]")
+        if self.clamd.supports_fildes():
+            return "fd"
+        print("[yellow]! This clamd can't receive open files (no FILDES). Falling back "
+              "to path scanning: clamd can only scan files the 'clamav' user can read, "
+              "and the rest are recorded as errors.[/yellow]")
+        return "path"
 
     @property
     def workers(self) -> int:
@@ -138,6 +206,8 @@ class Scanner:
             print(f"[yellow]Skipping {root}: not a directory[/yellow]")
             return stats
 
+        if scan:
+            self.prepare_clamd()
         self._sig_version = self.clamd.signature_version() if scan else None
         known = self._load_known_files(root)
         candidates = self._collect_changed_files(root, known, stats)
@@ -220,6 +290,8 @@ class Scanner:
                     continue
                 stats.seen += 1
                 prev = known.get(str(path))
+                if prev is None and known and secrets.is_integrity_watched(str(path)):
+                    self._watched_new.add(str(path))
                 if prev is None or (prev.size, prev.mtime_ns) != (st.st_size, st.st_mtime_ns):
                     candidates.append(path)
                 elif prev.ctime_ns != st.st_ctime_ns:
@@ -364,14 +436,15 @@ class Scanner:
         """
         Hash one file, optionally clamd-scan it, and upsert the record.
 
-        Returns the hash on success, None on any failure. Safe to call
-        from worker threads: it opens its own short-lived session.
+        Returns the hash on success, "" for a credential file recorded
+        without being read, None on any failure. Safe to call from worker
+        threads: it opens its own short-lived session.
         """
         return self._process_file(path, scan)[0]
 
     def _process_file(self, path: Path | str, scan: bool = True) -> tuple[str | None, str]:
         """process_file, plus what happened: the second value is the scan
-        status ("clean", "infected", "error", ...), or "skipped" for a file
+        status ("clean", "infected", "error", "classified", ...), or "skipped" for a file
         that vanished or isn't a regular file, or "failed" if it couldn't be
         hashed or recorded."""
         path = Path(path)
@@ -386,11 +459,49 @@ class Scanner:
         if not is_scannable(st):
             return None, "skipped"
 
-        digest = sha256_file(path)
-        if digest is None:
-            return None, "failed"
+        # Credential files are decided on the path and stat() alone, before
+        # anything opens them: no hash is taken and clamd never sees them.
+        reason = secrets.skip_reason(str(path), os.path.realpath(path), st.st_mode)
+        if reason is not None and not self._known_infected(path):
+            return self._record_classified(path, st, reason)
 
-        outcome = self.clamd.scan(path) if scan else None
+        if scan:
+            self.prepare_clamd()  # no-op after the first call; raises if clamd is root
+
+        try:
+            fd, st = open_for_scan(path)
+        except NotScannable:
+            return None, "skipped"  # swapped for a FIFO/device/empty file mid-run
+        except FileNotFoundError:
+            return None, "skipped"
+        except OSError as exc:
+            log.error("read failed for %s: %s", path, exc)
+            return None, "failed"
+        try:
+            # The link could have been re-pointed between realpath() above
+            # and open(). Ask the kernel what was actually opened, and
+            # re-check before reading a single byte of it.
+            if reason is None:
+                try:
+                    opened = os.readlink(f"/proc/self/fd/{fd}")
+                except OSError:
+                    opened = os.path.realpath(path)
+                late = secrets.skip_reason(str(path), opened, st.st_mode)
+                if late is not None and not self._known_infected(path):
+                    return self._record_classified(path, st, late)
+            try:
+                digest = sha256_fd(fd)
+            except OSError as exc:
+                log.error("read failed for %s: %s", path, exc)
+                return None, "failed"
+            if not scan:
+                outcome = None
+            elif self._transport == "path":
+                outcome = self.clamd.scan(path)
+            else:
+                outcome = self.clamd.scan_fd(fd, label=str(path))
+        finally:
+            os.close(fd)
 
         if (
             outcome is not None
@@ -400,7 +511,7 @@ class Scanner:
             # clamd rejected this file for size, not content -- fall back
             # to the clamscan CLI with limits explicitly disabled, so a
             # legitimately large file still gets a real verdict instead
-            # of a permanent, unfixable-by-setfacl error.
+            # of a permanent error.
             if clamscan_cli_available():
                 print(f"[dim]→ {path.name} exceeds clamd's size limit, falling back to clamscan CLI…[/dim]")
                 outcome = scan_with_clamscan_cli(path)
@@ -409,40 +520,67 @@ class Scanner:
                       "isn't installed to fall back on — install clamav's clamscan for full coverage.[/yellow]")
                 self._warned_no_clamscan_cli = True
 
-        if (
-            outcome is not None
-            and outcome.status == ScanStatus.ERROR
-            and is_permission_error(outcome.raw)
-            and secrets.is_high_confidence_secrets_path(str(path))
-        ):
-            # clamd was refused access, and the path looks like a
-            # secrets store (wallet, SSH/GPG keys, ...) -- that's very
-            # likely correct, not a gap to close. Reactive, not
-            # presumptive: this only fires on an actual denial, so if
-            # permissions ever change, the next real scan attempt just
-            # succeeds normally instead of staying stuck here.
-            outcome = ScanOutcome(ScanStatus.CLASSIFIED, outcome.raw, outcome.threat_name)
-
         try:
-            self._upsert_file(path, st, digest, outcome)
+            previous_hash = self._upsert_file(path, st, digest, outcome)
         except Exception as exc:
             print(f"[red]✗ DB error on {path.name}: {exc}[/red]")
             log.error("%s: %s", path, exc)
             return None, "failed"
+
+        if secrets.is_integrity_watched(str(path)):
+            if previous_hash and previous_hash != digest:
+                change = IntegrityChange(str(path), previous_hash, digest)
+            elif previous_hash is None and str(path) in self._watched_new:
+                change = IntegrityChange(str(path), "", digest)  # created since last run
+            else:
+                change = None  # unchanged, or the very first scan (the baseline)
+            if change is not None:
+                with self._integrity_lock:
+                    self.integrity_changes.append(change)
 
         status = outcome.status.value if outcome else ScanStatus.PENDING.value
         symbol = _STATUS_SYMBOLS.get(status, "?")
         print(f"{symbol} {path.name:.<50} {digest[:16]}… {status}")
         return digest, status
 
+    def _known_infected(self, path: Path) -> bool:
+        """True if the database already has this file as INFECTED. Such a
+        file is never skipped as a credential file, even if its name
+        matches: a found infection must not quietly turn into "classified"."""
+        with Session(self.engine) as session:
+            status = session.query(FileRecord.scan_status).filter(
+                FileRecord.filepath == str(path)
+            ).scalar()
+        return status == ScanStatus.INFECTED.value
+
+    def _record_classified(
+        self, path: Path, st: os.stat_result, reason: str
+    ) -> tuple[str | None, str]:
+        """Record a credential file without reading it. The hash is stored
+        as "" (the column can't be NULL), and any hash an older version
+        stored for it is overwritten."""
+        outcome = ScanOutcome(ScanStatus.CLASSIFIED, reason)
+        try:
+            self._upsert_file(path, st, "", outcome)
+        except Exception as exc:
+            print(f"[red]✗ DB error on {path.name}: {exc}[/red]")
+            log.error("%s: %s", path, exc)
+            return None, "failed"
+        status = ScanStatus.CLASSIFIED.value
+        print(f"{_STATUS_SYMBOLS[status]} {path.name:.<50} {'not read':<17} {status}")
+        return "", status
+
     def _upsert_file(
         self, path: Path, st: os.stat_result, digest: str, outcome: ScanOutcome | None
-    ) -> None:
+    ) -> str | None:
+        """Insert or update the file's row. Returns the hash the row held
+        before this update, or None if the file wasn't in the database."""
         with Session(self.engine) as session:
             try:
                 record = session.query(FileRecord).filter(
                     FileRecord.filepath == str(path)
                 ).first()
+                previous_hash = record.file_hash if record is not None else None
                 if record is None:
                     record = FileRecord(filepath=str(path), filename=path.name, file_hash=digest)
                     session.add(record)
@@ -461,6 +599,7 @@ class Scanner:
             except Exception:
                 session.rollback()
                 raise
+        return previous_hash
 
     def purge_missing(self) -> int:
         """
@@ -517,6 +656,7 @@ class Scanner:
         print(f"\nRescanning {len(paths)} {label} files…")
         if not paths:
             return
+        self.prepare_clamd()
         # Stamp these verdicts with the database that actually produced them.
         self._sig_version = self.clamd.signature_version()
         self._process_all(paths, True, f"Rescan Progress ({label})")
