@@ -75,6 +75,65 @@ def is_scannable(st: os.stat_result) -> bool:
     return statmod.S_ISREG(st.st_mode) and st.st_size > 0
 
 
+class NotScannable(OSError):
+    """open_for_scan() opened something that isn't a regular, non-empty
+    file -- the path changed between the walk's stat() and the open."""
+
+
+# O_RDONLY  -- the descriptor clamd receives can only read, never write.
+# O_CLOEXEC -- not inherited by anything Ensign runs (clamscan, pacman, ...).
+# O_NONBLOCK -- stat() said "regular file", but if the path is swapped for a
+#               FIFO before open(), a blocking open() would hang a worker
+#               forever waiting for a writer. Non-blocking returns at once,
+#               and the fstat() check below rejects it. (It has no effect
+#               on reads from a regular file.)
+# O_NOCTTY  -- a swapped-in terminal device can't become a controlling tty.
+# Not O_NOFOLLOW: symlinks to files are followed on purpose (see scanner.py).
+# The fstat() check applies to whatever the link resolved to.
+_SCAN_OPEN_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOCTTY
+
+
+def open_for_scan(path: Path) -> tuple[int, os.stat_result]:
+    """Open `path` read-only for hashing and scanning, as the invoking user.
+
+    Returns (fd, fstat result). The caller owns the descriptor and must
+    close it. Raises OSError if it can't be opened (permission denied,
+    vanished, ...), or NotScannable if what got opened isn't a regular,
+    non-empty file.
+
+    Hashing and scanning through this one descriptor means the hash
+    recorded and the verdict recorded are for the same file. With
+    separate opens by path, the file could be replaced in between and the
+    database would pair one file's hash with another file's verdict.
+    """
+    fd = os.open(path, _SCAN_OPEN_FLAGS)
+    try:
+        st = os.fstat(fd)
+        if not is_scannable(st):
+            raise NotScannable(f"{path}: not a regular, non-empty file when opened")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, st
+
+
+def sha256_fd(fd: int) -> str:
+    """SHA-256 hex digest of an open file, read from the start.
+
+    Uses pread (an explicit offset), so it never moves the descriptor's
+    shared position, and raises OSError on a read failure.
+    """
+    hasher = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(fd, CHUNK_SIZE, offset)
+        if not chunk:
+            break
+        hasher.update(chunk)
+        offset += len(chunk)
+    return hasher.hexdigest()
+
+
 def sha256_file(path: Path) -> str | None:
     """SHA-256 hex digest of a file, or None on read failure.
 

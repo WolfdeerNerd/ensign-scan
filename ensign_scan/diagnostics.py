@@ -130,10 +130,14 @@ def _clamav_section(config: Config) -> list[str]:
     except OSError:
         reply = "unknown"
     age = client.signature_age_days()
+    uid = client.daemon_uid()
+    runs_as = "unknown" if uid is None else ("root (Ensign refuses to scan)" if uid == 0 else "unprivileged user")
     return [
         "  clamd:               answering",
         f"  version:             {reply}",
         f"  signature age:       {'unknown' if age is None else f'{age} days'}",
+        f"  fd passing:          {'supported' if client.supports_fildes() else 'not supported (path scanning)'}",
+        f"  clamd runs as:       {runs_as}",
     ]
 
 
