@@ -118,7 +118,7 @@ clamd runs as its own unprivileged user, `clamav`, not as you. Ensign doesn't as
 - **`~/.ssh/authorized_keys`, `authorized_keys2`, `config` and `rc` are scanned and watched.** They hold no secrets, but they decide who can log in and what runs, so an intruder edits them to get back in. If one changes between runs, or appears where it didn't exist before, the run ends with an "SSH FILES CHANGED SINCE LAST RUN" section. A change you made yourself shows up there too; it's there so no change goes unnoticed.
 - **A file ClamAV already found infected is always rescanned**, even if its name looks like a credential file, so a found infection can't quietly turn into "classified".
 
-The first run after upgrading from 0.2.x or earlier removes the hashes older versions stored for credential files (overwriting them on disk, not just deleting the rows) and rescans files that were permission errors before. A backup or filesystem snapshot of the database taken earlier still holds the old hashes. Don't run an older Ensign against the same database afterwards: it hashes every file it scans, credential files included, and would store those hashes again.
+The first run of 0.3.0, after upgrading from 0.2.x or earlier, removes the hashes older versions stored for credential files (overwriting them on disk, not just deleting the rows) and rescans files that were permission errors before. A backup or filesystem snapshot of the database taken earlier still holds the old hashes. Don't run an older Ensign against the same database afterwards: it hashes every file it scans, credential files included, and would store those hashes again.
 
 ## Threading & Worker Sizing
 
@@ -244,7 +244,7 @@ high_prefixes = [["mywallet_", "wallets"]]
 
 - **`[custom_threats]`** adds a note for a threat name. The name must match exactly, including the numbers.
 - **`[custom_pacman_reasons]`** adds a note for a `pacman -Qkk` mismatch reason.
-- **`[custom_secrets]`** adds paths that look like secrets stores. The keys are `high_dirs`, `high_dir_paths`, `high_filenames`, `high_extensions`, `high_scoped_filenames`, `high_prefixes`, `medium_prefixes` and `medium_extensions`. A HIGH match means the file is recorded as `classified` and never opened (see How clamd Reads Your Files); a MEDIUM match is still scanned. See `ensign_scan/secrets.py` for what the tiers mean.
+- **`[custom_secrets]`** adds paths that look like secrets stores. The keys are `high_dirs`, `high_dir_paths`, `high_filenames`, `high_extensions`, `high_scoped_filenames`, `high_prefixes`, `medium_prefixes` and `medium_extensions`. Folder entries match whole folder names, in order (`myapp/keys` matches `~/myapp/keys/`, not `~/myapp-old/keys/`). A HIGH match means the file is recorded as `classified` and never opened (see How clamd Reads Your Files); a MEDIUM match is still scanned. See `ensign_scan/secrets.py` for what the tiers mean.
 
 The first time you run Ensign it writes a starter `config.toml` with all of these documented as comments. `config.example.toml` in the repo has the same content.
 
