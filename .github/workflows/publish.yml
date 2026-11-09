@@ -35,8 +35,53 @@ jobs:
           name: dist
           path: dist/
 
-  publish:
+  # Test the exact files that will be uploaded, before they're uploaded.
+  # The test job above checked this commit's source; this checks that the
+  # built wheel and sdist install cleanly and work, and that their version
+  # matches the release tag (PyPI would reject a reused version anyway,
+  # but only after the approval, and with a less obvious error).
+  verify-dist:
     needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Only for cli_live_test.py and pyproject.toml; the package under
+      # test comes from the downloaded dist files, not this checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: Install the wheel and the sdist, each into a clean venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/*.whl) sdists=(dist/*.tar.gz)
+          (( ${#wheels[@]} == 1 && ${#sdists[@]} == 1 )) || {
+            echo "::error::expected one wheel and one sdist, got: $(ls dist)"; exit 1; }
+          python -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/pip install "${wheels[0]}"
+          python -m venv /tmp/sdist-venv
+          /tmp/sdist-venv/bin/pip install "${sdists[0]}"
+      - name: The installed packages work and match the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ENSIGN_EXPECT_VERSION="${GITHUB_REF_NAME#v}"
+          for venv in /tmp/wheel-venv /tmp/sdist-venv; do
+            echo "::group::$venv"
+            ENSIGN_CLI="$venv/bin/ensign-scan" python cli_live_test.py
+            echo "::endgroup::"
+          done
+
+  publish:
+    needs: [build, verify-dist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
