@@ -127,7 +127,7 @@ jobs:
     timeout-minutes: 20
     env:
       ENSIGN_CLI: /tmp/ensign-venv/bin/ensign-scan
-      ENSIGN_TEST_CLAMD_SOCKET: /run/clamav/ensign-test.ctl
+      ENSIGN_TEST_CLAMD_SOCKET: /run/clamav/clamd.ctl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

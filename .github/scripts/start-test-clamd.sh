@@ -8,8 +8,9 @@
 # gives the same result on every run.
 #
 # Ubuntu confines clamd with AppArmor, and its profile only lets clamd read
-# its standard config file, /etc/clamav/clamd.conf. So this script
-# OVERWRITES that file -- fine on a throwaway CI machine, not on yours.
+# its standard config file (/etc/clamav/clamd.conf) and create its
+# standard socket (/run/clamav/clamd.ctl). So this script uses both, and
+# OVERWRITES that config -- fine on a throwaway CI machine, not on yours.
 # It refuses to run unless $CI is set (GitHub Actions sets CI=true).
 # The other paths stay under /var/lib/clamav, /run/clamav and
 # /var/log/clamav, which the profile also allows.
@@ -22,7 +23,7 @@ if [ -z "${CI:-}" ]; then
     exit 1
 fi
 
-SOCKET=/run/clamav/ensign-test.ctl
+SOCKET=/run/clamav/clamd.ctl
 CONF=/etc/clamav/clamd.conf
 DB=/var/lib/clamav/ensign-test
 LOG=/var/log/clamav/ensign-test.log
