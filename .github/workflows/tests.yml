@@ -142,7 +142,7 @@ jobs:
           python -m venv /tmp/ensign-venv
           /tmp/ensign-venv/bin/pip install dist/*.whl
       - name: Start a clamd that knows only the EICAR test signature
-        run: sudo .github/scripts/start-test-clamd.sh
+        run: sudo --preserve-env=CI .github/scripts/start-test-clamd.sh
       # The whole suite again, now with the live checks on: fdpass_test.py
       # scans EICAR through a real clamd, cli_live_test.py runs the
       # installed command end to end.
@@ -160,9 +160,11 @@ jobs:
       # run must still hand clamd open files rather than run clamd as root.
       - name: Run the installed command under sudo
         run: sudo --preserve-env=ENSIGN_CLI,ENSIGN_TEST_CLAMD_SOCKET "$(command -v python)" cli_live_test.py
-      - name: Show the clamd log
+      - name: Show the clamd log and any AppArmor denials
         if: failure()
-        run: sudo cat /var/log/clamav/ensign-test.log
+        run: |
+          sudo cat /var/log/clamav/ensign-test.log || true
+          sudo dmesg | grep -i 'apparmor.*clamd' | tail -20 || true
 
   # One stable check name for the branch ruleset to require. Requiring the
   # jobs directly would break whenever a job or matrix entry changes.

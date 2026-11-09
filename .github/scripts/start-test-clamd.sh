@@ -7,15 +7,23 @@
 # EICAR test file is all the database there is, so the test is fast and
 # gives the same result on every run.
 #
-# Paths stay under /etc/clamav, /var/lib/clamav, /run/clamav and
-# /var/log/clamav: Ubuntu confines clamd with AppArmor, and those are the
-# places its profile lets clamd use.
+# Ubuntu confines clamd with AppArmor, and its profile only lets clamd read
+# its standard config file, /etc/clamav/clamd.conf. So this script
+# OVERWRITES that file -- fine on a throwaway CI machine, not on yours.
+# It refuses to run unless $CI is set (GitHub Actions sets CI=true).
+# The other paths stay under /var/lib/clamav, /run/clamav and
+# /var/log/clamav, which the profile also allows.
 #
 # Prints nothing on success; the socket is $SOCKET.
 set -euo pipefail
 
+if [ -z "${CI:-}" ]; then
+    echo "refusing to run outside CI: this overwrites /etc/clamav/clamd.conf" >&2
+    exit 1
+fi
+
 SOCKET=/run/clamav/ensign-test.ctl
-CONF=/etc/clamav/ensign-test.conf
+CONF=/etc/clamav/clamd.conf
 DB=/var/lib/clamav/ensign-test
 LOG=/var/log/clamav/ensign-test.log
 
