@@ -3,12 +3,14 @@ name: Tests
 # Runs the test suite on every PR and every push to main, and is also
 # called by publish.yml so a release can't publish unless it passes.
 #
-# Four kinds of job, all required by the "Tests passed" check:
+# Five kinds of job, all required by the "Tests passed" check:
 #   test    the suite on every supported Python, on the Ubuntu runner
 #   distro  the suite inside other distributions, on their own Python and
 #           libraries, with live checks of that distro's package manager
 #   live    the installed package (built wheel, clean venv) against a real
 #           clamd, as a regular user and under sudo
+#   deps    on pull requests: blocks any change that adds a dependency or
+#           action version with a known vulnerability
 #   passed  one stable check name for the branch ruleset to require
 on:
   push:
@@ -166,12 +168,29 @@ jobs:
           sudo cat /var/log/clamav/ensign-test.log || true
           sudo dmesg | grep -i 'apparmor.*clamd' | tail -20 || true
 
+  # Compares the dependencies (requirements.txt, pyproject.toml, and the
+  # actions used in workflows) before and after a pull request, and fails
+  # if the change brings in a version with a published vulnerability of
+  # any severity. Only pull requests have a "before and after", so on
+  # pushes and releases this job is skipped -- by then every change has
+  # already passed it to reach main.
+  deps:
+    name: dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+          fail-on-scopes: runtime, development, unknown
+
   # One stable check name for the branch ruleset to require. Requiring the
   # jobs directly would break whenever a job or matrix entry changes.
   passed:
     name: Tests passed
     if: always()
-    needs: [test, distro, live]
+    needs: [test, distro, live, deps]
     runs-on: ubuntu-latest
     steps:
       - name: Every job passed
@@ -179,3 +198,9 @@ jobs:
           test "${{ needs.test.result }}" = "success"
           test "${{ needs.distro.result }}" = "success"
           test "${{ needs.live.result }}" = "success"
+          # deps only runs on pull requests; anywhere else, skipped is expected
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            test "${{ needs.deps.result }}" = "success"
+          else
+            test "${{ needs.deps.result }}" = "skipped"
+          fi
