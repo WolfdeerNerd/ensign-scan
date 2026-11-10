@@ -2,6 +2,14 @@ name: Tests
 
 # Runs the test suite on every PR and every push to main, and is also
 # called by publish.yml so a release can't publish unless it passes.
+#
+# Four kinds of job, all required by the "Tests passed" check:
+#   test    the suite on every supported Python, on the Ubuntu runner
+#   distro  the suite inside other distributions, on their own Python and
+#           libraries, with live checks of that distro's package manager
+#   live    the installed package (built wheel, clean venv) against a real
+#           clamd, as a regular user and under sudo
+#   passed  one stable check name for the branch ruleset to require
 on:
   push:
     branches: [main]   # PR branches are covered by pull_request; no double runs
@@ -16,6 +24,7 @@ jobs:
   test:
     name: test (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false   # finish every version, so a failure shows which ones break
       matrix:
@@ -30,9 +39,10 @@ jobs:
       - run: python -m pip install -r requirements.txt
       # Every *_test.py in the repo root, so a new test file is picked up
       # without editing this workflow. No real clamd is needed: the tests
-      # use an in-process fake, and the live check skips itself unless
-      # ENSIGN_TEST_CLAMD_SOCKET is set. The runner is not root, which
-      # fdpass_test.py needs (it checks that Ensign refuses a root clamd).
+      # use an in-process fake, and the live checks skip themselves unless
+      # their environment variables are set (the live and distro jobs set
+      # them). The runner is not root, which fdpass_test.py needs (it
+      # checks that Ensign refuses a root clamd).
       - name: Run the test suite
         shell: bash
         run: |
@@ -46,13 +56,126 @@ jobs:
             echo "::endgroup::"
           done
 
+  # The same suite inside other distributions. Each uses its own Python
+  # and, where its packages are new enough, its own libraries -- the same
+  # things a user on that distro runs. Containers run as root, so the
+  # suite runs as a regular user created in the container.
+  distro:
+    name: distro (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Arch Linux
+            image: archlinux:latest
+            # -Syu, never -Sy alone: installing after a refresh without
+            # upgrading is a partial upgrade, which Arch doesn't support.
+            setup: pacman -Syu --noconfirm python python-sqlalchemy python-rich
+            python: python3
+            live_env: ENSIGN_TEST_PACMAN=1
+          - name: Debian 12
+            image: debian:12
+            # Debian 12 ships Python 3.11 (Ensign's minimum) but SQLAlchemy
+            # 1.4, older than the 2.0 Ensign needs, so its libraries come
+            # from PyPI in a virtual environment, as a pip/pipx user's would.
+            setup: >-
+              apt-get update -q &&
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3 python3-venv &&
+              python3 -m venv /opt/venv &&
+              /opt/venv/bin/pip install -q -r requirements.txt
+            python: /opt/venv/bin/python
+            live_env: ""
+          - name: Fedora
+            image: fedora:latest
+            setup: dnf install -y -q python3 python3-sqlalchemy python3-rich shadow-utils util-linux
+            python: python3
+            live_env: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Python and dependencies
+        run: ${{ matrix.setup }}
+      - name: Run the test suite as a regular user
+        shell: bash
+        env:
+          PY: ${{ matrix.python }}
+          LIVE_ENV: ${{ matrix.live_env }}
+        run: |
+          set -euo pipefail
+          useradd -m tester
+          chown -R tester .
+          shopt -s nullglob
+          tests=(*_test.py)
+          (( ${#tests[@]} )) || { echo "::error::no *_test.py files found"; exit 1; }
+          for t in "${tests[@]}"; do
+            echo "::group::$t"
+            # LIVE_ENV is unquoted on purpose: empty, or VAR=value words for env
+            runuser -u tester -- env $LIVE_ENV "$PY" "$t"
+            echo "::endgroup::"
+          done
+
+  # What users actually install, against a real clamd. The wheel is built
+  # from this commit and installed into a clean venv; cli_live_test.py
+  # drives that installed `ensign-scan` command, never the checkout.
+  live:
+    name: live (installed package + real clamd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ENSIGN_CLI: /tmp/ensign-venv/bin/ensign-scan
+      ENSIGN_TEST_CLAMD_SOCKET: /run/clamav/clamd.ctl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Build the wheel and install it into a clean venv
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir dist
+          python -m venv /tmp/ensign-venv
+          /tmp/ensign-venv/bin/pip install dist/*.whl
+      - name: Start a clamd that knows only the EICAR test signature
+        run: sudo --preserve-env=CI .github/scripts/start-test-clamd.sh
+      # The whole suite again, now with the live checks on: fdpass_test.py
+      # scans EICAR through a real clamd, cli_live_test.py runs the
+      # installed command end to end.
+      - name: Run the test suite as a regular user
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -r requirements.txt
+          for t in *_test.py; do
+            echo "::group::$t"
+            python "$t"
+            echo "::endgroup::"
+          done
+      # Under sudo: "~" must still mean the runner user's home, and a root
+      # run must still hand clamd open files rather than run clamd as root.
+      - name: Run the installed command under sudo
+        run: sudo --preserve-env=ENSIGN_CLI,ENSIGN_TEST_CLAMD_SOCKET "$(command -v python)" cli_live_test.py
+      - name: Show the clamd log and any AppArmor denials
+        if: failure()
+        run: |
+          sudo cat /var/log/clamav/ensign-test.log || true
+          sudo dmesg | grep -i 'apparmor.*clamd' | tail -20 || true
+
   # One stable check name for the branch ruleset to require. Requiring the
-  # matrix jobs directly would break whenever the Python versions change.
+  # jobs directly would break whenever a job or matrix entry changes.
   passed:
     name: Tests passed
     if: always()
-    needs: test
+    needs: [test, distro, live]
     runs-on: ubuntu-latest
     steps:
-      - name: Every Python version passed
-        run: test "${{ needs.test.result }}" = "success"
+      - name: Every job passed
+        run: |
+          test "${{ needs.test.result }}" = "success"
+          test "${{ needs.distro.result }}" = "success"
+          test "${{ needs.live.result }}" = "success"
