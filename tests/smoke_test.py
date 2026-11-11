@@ -571,7 +571,7 @@ def main():
             os.geteuid = _orig
 
     _user = _render(1000)
-    assert "1 file differ from pacman's records" in _user, "only the GID mismatch is a real difference"
+    assert "1 file differs from pacman's records" in _user, "only the GID mismatch is a real difference"
     assert "6 files pacman could not verify (not mismatches)" in _user
     assert "wasn't run as root" in _user and "sudo pacman -Qkk" in _user
     assert "rkhunter: 5 files (Permission denied)" in _user and "and 2 more" in _user

@@ -14,20 +14,34 @@ import shlex
 from pathlib import Path
 
 from .base import Backend
+from .dpkg import DpkgBackend
 from .none import NoneBackend
 from .pacman import PacmanBackend
+from .rpm import RpmBackend
 
 BACKENDS: dict[str, type[Backend]] = {
     "pacman": PacmanBackend,
+    "dpkg": DpkgBackend,
+    "rpm": RpmBackend,
 }
 
 # Values accepted by the `package_verification` config setting.
 CHOICES = ("auto", "off", *BACKENDS)
 
-# os-release ID / ID_LIKE value -> backend name. Derivatives (Manjaro,
-# EndeavourOS, ...) carry ID_LIKE=arch, so one entry covers the family.
+# os-release ID / ID_LIKE value -> backend name. Derivatives name their
+# parent in ID_LIKE (Manjaro: "arch", Mint: "ubuntu debian", Rocky:
+# "rhel centos fedora", openSUSE: "suse opensuse"), so one entry covers a
+# whole family.
 _FAMILIES = {
     "arch": "pacman",
+    "debian": "dpkg",
+    "ubuntu": "dpkg",
+    "fedora": "rpm",
+    "rhel": "rpm",
+    "centos": "rpm",
+    "suse": "rpm",
+    "opensuse": "rpm",
+    "mageia": "rpm",
 }
 
 _OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))

@@ -77,6 +77,7 @@ jobs:
             # upgrading is a partial upgrade, which Arch doesn't support.
             setup: pacman -Syu --noconfirm python python-sqlalchemy python-rich
             python: python3
+            plant: "true"
             live_env: ENSIGN_TEST_PACMAN=1 ENSIGN_EXPECT_BACKEND=pacman
           - name: Debian 12
             image: debian:12
@@ -89,20 +90,32 @@ jobs:
               python3 -m venv /opt/venv &&
               /opt/venv/bin/pip install -q -r requirements.txt
             python: /opt/venv/bin/python
-            # No dpkg/rpm backend yet, so detection must say "none" here.
-            live_env: ENSIGN_EXPECT_BACKEND=none
+            # Plant one of each finding, so the live check parses real
+            # dpkg output for every case, not just a clean system:
+            # an edited conffile, a changed file, a missing file, and a
+            # missing file that a path-exclude setting covers.
+            plant: >-
+              echo '# ensign CI' >> /etc/bash.bashrc &&
+              printf x >> /usr/share/doc/sed/copyright &&
+              rm -f /usr/share/doc/bash/copyright /usr/share/doc/grep/copyright &&
+              echo 'path-exclude=/usr/share/doc/grep/*' > /etc/dpkg/dpkg.cfg.d/zz-ensign-ci
+            live_env: ENSIGN_EXPECT_BACKEND=dpkg ENSIGN_EXPECT_VERIFY_FINDINGS=1
           - name: Fedora
             image: fedora:latest
             setup: dnf install -y -q python3 python3-sqlalchemy python3-rich shadow-utils util-linux
             python: python3
-            # No dpkg/rpm backend yet, so detection must say "none" here.
-            live_env: ENSIGN_EXPECT_BACKEND=none
+            # An edited %config file and a changed binary's mode, so the
+            # live check always has real rpm findings to parse.
+            plant: echo '# ensign CI' >> /etc/bashrc && chmod 775 /usr/bin/true
+            live_env: ENSIGN_EXPECT_BACKEND=rpm ENSIGN_EXPECT_VERIFY_FINDINGS=1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Python and dependencies
         run: ${{ matrix.setup }}
+      - name: Plant package-file changes for the live verify check
+        run: ${{ matrix.plant }}
       - name: Run the test suite as a regular user
         shell: bash
         env:
@@ -132,6 +145,13 @@ jobs:
     env:
       ENSIGN_CLI: /tmp/ensign-venv/bin/ensign-scan
       ENSIGN_TEST_CLAMD_SOCKET: /run/clamav/clamd.ctl
+      # A full Ubuntu install (unlike the trimmed container images), for
+      # real-world ownership lookups (usrmerge paths, multiarch names).
+      ENSIGN_EXPECT_BACKEND: dpkg
+      # GitHub's runner image has thousands of packages: a full
+      # dpkg --verify takes longer than Ensign's 10-minute limit. The
+      # Debian job runs the full verify instead.
+      ENSIGN_SKIP_FULL_VERIFY: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
