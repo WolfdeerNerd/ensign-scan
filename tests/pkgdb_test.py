@@ -182,6 +182,11 @@ assert line.missing and not line.is_config, "rpm's 'd' (doc) marker isn't a conf
 line = verifyfmt.parse_line("/usr/bin/with space/x  ")  # nonsense: not a verify line
 assert line is None
 assert verifyfmt.parse_line("..5......   /path with spaces/file").path == "/path with spaces/file"
+# A bracketed ending is only an error message if it IS one: "(copy)" is part of a name
+line = verifyfmt.parse_line("missing     /usr/share/doc/foo/notes (copy)")
+assert line.path == "/usr/share/doc/foo/notes (copy)" and line.missing, line
+line = verifyfmt.parse_line("missing     /x (b)/y (No such file or directory)")
+assert line.path == "/x (b)/y" and line.missing, "a real error suffix is still stripped, brackets in the path kept"
 assert not verifyfmt.is_candidate("dpkg: warning: something about /var/lib/dpkg")
 assert not verifyfmt.is_candidate("error: file /x: No such file or directory")
 assert verifyfmt.is_candidate("??5??????   /usr/bin/tac")
@@ -337,6 +342,29 @@ assert "1 config file locally modified" in out
 garbled = dpkg_mod.parse_verify("?? weird line /usr/bin/x\n", {}, [])
 out = report(garbled, DpkgBackend())
 assert "parser may need updating" in out and "'dpkg --verify'" in out, out
+assert "?? weird line /usr/bin/x" in out, "the line that didn't parse is shown as printed"
+
+# Some lines parse, some don't: the ones that don't must not vanish quietly
+partly = dpkg_mod.parse_verify("??5??????   /usr/bin/tac\n?? odd /usr/bin/y\n", {"/usr/bin/tac": "coreutils"}, [])
+assert partly.parsed_line_count == 1 and partly.candidate_line_count == 2 and partly.unparsed == ("?? odd /usr/bin/y",)
+out = report(partly, DpkgBackend())
+assert "(1 of 2 candidate lines parsed)" in out
+assert "1 line from dpkg couldn't be read by Ensign and is not in this report" in out, out
+assert "?? odd /usr/bin/y" in out and "coreutils: /usr/bin/tac" in out, "shown, and the rest still reported"
+
+# pacman: a path with spaces parses (cmake really ships these), and the report
+# would flag anything that still didn't
+from ensign_scan.pkgdb.pacman import PacmanVerifyResult, _MISMATCH_RE  # noqa: E402
+m = _MISMATCH_RE.match("warning: cmake: /usr/share/cmake/Help/generator/Borland Makefiles.rst (Size mismatch)")
+assert m and m["path"] == "/usr/share/cmake/Help/generator/Borland Makefiles.rst" and m["reason"] == "Size mismatch"
+m = _MISMATCH_RE.match("backup file: foo: /etc/foo bar.conf (Modification time mismatch)")
+assert m and m["kind"] == "backup file" and m["path"] == "/etc/foo bar.conf"
+m = _MISMATCH_RE.match("warning: x: /a (b)/c (Size mismatch)")
+assert m and m["path"] == "/a (b)/c" and m["reason"] == "Size mismatch", "only the LAST bracket is the reason"
+out = report(PacmanVerifyResult(mismatches=[], candidate_line_count=3, unparsed=("odd (1)", "odd (2)", "odd (3)")),
+             PacmanBackend())
+assert "parser may need updating" in out and "odd (1)" in out
+print("unparsed-line tests passed ✓")
 print("dpkg/rpm report tests passed ✓")
 
 # --- config: package_verification -----------------------------------------------

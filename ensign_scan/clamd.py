@@ -35,12 +35,16 @@ from pathlib import Path
 
 from .models import ScanStatus
 
-_FOUND_RE = re.compile(r":\s+(.+?)\s+FOUND")
-
 # clamd labels a FILDES reply with its own descriptor number ("fd[10]: OK"),
 # not a path. Swapped for the real path so stored results and reports read
 # the same whichever way a file was scanned.
-_FD_LABEL_RE = re.compile(r"^fd\[\d+\]:")
+_FD_LABEL_RE = re.compile(r"^fd\[\d+\]: ")
+
+# clamscan's and clamd's name for "this file went past a scan limit, so it
+# was not (fully) scanned" when AlertExceedsMax / --alert-exceeds-max is on:
+# Heuristics.Limits.Exceeded.MaxFileSize, .MaxScanSize, .MaxRecursion, ...
+# Reported as FOUND, but it is not an infection.
+LIMITS_EXCEEDED_PREFIX = "Heuristics.Limits.Exceeded"
 
 # clamd's wording for "file too large to scan" is inconsistent across
 # versions -- some report it plainly, others substitute the misleading
@@ -73,32 +77,194 @@ def clamscan_cli_available() -> bool:
     return shutil.which("clamscan") is not None
 
 
-def scan_with_clamscan_cli(filepath: Path | str, timeout: float = 180.0) -> "ScanOutcome":
-    """Fall back to the clamscan CLI for one file, bypassing clamd's
-    configured MaxFileSize/MaxScanSize entirely via explicit overrides.
+# --- clamd's size limits ------------------------------------------------------
+#
+# A file larger than clamd's MaxFileSize, or with more data than MaxScanSize,
+# is not scanned -- and clamd still answers "OK" for it, unless the admin set
+# AlertExceedsMax. So Ensign reads the limits from clamd's config and sends
+# larger files to clamscan instead, with the limits switched off.
+#
+# ClamAV itself can't scan a file past about 2 GiB, whatever the settings:
+# its code still uses 32-bit sizes in places (ClamAV's developers, on the
+# clamav-users list, 2023). Measured on ClamAV 1.5.4: 2,147,483,645 bytes is
+# the largest file scanned, one byte more is refused. Such files can't be
+# checked by any ClamAV tool; clamscan reports them as
+# Heuristics.Limits.Exceeded.MaxFileSize, and Ensign records them as
+# "incomplete" -- never as clean.
 
-    Only meant for files the daemon has already rejected as too large.
-    Each invocation loads the whole signature database fresh -- seconds,
-    not milliseconds -- so this is not something to run routinely.
-    """
+# ClamAV's defaults since 1.0 (older releases used 25M and 100M). Used when
+# clamd's config can't be found or read, and for any setting it leaves out.
+DEFAULT_MAX_FILE_SIZE = 100 * 2**20
+DEFAULT_MAX_SCAN_SIZE = 400 * 2**20
+# The largest value ClamAV documents for MaxFileSize ("up to 2000MB").
+# Anything bigger always goes to clamscan, which gives the real answer --
+# so if a future ClamAV raises its ceiling, those files simply get scanned.
+CLAMAV_MAX_SETTING = 2000 * 2**20
+
+# Where distributions put clamd's config, for when clamd's command line
+# doesn't say (Arch, Debian/Ubuntu: clamd.conf; Fedora: clamd.d/scan.conf).
+_CONFIG_CANDIDATES = ("/etc/clamav/clamd.conf", "/etc/clamd.d/scan.conf", "/etc/clamd.conf")
+_SIZE_RE = re.compile(r"^(\d+)([kKmMgG]?)$")
+_SIZE_UNITS = {"": 1, "k": 2**10, "m": 2**20, "g": 2**30}
+_CLAMSCAN_LINE_RE = re.compile(r"^/proc/self/fd/(\d+): (.*)$")
+
+
+@dataclass(frozen=True)
+class ClamdLimits:
+    max_file_size: int           # bytes; 0 = no limit set (ClamAV's own ceiling still applies)
+    max_scan_size: int           # bytes; 0 = no limit set
+    database_dir: str | None     # clamd's DatabaseDirectory, so clamscan uses the same signatures
+    alert_exceeds_max: bool
+    source: str                  # the config file read, or why the defaults are in use
+
+    @property
+    def scan_limit(self) -> int:
+        """Files of this size or larger go to clamscan instead of clamd."""
+        limits = [n for n in (self.max_file_size, self.max_scan_size) if n > 0]
+        return min(limits + [CLAMAV_MAX_SETTING])
+
+
+def _parse_size(text: str) -> int | None:
+    match = _SIZE_RE.match(text.strip().strip('"'))
+    if not match:
+        return None
+    return int(match.group(1)) * _SIZE_UNITS[match.group(2).lower()]
+
+
+def parse_clamd_config(text: str, source: str) -> ClamdLimits:
+    """The settings Ensign needs from clamd.conf text. Lines are
+    "Option value"; "#" starts a comment; the last occurrence wins."""
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        key, _, value = line.partition(" ")
+        values[key.lower()] = value.strip()
+
+    def size(key: str, default: int) -> int:
+        parsed = _parse_size(values.get(key.lower(), ""))
+        return default if parsed is None else parsed
+
+    return ClamdLimits(
+        max_file_size=size("MaxFileSize", DEFAULT_MAX_FILE_SIZE),
+        max_scan_size=size("MaxScanSize", DEFAULT_MAX_SCAN_SIZE),
+        database_dir=values.get("databasedirectory", "").strip('"') or None,
+        alert_exceeds_max=values.get("alertexceedsmax", "").lower() in ("yes", "true", "1"),
+        source=source,
+    )
+
+
+DEFAULT_LIMITS = ClamdLimits(DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_SCAN_SIZE, None, False, "ClamAV defaults")
+
+
+def _config_from_cmdline(pid: int) -> str | None:
+    """The -c/--config-file path from a clamd process's command line."""
     try:
-        result = subprocess.run(
-            ["clamscan", "--no-summary", "--infected",
-             "--max-filesize=0", "--max-scansize=0", str(filepath)],
-            capture_output=True, text=True, timeout=timeout,
-            errors="surrogateescape",  # its output repeats the filename
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return ScanOutcome(ScanStatus.ERROR, f"clamscan CLI fallback failed: {exc}")
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            args = [os.fsdecode(a) for a in f.read().split(b"\0") if a]
+    except OSError:
+        return None
+    for i, arg in enumerate(args):
+        if arg in ("-c", "--config-file") and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith("--config-file="):
+            return arg.split("=", 1)[1]
+    return None
 
-    output = result.stdout.strip()
-    if result.returncode == 0:
-        return ScanOutcome(ScanStatus.CLEAN, output or "OK (clamscan CLI fallback)")
-    if result.returncode == 1:
-        match = _FOUND_RE.search(output)
-        threat = match.group(1) if match else "Unknown"
-        return ScanOutcome(ScanStatus.INFECTED, output, threat)
-    return ScanOutcome(ScanStatus.ERROR, output or f"clamscan CLI exited {result.returncode}")
+
+def read_clamd_limits(pids: list[int] | None = None) -> ClamdLimits:
+    """clamd's limits, from the config the running clamd was started with
+    (its command line), else the distribution's usual path, else ClamAV's
+    defaults. Never raises: unknown limits mean the defaults, which can only
+    send more files to clamscan, not fewer -- unless clamd was given higher
+    limits in a config Ensign can't see; then clamd scans those files itself."""
+    paths = [p for p in (_config_from_cmdline(pid) for pid in (pids or [])) if p]
+    paths += [p for p in _CONFIG_CANDIDATES if p not in paths]
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return parse_clamd_config(f.read(), path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return ClamdLimits(DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_SCAN_SIZE, None, False,
+                               f"ClamAV defaults ({path}: {exc.strerror})")
+    return ClamdLimits(DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_SCAN_SIZE, None, False,
+                       "ClamAV defaults (no clamd config found)")
+
+
+# --- clamscan, for what clamd won't scan --------------------------------------
+
+def clamscan_user() -> tuple[int, int] | None:
+    """(uid, gid) to run clamscan as. As root, the 'clamav' user, for the
+    same reason Ensign refuses a root clamd: clamscan parses untrusted
+    files. Otherwise None (run as yourself; nothing to drop). Raises
+    LookupError if Ensign runs as root and there is no 'clamav' user."""
+    if os.geteuid() != 0:
+        return None
+    import pwd
+    try:
+        entry = pwd.getpwnam("clamav")
+    except KeyError:
+        raise LookupError("no 'clamav' user to run clamscan as") from None
+    return entry.pw_uid, entry.pw_gid
+
+
+def scan_fds_with_clamscan(
+    fds: list[int], limits: ClamdLimits, timeout: float, run_as: tuple[int, int] | None = None
+) -> dict[int, "ScanOutcome"]:
+    """Scan already-open files with one clamscan run, limits switched off.
+
+    The descriptors are inherited by clamscan and named to it as
+    /proc/self/fd/N -- inside clamscan, that is the very file Ensign opened.
+    So, like FILDES: no file is reopened by path (it can't be swapped in
+    between, and clamscan needs no permission on it), and clamscan's output
+    names each file by its fd number, never by a filename someone chose.
+
+    One run for many files, because each run loads the whole signature
+    database (seconds, and up to a GB or two of memory, on top of clamd's
+    copy). `run_as` drops clamscan to that (uid, gid) -- see clamscan_user().
+
+    Returns an outcome per fd; "raw" is clamscan's line(s) for that file.
+    """
+    argv = ["clamscan", "--no-summary", "--stdout",
+            "--max-filesize=0", "--max-scansize=0", "--alert-exceeds-max"]
+    if limits.database_dir:
+        argv.append(f"--database={limits.database_dir}")
+    argv += [f"/proc/self/fd/{fd}" for fd in fds]
+    kwargs = {}
+    if run_as is not None:
+        kwargs = {"user": run_as[0], "group": run_as[1], "extra_groups": []}
+    try:
+        result = subprocess.run(argv, pass_fds=fds, capture_output=True, text=True,
+                                timeout=timeout, errors="replace", **kwargs)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {fd: ScanOutcome(ScanStatus.ERROR, f"clamscan: couldn't run: {exc}") for fd in fds}
+
+    lines: dict[int, list[str]] = {fd: [] for fd in fds}
+    for line in result.stdout.splitlines():
+        match = _CLAMSCAN_LINE_RE.match(line)
+        if match and int(match.group(1)) in lines:
+            lines[int(match.group(1))].append(match.group(2).strip())
+
+    outcomes = {}
+    for fd in fds:
+        said = lines[fd]
+        raw = "clamscan: " + (" / ".join(said) if said else "no result")
+        found = [s[: -len(" FOUND")].strip() for s in said if s.endswith(" FOUND")]
+        threats = [t for t in found if not t.startswith(LIMITS_EXCEEDED_PREFIX)]
+        if threats:
+            outcomes[fd] = ScanOutcome(ScanStatus.INFECTED, raw, threats[0])
+        elif found:  # only a limits alert: ClamAV didn't (fully) scan it
+            outcomes[fd] = ScanOutcome(ScanStatus.INCOMPLETE, raw, found[0])
+        elif said and said[-1] == "OK":
+            outcomes[fd] = ScanOutcome(ScanStatus.CLEAN, raw)
+        else:
+            errors = result.stderr.strip().splitlines()
+            detail = said[-1] if said else (errors[-1] if errors else "no output")
+            outcomes[fd] = ScanOutcome(ScanStatus.ERROR, f"clamscan: {detail}")
+    return outcomes
 
 
 @dataclass(frozen=True)
@@ -254,6 +420,12 @@ class ClamdClient:
             return None
         return 0 if 0 in uids else uids[0]
 
+    def limits(self) -> ClamdLimits:
+        """clamd's MaxFileSize/MaxScanSize and signature directory, read from
+        the config file the running clamd was started with. See
+        read_clamd_limits(): never raises, falls back to ClamAV's defaults."""
+        return read_clamd_limits(_pids_named("clamd"))
+
     # -- scanning ------------------------------------------------------
 
     def scan(self, filepath: Path | str) -> ScanOutcome:
@@ -267,7 +439,9 @@ class ClamdClient:
             response = self._command(f"SCAN {filepath}")
         except OSError as exc:
             return ScanOutcome(ScanStatus.ERROR, f"Scan error: {exc}")
-        return _outcome(response)
+        prefix = f"{filepath}: "
+        verdict = response[len(prefix):] if response.startswith(prefix) else response
+        return _outcome(response, verdict)
 
     def scan_fd(self, fd: int, label: str) -> ScanOutcome:
         """Scan an already-open file by passing its descriptor (FILDES).
@@ -302,19 +476,29 @@ class ClamdClient:
         response = b"".join(chunks).rstrip(b"\0").decode(errors="replace").strip()
         if not response:
             return ScanOutcome(ScanStatus.ERROR, f"{label}: no reply from clamd ERROR")
-        # A function, not a replacement string: re.sub reads backslashes in
-        # a replacement string as escapes, so a file named "a\1b" would
-        # raise and stop the whole scan.
-        return _outcome(_FD_LABEL_RE.sub(lambda _m: f"{label}:", response, count=1))
+        # The verdict is read from clamd's own "fd[N]: ..." reply, before the
+        # path goes in: the path is chosen by whoever named the file.
+        match = _FD_LABEL_RE.match(response)
+        verdict = response[match.end():] if match else response
+        return _outcome(f"{label}: {verdict}" if match else response, verdict)
 
 
-def _outcome(response: str) -> ScanOutcome:
-    """Turn one clamd scan reply into a ScanOutcome."""
-    if response.endswith("OK"):
+def _outcome(response: str, verdict: str) -> ScanOutcome:
+    """Turn one clamd scan reply into a ScanOutcome.
+
+    `response` is the whole reply, stored as the scan result. `verdict` is
+    that reply with the file's label taken off the front ("OK",
+    "Win.Test.EICAR_HDB-1 FOUND", "Access denied. ERROR"), and is the only
+    part read: the label is the filename, and a file can be named
+    "x: PUA.Harmless FOUND y.exe" to pass off a real detection as a
+    harmless one, or named "FOUND.txt" to turn an error into an infection.
+    clamd's own words always come last, so they are read from the end.
+    """
+    verdict = verdict.strip()
+    if verdict == "OK":
         return ScanOutcome(ScanStatus.CLEAN, response)
-    if "FOUND" in response:
-        match = _FOUND_RE.search(response)
-        threat = match.group(1) if match else "Unknown"
+    if verdict.endswith(" FOUND"):
+        threat = verdict[: -len(" FOUND")].strip() or "Unknown"
         return ScanOutcome(ScanStatus.INFECTED, response, threat)
     return ScanOutcome(ScanStatus.ERROR, response)
 

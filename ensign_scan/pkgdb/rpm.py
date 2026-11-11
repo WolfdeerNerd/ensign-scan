@@ -13,7 +13,7 @@ import shutil
 import subprocess
 
 from . import verifyfmt
-from .base import Backend, FileMismatch, VerifyResult, c_locale_env
+from .base import UNPARSED_KEPT, Backend, FileMismatch, VerifyResult, c_locale_env
 
 # %{=NAME} repeats the package name for every file in the [...] loop.
 _ALL_FILES_QF = "[%{FILENAMES}\t%{=NAME}\n]"
@@ -85,12 +85,15 @@ def parse_verify(output: str, owners: dict[str, str]) -> VerifyResult:
     """Turn `rpm -Va` output into a VerifyResult (no commands run)."""
     mismatches: list[FileMismatch] = []
     candidates = parsed_lines = 0
+    unparsed: list[str] = []
     for line in output.splitlines():
         if not verifyfmt.is_candidate(line):
             continue
         candidates += 1
         parsed = verifyfmt.parse_line(line)
         if parsed is None:
+            if len(unparsed) < UNPARSED_KEPT:
+                unparsed.append(line.strip())
             continue
         parsed_lines += 1
         package = owners.get(parsed.path, "(unknown package)")
@@ -101,7 +104,7 @@ def parse_verify(output: str, owners: dict[str, str]) -> VerifyResult:
                 unverified=(reason == verifyfmt.UNREADABLE),
             ))
     return VerifyResult(mismatches=mismatches, candidate_line_count=candidates,
-                        parsed_line_count=parsed_lines)
+                        parsed_line_count=parsed_lines, unparsed=tuple(unparsed))
 
 
 def verify_all(timeout: float | None = None) -> VerifyResult | None:

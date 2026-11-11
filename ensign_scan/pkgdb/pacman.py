@@ -17,7 +17,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from .base import Backend, c_locale_env
+from .base import UNPARSED_KEPT, Backend, c_locale_env
 
 # Best-effort parser: pacman's exact wording for `-Qkk` output has not
 # been verified against a live install in this environment. Two prefix
@@ -30,8 +30,14 @@ from .base import Backend, c_locale_env
 # altered files" summary line per package, matched or not -- so the
 # sanity check below counts only lines that look like they could be a
 # mismatch (contain a parenthetical), not every line pacman prints.
+#
+# A path can contain spaces (cmake's docs ship "Borland Makefiles.rst"),
+# so the path is everything up to the LAST bracketed reason on the line.
+# pacman prints "<pkg>: <path> (<reason>)", and its reasons never contain
+# brackets, while a path may: "/a (b)/c (Size mismatch)" still splits
+# right, because the reason must be the bracket that ends the line.
 _MISMATCH_RE = re.compile(
-    r"^(?:(?P<kind>warning|backup file):\s*)?(?P<pkg>\S+):\s+(?P<path>/\S+)\s+\((?P<reason>.+)\)\s*$"
+    r"^(?:(?P<kind>warning|backup file):\s*)?(?P<pkg>\S+):\s+(?P<path>/.*?)\s+\((?P<reason>[^()]+)\)\s*$"
 )
 
 
@@ -81,6 +87,9 @@ class PacmanVerifyResult:
     # permission problem, etc). Distinct from verify_all() returning
     # None, which means pacman itself isn't on PATH at all.
     error: str | None = None
+    # The first few candidate lines that didn't parse, exactly as pacman
+    # printed them, so the report can show what it couldn't read.
+    unparsed: tuple[str, ...] = ()
 
 def available() -> bool:
     return shutil.which("pacman") is not None
@@ -145,20 +154,25 @@ def verify_all(timeout: float | None = None) -> PacmanVerifyResult | None:
 
     lines = [ln.strip() for ln in (result.stdout + "\n" + result.stderr).splitlines() if ln.strip()]
     mismatches = []
+    unparsed: list[str] = []
     candidates = 0
     for line in lines:
         if "(" not in line:
             continue  # per-package "N total files, M altered" summary noise
         candidates += 1
         match = _MISMATCH_RE.match(line)
-        if match:
-            mismatches.append(PacmanMismatch(
-                package=match.group("pkg"),
-                filepath=match.group("path"),
-                reason=match.group("reason"),
-                is_backup=(match.group("kind") == "backup file"),
-            ))
-    return PacmanVerifyResult(mismatches=mismatches, candidate_line_count=candidates)
+        if not match:
+            if len(unparsed) < UNPARSED_KEPT:
+                unparsed.append(line)
+            continue
+        mismatches.append(PacmanMismatch(
+            package=match.group("pkg"),
+            filepath=match.group("path"),
+            reason=match.group("reason"),
+            is_backup=(match.group("kind") == "backup file"),
+        ))
+    return PacmanVerifyResult(mismatches=mismatches, candidate_line_count=candidates,
+                              unparsed=tuple(unparsed))
 
 
 class PacmanBackend(Backend):

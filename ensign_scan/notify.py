@@ -19,6 +19,8 @@ import signal
 import subprocess
 from pathlib import Path
 
+from .fsutil import printable
+
 _MAX_NAMES_SHOWN = 3
 
 
@@ -36,7 +38,7 @@ def _body_text(name: str) -> str:
     plain text. Line breaks are shown as a visible symbol so a name can't
     add fake lines to the alert.
     """
-    flat = name.replace("\r", "␍").replace("\n", "␤")
+    flat = printable(name.replace("\r", "␍").replace("\n", "␤"))
     return html.escape(flat, quote=False)
 
 

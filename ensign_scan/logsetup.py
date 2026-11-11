@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import Config
+from .fsutil import printable
 
 REPEAT_LIMIT = 20          # full log lines kept per distinct error, per run
 LOG_GLOB = "ensign-*.log"  # only files matching this are ever pruned
@@ -121,6 +122,19 @@ _prev_level: int | None = None
 _atexit_registered = False
 
 
+class _EscapingFormatter(logging.Formatter):
+    """Writes each message with control characters escaped (fsutil.printable).
+
+    A filename containing a newline would otherwise start what looks like a
+    new, separate log line -- a forged entry -- and one containing terminal
+    escapes would act on whoever later reads the log with cat or less.
+    Tracebacks are left as they are: Python writes those, not a filename.
+    """
+    def formatMessage(self, record: logging.LogRecord) -> str:
+        record.message = printable(record.message)
+        return super().formatMessage(record)
+
+
 def setup(config: Config, now: datetime | None = None) -> Path:
     """Start logging this run's errors to a new file under <data_dir>/logs/.
     Returns the path the file will have (it is not created until the first error)."""
@@ -136,7 +150,7 @@ def setup(config: Config, now: datetime | None = None) -> Path:
     # \xNN instead of making the handler fail ("--- Logging error ---")
     # and lose the very line that says what went wrong.
     _handler = logging.FileHandler(path, delay=True, encoding="utf-8", errors="backslashreplace")
-    _handler.setFormatter(logging.Formatter(_FORMAT))
+    _handler.setFormatter(_EscapingFormatter(_FORMAT))
     _filter = RepeatFilter()
     _handler.addFilter(_filter)
     root = logging.getLogger()

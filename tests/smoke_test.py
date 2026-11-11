@@ -21,7 +21,6 @@ import threading
 import time
 from pathlib import Path
 
-from ensign_scan.clamd import ClamdClient
 from ensign_scan.config import Config
 from ensign_scan.models import ScanStatus
 from ensign_scan.reports import scan_summary
@@ -378,16 +377,20 @@ def main():
     fakebin = tmp / "fakebin"
     fakebin.mkdir()
     fake_clamscan = fakebin / "clamscan"
+    # Ensign hands clamscan open descriptors as /proc/self/fd/N, several
+    # per run, so this stand-in judges each file by its content.
     fake_clamscan.write_text(
         "#!/bin/bash\n"
-        'path="${@: -1}"\n'
-        'if [[ "$path" == *evil* ]]; then\n'
-        '  echo "$path: Eicar-Test-Signature FOUND"\n'
-        "  exit 1\n"
-        "else\n"
-        '  echo "$path: OK"\n'
-        "  exit 0\n"
-        "fi\n"
+        "status=0\n"
+        'for path in "$@"; do\n'
+        '  [[ "$path" == /proc/self/fd/* ]] || continue\n'
+        '  if [[ "$(head -c 4 "$path")" == EVIL ]]; then\n'
+        '    echo "$path: Eicar-Test-Signature FOUND"; status=1\n'
+        "  else\n"
+        '    echo "$path: OK"\n'
+        "  fi\n"
+        "done\n"
+        'exit "$status"\n'
     )
     fake_clamscan.chmod(0o755)
     old_path = os.environ.get("PATH", "")
@@ -407,10 +410,11 @@ def main():
         big_clean = tmp / "toolarge_clean.bin"
         big_clean.write_bytes(b"x" * 100)
         big_evil = tmp / "toolarge_evil.bin"
-        big_evil.write_bytes(b"x" * 100)
+        big_evil.write_bytes(b"EVIL" + b"x" * 96)
 
         scanner2.process_file(big_clean, scan=True)
         scanner2.process_file(big_evil, scan=True)
+        scanner2.scan_oversized()  # queued by process_file; scanned here, in one clamscan run
 
         from ensign_scan.models import FileRecord
         from sqlalchemy.orm import Session as _S

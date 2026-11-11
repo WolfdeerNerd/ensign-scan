@@ -162,7 +162,8 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
         sys.exit(0)
 
     # --- a real scan -----------------------------------------------------------------------
-    out = run("--config", str(config), str(tree), cwd=work)
+    # Exit code 3: the run finished and infected files are present.
+    out = run("--config", str(config), str(tree), expect=3, cwd=work)
     assert "All finished" in out, out
     first = rows(db)
     assert first[str(infected)][0] == "infected", f"EICAR not found: {first[str(infected)]}"
@@ -173,7 +174,8 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
     print("real scan test passed ✓")
 
     # --- unchanged files are not rescanned -------------------------------------------------
-    run("--config", str(config), str(tree), cwd=work)
+    # Still 3: an infection found on an earlier run and still there counts too.
+    run("--config", str(config), str(tree), expect=3, cwd=work)
     second = rows(db)
     assert second[str(clean)][2] == first[str(clean)][2], "an unchanged clean file was rescanned"
     assert second[str(infected)][0] == "infected"
@@ -181,7 +183,7 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
 
     # --- a changed file is rescanned ----------------------------------------------------------
     clean.write_bytes(EICAR)
-    run("--config", str(config), str(tree), cwd=work)
+    run("--config", str(config), str(tree), expect=3, cwd=work)
     assert rows(db)[str(clean)][0] == "infected", "a file that changed into EICAR wasn't rescanned"
     print("change-detection test passed ✓")
 
@@ -212,15 +214,20 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
     odd = os.fsdecode(os.path.join(os.fsencode(odd_tree), b"eicar-caf\xe9.com"))
     with open(os.fsencode(odd), "wb") as fh:
         fh.write(EICAR)
-    out = run("--config", str(config), str(odd_tree), cwd=work)
+    out = run("--config", str(config), str(odd_tree), expect=3, cwd=work)
     flat = " ".join(out.split())
     assert "INFECTED FILES" in flat and "eicar-caf\\xe9.com" in flat, \
         "listed with its byte as \\xe9, so it can be found"
     assert "SCANNED BUT NOT SAVED" not in flat, out
     first = rows(db)[odd]
     assert first[0] == "infected", first
-    run("--config", str(config), str(odd_tree), cwd=work)
+    run("--config", str(config), str(odd_tree), expect=3, cwd=work)
     assert rows(db)[odd][0] == "infected", "still tracked on the next run"
+    # and once the infected file is gone, a clean tree exits 0 again
+    os.remove(os.fsencode(odd))
+    with open(os.path.join(os.fsencode(odd_tree), b"fine.txt"), "wb") as fh:
+        fh.write(b"nothing to see")
+    run("--config", str(config), str(odd_tree), expect=0, cwd=work)
     print("undecodable-filename test passed ✓")
 
 print("\nAll installed-CLI tests passed ✓")

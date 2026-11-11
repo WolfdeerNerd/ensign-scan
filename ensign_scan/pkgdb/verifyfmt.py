@@ -19,7 +19,9 @@ on runs of spaces rather than on fixed columns.
 
 A "missing" line can end in an error in brackets: dpkg couldn't even
 look, usually because a parent directory is root-only. "Permission
-denied" there means "not checked", not "gone".
+denied" there means "not checked", not "gone". Only a real system error
+message counts as that suffix -- a file can be named "notes (copy)", and
+"(copy)" is part of its name.
 
 In the test columns a letter means that test FAILED, "." means it passed
 and "?" means it couldn't be done. Position 2 is the content checksum,
@@ -39,6 +41,8 @@ that up separately.
 """
 from __future__ import annotations
 
+import errno
+import os
 import re
 from dataclasses import dataclass
 
@@ -59,7 +63,11 @@ UNREADABLE = "Could not read file"
 
 _LINE_RE = re.compile(r"^(?P<flags>[SM5DLUGTP.?]{9}|missing) +(?:(?P<marker>[cdglra]) +)?(?P<path>/.*)$")
 # "(Permission denied)" and other errno texts dpkg appends to "missing" lines
-_ERRNO_SUFFIX_RE = re.compile(r"^(?P<path>/.*?) \((?P<error>[A-Za-z][A-Za-z ]+)\)$")
+_ERRNO_SUFFIX_RE = re.compile(r"^(?P<path>/.*) \((?P<error>[^()]+)\)$")
+# Every message the C library can produce for a system error, in English:
+# dpkg runs in the C locale (base.c_locale_env), and Python doesn't apply
+# the user's language to os.strerror(). Only these count as an error suffix.
+_ERRNO_MESSAGES = frozenset(os.strerror(code) for code in errno.errorcode)
 
 
 @dataclass(frozen=True)
@@ -91,7 +99,7 @@ def parse_line(line: str) -> VerifyLine | None:
     is_config = marker == "c"
     if flags == "missing":
         suffix = _ERRNO_SUFFIX_RE.match(path)
-        if suffix:
+        if suffix and suffix["error"] in _ERRNO_MESSAGES:
             path = suffix["path"]
             if suffix["error"] == "Permission denied":
                 return VerifyLine(path, (UNREADABLE,), is_config, missing=False, unreadable=True)
