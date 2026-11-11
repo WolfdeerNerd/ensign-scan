@@ -77,7 +77,17 @@ jobs:
             # upgrading is a partial upgrade, which Arch doesn't support.
             setup: pacman -Syu --noconfirm python python-sqlalchemy python-rich
             python: python3
-            plant: "true"
+            # Change one packaged file whose path contains a space, so the
+            # live check proves real pacman output for such a path parses.
+            # cmake's docs have several; installed only if nothing in the
+            # image already does.
+            plant: >-
+              f=$(pacman -Qlq | grep ' ' | grep -v '/$' | head -n 1);
+              if [ -z "$f" ]; then
+              pacman -S --noconfirm --needed cmake &&
+              f=$(pacman -Qlq cmake | grep ' ' | grep -v '/$' | head -n 1);
+              fi;
+              test -n "$f" && printf x >> "$f" && printf '%s\n' "$f" > /tmp/ensign-planted-space
             live_env: ENSIGN_TEST_PACMAN=1 ENSIGN_EXPECT_BACKEND=pacman
           - name: Debian 12
             image: debian:12

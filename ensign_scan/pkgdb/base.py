@@ -27,6 +27,10 @@ def c_locale_env() -> dict[str, str]:
     return {**os.environ, "LC_ALL": "C"}
 
 
+# How many unparsed lines a VerifyResult keeps, to show in the report.
+UNPARSED_KEPT = 5
+
+
 @dataclass(frozen=True)
 class FileMismatch:
     """One way one installed file differs from its package's record.
@@ -64,6 +68,9 @@ class VerifyResult:
     # file with a size AND a checksum change), so this, not
     # len(mismatches), is what to compare with candidate_line_count.
     parsed_line_count: int = 0
+    # The first few candidate lines that didn't parse, as printed, so the
+    # report can show what it couldn't read instead of silently dropping it.
+    unparsed: tuple[str, ...] = ()
 
 
 class Backend:

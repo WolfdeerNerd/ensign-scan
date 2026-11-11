@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from . import explanations, pkgdb
 from .clamd import is_permission_error
-from .fsutil import shown
+from .fsutil import human_size as _human_size, shown
 from .models import is_open_failed
 from .models import FileRecord, ScanStatus, path_under
 
@@ -27,15 +27,6 @@ def _note(icon: str, text: str, label: str | None = None, indent: int = 2) -> No
     body = f"{label}: {shown(text)}" if label else shown(text)
     grid.add_row(f"[dim]{icon}[/dim]", f"[dim]{body}[/dim]")
     print(Padding(grid, (0, 0, 0, indent)))
-
-
-def _human_size(n: int) -> str:
-    size = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if size < 1024 or unit == "GiB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{n} B"
 
 
 def _file_facts(filepath: str) -> str:
@@ -217,6 +208,34 @@ def error_summary(engine: Engine, top: int = 10, paths: list[str] | None = None)
         print(f"  {count:>6}  {shown(parent)}")
 
 
+def incomplete_report(engine: Engine, top: int = 10, paths: list[str] | None = None) -> None:
+    """List files ClamAV could not fully scan, largest first, and say plainly
+    what that means: they are tracked, but nothing vouches for their contents."""
+    with Session(engine) as session:
+        query = session.query(
+            FileRecord.filepath, FileRecord.file_size, FileRecord.threat_name, FileRecord.scan_result
+        ).filter(FileRecord.scan_status == ScanStatus.INCOMPLETE.value)
+        scope = _scope_filter(paths)
+        if scope is not None:
+            query = query.filter(scope)
+        rows = sorted(query.all(), key=lambda r: -(r[1] or 0))
+    if not rows:
+        return
+
+    print(f"\n[bold yellow]=== NOT FULLY SCANNED ({len(rows)} files) ===[/bold yellow]")
+    print("ClamAV did not check all of these files for malware, so Ensign does not call them "
+          "clean. Most are over about 2 GiB, which no ClamAV tool can scan: a limit in ClamAV "
+          "itself, not in Ensign or your settings. They are hashed and tracked, and one that "
+          "changes is looked at again. Treat them as unverified, especially any you didn't "
+          "create or download yourself.")
+    for filepath, size, reason, result in rows[:top]:
+        why = reason or result or "unknown"
+        print(f"  [yellow]~[/yellow] {shown(filepath)}")
+        _note("↳", f"{_human_size(size or 0)} · {why}")
+    if len(rows) > top:
+        print(f"  … and {len(rows) - top} more")
+
+
 def unreadable_report(unreadable: dict[str, str], top: int = 10) -> None:
     """Print the directories Ensign could not look inside during this run.
 
@@ -316,7 +335,19 @@ def package_report(engine: Engine, result, backend) -> None:
               f"format — the parser may need updating for this {label} version. Run "
               f"'{backend.verify_all_command.removeprefix('sudo ')}' directly to see the raw "
               f"output.[/yellow]")
+        for line in getattr(result, "unparsed", ())[:3]:
+            print(f"    {shown(line)}")
         return
+    unparsed_count = result.candidate_line_count - parsed
+    if unparsed_count > 0:
+        # Some lines were dropped: say so, and show them as printed, so a
+        # finding the parser can't read is never just quietly missing.
+        print(f"[yellow]! {unparsed_count} line{'s' if unparsed_count != 1 else ''} from {label} "
+              f"couldn't be read by Ensign and {'are' if unparsed_count != 1 else 'is'} not in this "
+              f"report. Run '{backend.verify_all_command.removeprefix('sudo ')}' to see "
+              f"{'them' if unparsed_count != 1 else 'it'} in full.[/yellow]")
+        for line in getattr(result, "unparsed", ())[:3]:
+            print(f"    {shown(line)}")
     if not result.mismatches:
         print(f"No mismatches — all installed files match {label}'s records.")
         return
@@ -402,6 +433,9 @@ def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, in
     print(f"✗ Errors:        {counts.get(ScanStatus.ERROR.value, 0)}")
     print(f"? Pending:       {counts.get(ScanStatus.PENDING.value, 0)}")
     print(f"• Classified:    {counts.get(ScanStatus.CLASSIFIED.value, 0)}")
+    incomplete = counts.get(ScanStatus.INCOMPLETE.value, 0)
+    if incomplete:
+        print(f"[yellow]~ Not fully scanned: {incomplete}[/yellow]")
 
     return {"total": total, **{s.value: counts.get(s.value, 0) for s in ScanStatus}}
 

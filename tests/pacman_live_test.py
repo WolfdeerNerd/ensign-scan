@@ -60,6 +60,16 @@ assert result.candidate_line_count == len(result.mismatches), (
 )
 print(f"verify_all test passed ✓ ({len(result.mismatches)} lines, all parsed)")
 
+# CI changes a packaged file whose path contains a space (see tests.yml) and
+# leaves its path here: real pacman output for it must come through intact.
+planted = "/tmp/ensign-planted-space"
+if os.path.exists(planted):
+    path = open(planted).read().strip()
+    assert " " in path, path
+    assert any(m.filepath == path for m in result.mismatches), \
+        f"the changed file {path!r} is missing from the parsed results"
+    print("space-in-path test passed ✓")
+
 # --- the report renders real results ---------------------------------------------------
 with tempfile.TemporaryDirectory() as d:
     engine = make_engine(f"sqlite:///{d}/live.db")

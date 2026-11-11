@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 
 from . import verifyfmt
-from .base import Backend, FileMismatch, VerifyResult, c_locale_env
+from .base import UNPARSED_KEPT, Backend, FileMismatch, VerifyResult, c_locale_env
 
 _CFG_FILE = Path("/etc/dpkg/dpkg.cfg")
 _CFG_DIR = Path("/etc/dpkg/dpkg.cfg.d")
@@ -160,12 +160,15 @@ def parse_verify(output: str, owners: dict[str, str], filters: list[tuple[str, s
     """Turn `dpkg --verify` output into a VerifyResult (no commands run)."""
     mismatches: list[FileMismatch] = []
     candidates = parsed_lines = 0
+    unparsed: list[str] = []
     for line in output.splitlines():
         if not verifyfmt.is_candidate(line):
             continue
         candidates += 1
         parsed = verifyfmt.parse_line(line)
         if parsed is None:
+            if len(unparsed) < UNPARSED_KEPT:
+                unparsed.append(line.strip())
             continue
         parsed_lines += 1
         excluded = parsed.missing and is_excluded(parsed.path, filters)
@@ -178,7 +181,7 @@ def parse_verify(output: str, owners: dict[str, str], filters: list[tuple[str, s
                 excluded=excluded,
             ))
     return VerifyResult(mismatches=mismatches, candidate_line_count=candidates,
-                        parsed_line_count=parsed_lines)
+                        parsed_line_count=parsed_lines, unparsed=tuple(unparsed))
 
 
 def verify_all(timeout: float | None = None) -> VerifyResult | None:

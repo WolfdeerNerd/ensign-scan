@@ -78,6 +78,29 @@ assert shown("/tmp/café.txt") == "/tmp/café.txt", "valid UTF-8 is untouched"
 assert shown("x\ud800y") == "x\ud800y", "a stray surrogate that isn't from a filename doesn't crash"
 print("shown() test passed ✓")
 
+# --- control characters: a filename can't drive the terminal, forge log lines or notifications --
+# Linux filenames may contain any byte but "/" and NUL, including ESC. Each of
+# these is a real trick: wipe the screen and print a fake verdict, set the
+# terminal window title (OSC 0), plant a hidden clickable link (OSC 8), use
+# the one-byte C1 form of ESC [ (0x9b), ring the bell, or backspace over text.
+HOSTILE = {
+    "clear+fake verdict": "evil\x1b[2J\x1b[H\x1b[32mNo infected files found\x1b[0m.com",
+    "window title": "evil\x1b]0;all clear\x07.com",
+    "hidden link": "evil\x1b]8;;https://example.invalid\x1b\\click\x1b]8;;\x1b\\.com",
+    "C1 CSI": "evil\x9b2J.com",
+    "bell, backspace, DEL": "evil\x07\x08\x08\x08\x7f.com",
+    "line breaks and tab": "evil\n[green]OK[/green]\r\t.com",
+}
+for label, name in HOSTILE.items():
+    for out in (shown(name), notify._body_text(name)):
+        assert not any(ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f for c in out), (label, repr(out))
+        assert out.startswith("evil") and out.endswith(".com"), (label, out)
+assert shown(HOSTILE["window title"]) == "evil\\x1b]0;all clear\\x07.com"
+assert shown(HOSTILE["line breaks and tab"]) == "evil\\n\\[green]OK\\[/green]\\r\\t.com", \
+    "named escapes for the common three, and rich markup still neutralised"
+assert shown("évité 日本語 🦊.txt") == "évité 日本語 🦊.txt", "ordinary non-ASCII is untouched"
+print("control-character test passed ✓")
+
 with tempfile.TemporaryDirectory() as d:
     tree = Path(d, "tree")
     tree.mkdir()
@@ -195,7 +218,23 @@ with tempfile.TemporaryDirectory() as d:
         logsetup.shutdown()
     assert "Logging error" not in stderr.getvalue(), stderr.getvalue()
     written = Path(log_path).read_text()
-    assert "evil-caf" in written and "\\udce9" in written, written
+    assert "evil-caf\\xe9.com" in written, "same \\xNN form as the terminal shows"
+
+    # a newline in a name can't forge a second log entry; escapes are written out
+    forged = "/tmp/x.txt\n2026-01-01 00:00:00 INFO all files clean\x1b[2J"
+    with contextlib.redirect_stderr(stderr):
+        log_path = logsetup.setup(config)
+        logging.getLogger("ensign_scan.test").error("could not open %s", forged)
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            logging.getLogger("ensign_scan.test").exception("traceback still readable")
+        logsetup.shutdown()
+    written = Path(log_path).read_text()
+    assert "\x1b" not in written, "no raw ESC reaches the log file"
+    assert "x.txt\\n2026-01-01 00:00:00 INFO all files clean\\x1b[2J" in written, written
+    assert not any(line.startswith("2026-01-01") for line in written.splitlines()), "no forged entry"
+    assert "Traceback (most recent call last):\n" in written, "tracebacks keep their own lines"
     print("logging test passed ✓")
 
 # --- the clamd connection: such a path goes out as its bytes, and comes back -------------

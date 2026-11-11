@@ -575,7 +575,6 @@ assert _ls.prune(_pd, keep_days=0, max_total_mb=0, now=_now) == [], "0 and 0 dis
 print("logsetup test passed ✓")
 
 # --- runlock: one database-writing Ensign at a time -------------------
-import fcntl as _fcntl
 import subprocess as _sp
 import sys as _sys
 import tempfile as _tf

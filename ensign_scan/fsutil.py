@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import stat as statmod
 from pathlib import Path
 
@@ -77,6 +78,44 @@ def is_scannable(st: os.stat_result) -> bool:
     return statmod.S_ISREG(st.st_mode) and st.st_size > 0
 
 
+# Control characters: C0 (0x00-0x1F), DEL, and C1 (0x80-0x9F). Terminals act
+# on these instead of displaying them -- ESC (0x1B) starts sequences that
+# clear the screen, move the cursor, recolour or hide text, set the window
+# title or plant a clickable link -- so a filename containing them could
+# rewrite or disguise Ensign's own output, including its verdict on that
+# very file ("terminal escape injection").
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_NAMED_CONTROLS = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def printable(text: object) -> str:
+    """Text from the filesystem made safe to show anywhere: every control
+    character written out as a visible escape (\\n, \\t, \\x1b, ...), and
+    bytes that aren't valid UTF-8 as \\xNN ("caf\\xe9.txt", not
+    "caf\ufffd.txt"), so the file can still be found from the output.
+
+    Used for the terminal (through shown()), the log file and desktop
+    notifications. Ordinary names are returned unchanged.
+    """
+    text = str(text)
+    try:
+        text = text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+    except UnicodeEncodeError:
+        pass  # a stray surrogate that didn't come from a filename: leave it
+    return _CONTROL_CHARS.sub(
+        lambda m: _NAMED_CONTROLS.get(m.group(), f"\\x{ord(m.group()):02x}"), text)
+
+
+def human_size(n: int) -> str:
+    """Bytes as "68 B", "4.1 KiB", "2.0 GiB"."""
+    size = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{n} B"
+
+
 def shown(text: object) -> str:
     """Make a string from the filesystem safe to print through rich.
 
@@ -85,18 +124,10 @@ def shown(text: object) -> str:
     one named "b]" gives a path containing "[/b]", which makes rich raise
     and stop the report, and a file named "x[black on black]" hides the
     rest of its own line -- including the verdict. Newlines are shown as
-    "\\n" so a name can't start a fake line of output.
-
-    A name that isn't valid UTF-8 (Python holds those bytes as "surrogate"
-    characters) is shown with the raw bytes as \\xNN -- "caf\\xe9.txt",
-    not "caf\ufffd.txt" -- so the file can actually be found from the output.
+    "\\n" so a name can't start a fake line of output, and every other
+    control character is written out too (see printable()).
     """
-    text = str(text)
-    try:
-        text = text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
-    except UnicodeEncodeError:
-        pass  # a stray surrogate that didn't come from a filename: leave it
-    return escape(text.replace("\r", "\\r").replace("\n", "\\n"))
+    return escape(printable(text))
 
 
 class NotScannable(OSError):

@@ -10,6 +10,9 @@
                  otherwise        -> open once as the user -> hash it
                                      -> pass that same descriptor to clamd
                                      -> upsert
+                 larger than clamd scans? -> hash it, then queue the open
+                                     descriptor for clamscan, run in
+                                     batches with the limits switched off
 
     Each file is visited exactly once per run. Unchanged files cost one
     stat() call and nothing else — no reads, no hashing, no clamd.
@@ -41,10 +44,20 @@ from rich import print
 from sqlalchemy.orm import Session
 
 from . import secrets
-from .clamd import ClamdClient, ScanOutcome, clamscan_cli_available, is_size_limit_error, scan_with_clamscan_cli
+from .clamd import (
+    DEFAULT_LIMITS,
+    LIMITS_EXCEEDED_PREFIX,
+    ClamdClient,
+    ClamdLimits,
+    ScanOutcome,
+    clamscan_cli_available,
+    clamscan_user,
+    is_size_limit_error,
+    scan_fds_with_clamscan,
+)
 from .config import Config
 from .db import make_engine
-from .fsutil import NotScannable, is_scannable, open_for_scan, safe_lstat, sha256_fd, shown, stat_or_error
+from .fsutil import NotScannable, human_size, is_scannable, open_for_scan, safe_lstat, sha256_fd, shown, stat_or_error
 from .models import DirectoryRecord, FileRecord, ScanStatus, open_failed_result, path_under, utcnow
 from .progress import RunProgress
 
@@ -77,7 +90,40 @@ _STATUS_SYMBOLS = {
     ScanStatus.ERROR.value: "[yellow]✗[/yellow]",
     ScanStatus.PENDING.value: "?",
     ScanStatus.CLASSIFIED.value: "[dim]•[/dim]",
+    ScanStatus.INCOMPLETE.value: "[yellow]~[/yellow]",
 }
+
+# Large files queued for clamscan are scanned this many to a run: each run
+# loads the whole signature database, so fewer runs is faster, but every
+# queued file holds an open descriptor until its run.
+_CLAMSCAN_BATCH = 64
+# clamscan time allowed per run: a fixed allowance plus 1 s per 5 MiB.
+_CLAMSCAN_BASE_TIMEOUT = 300.0
+_CLAMSCAN_BYTES_PER_SECOND = 5 * 2**20
+
+
+def _mib(n: int) -> str:
+    return f"{n / 2**20:,.0f} MiB"
+
+
+def _clamd_skipped(outcome: ScanOutcome) -> bool:
+    """clamd answered, but didn't scan the file: it is past one of clamd's
+    limits. Either an error naming the size limit, or -- with
+    AlertExceedsMax -- a Heuristics.Limits.Exceeded.* "detection", which is
+    a note that scanning stopped, not an infection."""
+    if outcome.status == ScanStatus.ERROR:
+        return is_size_limit_error(outcome.raw)
+    return (outcome.status == ScanStatus.INFECTED
+            and (outcome.threat_name or "").startswith(LIMITS_EXCEEDED_PREFIX))
+
+
+@dataclass
+class _Oversized:
+    """A large file waiting for clamscan: hashed, and still open."""
+    path: Path
+    st: os.stat_result
+    fd: int
+    digest: str
 
 
 class _Known(NamedTuple):
@@ -87,6 +133,13 @@ class _Known(NamedTuple):
     ctime_ns: int | None
     status: str | None
     sig_version: int | None
+    # Scanned whole by clamscan rather than by clamd (scan_result starts
+    # "clamscan:"). A large file marked clean by clamd alone was never
+    # actually scanned -- see _collect_changed_files.
+    by_clamscan: bool = False
+    # Recorded as INCOMPLETE because clamscan couldn't be run (not
+    # installed, or root with no clamav user): scan_result "not scanned:".
+    clamscan_missing: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,6 +177,9 @@ class TreeStats:
     # Unchanged files queued for a rescan only because the signature
     # database has moved on since they were last scanned.
     sig_rescan: int = 0
+    # Unchanged large files clamd once called clean without scanning them
+    # (Ensign 0.4.0 and older trusted that "OK"): rescanned once, by clamscan.
+    big_recheck: int = 0
 
 
 class Scanner:
@@ -132,7 +188,6 @@ class Scanner:
         self.engine = make_engine(config.db_url)
         self.clamd = clamd or ClamdClient(config.clamd_socket)
         self._workers: int | None = None
-        self._warned_no_clamscan_cli = False
         # Signature DB version for the current scan_tree run; None = unknown
         # or not scanning. Fixed at the start of a run so every file is
         # stamped with the same (possibly slightly old, never too new)
@@ -152,6 +207,13 @@ class Scanner:
         # Watched files that didn't exist at the last scan of a tree that
         # had been scanned before: a new authorized_keys is a change too.
         self._watched_new: set[str] = set()
+        # clamd's size limits, read by prepare_clamd(); None until then.
+        self.limits: ClamdLimits | None = None
+        # Large files waiting for clamscan, and one clamscan at a time.
+        self._oversized: list[_Oversized] = []
+        self._oversized_lock = threading.Lock()
+        self._clamscan_lock = threading.Lock()
+        self._warned_clamscan: set[str] = set()
 
     def prepare_clamd(self) -> None:
         """Check clamd once, before the first file is sent to it.
@@ -164,6 +226,32 @@ class Scanner:
         with self._prepare_lock:  # worker threads may all arrive at once
             if self._transport is None:
                 self._transport = self._choose_transport()
+                self.limits = self._read_limits()
+
+    def _read_limits(self) -> ClamdLimits:
+        reader = getattr(self.clamd, "limits", None)  # test doubles may not have it
+        try:
+            limits = reader() if reader is not None else DEFAULT_LIMITS
+        except Exception as exc:  # never let this stop a scan: the defaults are safe
+            log.error("could not read clamd's limits: %s", exc)
+            limits = DEFAULT_LIMITS
+        if limits.source.startswith("ClamAV defaults") and reader is not None:
+            print(f"[dim]Couldn't read clamd's config ({shown(limits.source)}): assuming files "
+                  f"from {_mib(limits.scan_limit)} up are too large for clamd.[/dim]")
+        return limits
+
+    @staticmethod
+    def _clamscan_usable() -> bool:
+        if not clamscan_cli_available():
+            return False
+        try:
+            clamscan_user()
+        except LookupError:
+            return False
+        return True
+
+    def _scan_limit(self) -> int:
+        return (self.limits or DEFAULT_LIMITS).scan_limit
 
     def _choose_transport(self) -> str:
         uid = self.clamd.daemon_uid()
@@ -237,6 +325,7 @@ class Scanner:
             f"{stats.excluded_dirs} excluded · "
             f"[bold]{len(candidates)} to process[/bold]"
             + (f" ({stats.sig_rescan} because signatures updated)" if stats.sig_rescan else "")
+            + (f" ({stats.big_recheck} large files not really scanned before)" if stats.big_recheck else "")
         )
         if candidates:
             results = self._process_all(candidates, scan, "Scan Progress")
@@ -320,6 +409,13 @@ class Scanner:
                 elif self._signatures_moved_on(prev):
                     stats.sig_rescan += 1
                     candidates.append(path)
+                elif (self.limits is not None and prev.status == ScanStatus.CLEAN.value
+                      and (prev.size or 0) >= self._scan_limit() and not prev.by_clamscan):
+                    stats.big_recheck += 1
+                    candidates.append(path)
+                elif prev.clamscan_missing and self.limits is not None and self._clamscan_usable():
+                    stats.big_recheck += 1  # clamscan can be run now; it couldn't before
+                    candidates.append(path)
                 else:
                     stats.unchanged += 1
         return candidates
@@ -385,8 +481,10 @@ class Scanner:
             rows = session.query(
                 FileRecord.filepath, FileRecord.file_size, FileRecord.mtime_ns,
                 FileRecord.ctime_ns, FileRecord.scan_status, FileRecord.sig_version,
+                FileRecord.scan_result.like("clamscan:%"),
+                FileRecord.scan_result.like("not scanned:%"),
             ).filter(path_under(FileRecord.filepath, str(root))).all()
-        return {row[0]: _Known(*row[1:]) for row in rows if row[2] is not None}
+        return {row[0]: _Known(*row[1:6], bool(row[6]), bool(row[7])) for row in rows if row[2] is not None}
 
     # ------------------------------------------------------------------
     # Snapshot-subtree pruning
@@ -455,7 +553,9 @@ class Scanner:
                 return digest
 
             with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                return list(pool.map(work, paths))
+                results = list(pool.map(work, paths))
+        self.scan_oversized()
+        return results
 
     def process_file(self, path: Path | str, scan: bool = True) -> str | None:
         """
@@ -463,7 +563,8 @@ class Scanner:
 
         Returns the hash on success, "" for a credential file recorded
         without being read, None on any failure. Safe to call from worker
-        threads: it opens its own short-lived session.
+        threads: it opens its own short-lived session. A file too large for
+        clamd is queued for clamscan; call scan_oversized() to scan the queue.
         """
         return self._process_file(path, scan)[0]
 
@@ -523,30 +624,29 @@ class Scanner:
                 return self._record_unreadable(path, st, exc)
             if not scan:
                 outcome = None
-            elif self._transport == "path":
-                outcome = self.clamd.scan(path)
+            elif st.st_size >= self._scan_limit():
+                # clamd would skip this file and still answer "OK". Not sent
+                # to clamd at all: queued, still open, for clamscan.
+                self._queue_oversized(_Oversized(path, st, fd, digest))
+                fd = -1  # the queue owns the descriptor now
+                return digest, "queued"
             else:
-                outcome = self.clamd.scan_fd(fd, label=str(path))
+                outcome = (self.clamd.scan(path) if self._transport == "path"
+                           else self.clamd.scan_fd(fd, label=str(path)))
+                if _clamd_skipped(outcome):  # a limit Ensign didn't know about
+                    self._queue_oversized(_Oversized(path, st, fd, digest))
+                    fd = -1
+                    return digest, "queued"
         finally:
-            os.close(fd)
+            if fd >= 0:
+                os.close(fd)
+        return self._finish(path, st, digest, outcome)
 
-        if (
-            outcome is not None
-            and outcome.status == ScanStatus.ERROR
-            and is_size_limit_error(outcome.raw)
-        ):
-            # clamd rejected this file for size, not content -- fall back
-            # to the clamscan CLI with limits explicitly disabled, so a
-            # legitimately large file still gets a real verdict instead
-            # of a permanent error.
-            if clamscan_cli_available():
-                print(f"[dim]→ {shown(path.name)} exceeds clamd's size limit, falling back to clamscan CLI…[/dim]")
-                outcome = scan_with_clamscan_cli(path)
-            elif not self._warned_no_clamscan_cli:
-                print("[yellow]! Some files exceed clamd's size limit and the 'clamscan' CLI "
-                      "isn't installed to fall back on — install clamav's clamscan for full coverage.[/yellow]")
-                self._warned_no_clamscan_cli = True
-
+    def _finish(
+        self, path: Path, st: os.stat_result, digest: str, outcome: ScanOutcome | None
+    ) -> tuple[str | None, str]:
+        """Record a hashed (and maybe scanned) file, note SSH-file changes,
+        and print its line."""
         try:
             previous_hash = self._upsert_file(path, st, digest, outcome)
         except Exception as exc:
@@ -568,6 +668,60 @@ class Scanner:
         symbol = _STATUS_SYMBOLS.get(status, "?")
         print(f"{symbol} {shown(path.name):.<50} {digest[:16]}… {status}")
         return digest, status
+
+    # ------------------------------------------------------------------
+    # Files too large for clamd: clamscan, in batches
+    # ------------------------------------------------------------------
+
+    def _queue_oversized(self, item: _Oversized) -> None:
+        print(f"[dim]→ {shown(item.path.name)} ({human_size(item.st.st_size)}) is too large for clamd; "
+              f"queued for clamscan[/dim]")
+        with self._oversized_lock:
+            self._oversized.append(item)
+            batch = self._oversized if len(self._oversized) >= _CLAMSCAN_BATCH else None
+            if batch is not None:
+                self._oversized = []
+        if batch is not None:
+            self._clamscan_batch(batch)
+
+    def scan_oversized(self) -> None:
+        """Scan every queued large file now. Safe to call with nothing queued."""
+        with self._oversized_lock:
+            batch, self._oversized = self._oversized, []
+        if batch:
+            self._clamscan_batch(batch)
+
+    def _clamscan_batch(self, batch: list[_Oversized]) -> None:
+        total = sum(item.st.st_size for item in batch)
+        print(f"\n[bold]Scanning {len(batch)} large file(s) ({human_size(total)}) with clamscan[/bold] "
+              f"[dim]-- slower than clamd: it loads its own copy of the signatures[/dim]")
+        try:
+            with self._clamscan_lock:  # one clamscan (and one copy of the signatures) at a time
+                outcomes = self._clamscan_outcomes(batch, total)
+        finally:
+            for item in batch:
+                os.close(item.fd)
+        for item in batch:
+            self._finish(item.path, item.st, item.digest, outcomes[item.fd])
+
+    def _clamscan_outcomes(self, batch: list[_Oversized], total: int) -> dict[int, ScanOutcome]:
+        def not_scanned(why: str) -> dict[int, ScanOutcome]:
+            if why not in self._warned_clamscan:
+                self._warned_clamscan.add(why)
+                print(f"[yellow]! Large files can't be scanned: {why}. They are recorded as "
+                      f"not fully scanned, never as clean.[/yellow]")
+            return {item.fd: ScanOutcome(ScanStatus.INCOMPLETE, f"not scanned: {why}") for item in batch}
+
+        if not clamscan_cli_available():
+            return not_scanned("clamd skips files this size, and the 'clamscan' command isn't "
+                               "installed (it comes with ClamAV)")
+        try:
+            run_as = clamscan_user()
+        except LookupError as exc:
+            return not_scanned(f"Ensign won't run clamscan as root, and there is {exc}")
+        timeout = _CLAMSCAN_BASE_TIMEOUT + total / _CLAMSCAN_BYTES_PER_SECOND
+        return scan_fds_with_clamscan([item.fd for item in batch], self.limits or DEFAULT_LIMITS,
+                                      timeout, run_as)
 
     def _remember_unsaved(self, path: Path, outcome: ScanOutcome | None, exc: Exception) -> None:
         """A result the database refused: say so now, keep it for the report."""

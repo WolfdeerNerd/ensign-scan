@@ -1,0 +1,343 @@
+"""Files larger than clamd scans.
+
+clamd skips a file past its MaxFileSize or MaxScanSize and still answers
+"OK" for it. Ensign 0.4.0 and older stored that as clean, so a large enough
+file -- malware padded with junk, a well-known trick (MITRE ATT&CK T1027.001)
+-- was never scanned and never reported. Now:
+
+  * files from clamd's limit up are not sent to clamd; they are hashed, then
+    scanned by clamscan with the limits off, in batches, through the
+    descriptors Ensign opened (/proc/self/fd/N), never reopened by name;
+  * a file clamd flags as over a limit (AlertExceedsMax) goes the same way,
+    and is not counted as infected;
+  * a file ClamAV can't scan at all (over ~2 GiB) is "incomplete": tracked,
+    reported, never clean;
+  * large files an older Ensign called clean are rescanned once.
+
+Also here: clamd's reply is read for its verdict only, never for the
+filename in it ("x: PUA.Harmless FOUND y.exe" can't rename a detection).
+
+Most of this runs anywhere, with a stand-in clamd and clamscan. With
+ENSIGN_TEST_CLAMD_SOCKET set (CI), the end runs real ClamAV too:
+
+    ENSIGN_TEST_CLAMD_SOCKET=/run/clamav/clamd.ctl python3 tests/largefiles_test.py
+
+Run as your normal user.
+"""
+from __future__ import annotations
+
+import sys as _sys_path
+from pathlib import Path as _Path
+
+# Run against THIS checkout, never an installed copy of Ensign.
+ROOT = _Path(__file__).resolve().parent.parent
+_sys_path.path.insert(0, str(ROOT))
+
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import os  # noqa: E402
+import shutil  # noqa: E402
+import sqlite3  # noqa: E402
+import stat  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from sqlalchemy.orm import Session  # noqa: E402
+
+from ensign_scan import reports, scanner as scanner_mod  # noqa: E402
+from ensign_scan.clamd import (  # noqa: E402
+    DEFAULT_LIMITS,
+    ClamdClient,
+    ClamdLimits,
+    ScanOutcome,
+    _outcome,
+    parse_clamd_config,
+    scan_fds_with_clamscan,
+)
+from ensign_scan.config import Config  # noqa: E402
+from ensign_scan.models import FileRecord, ScanStatus  # noqa: E402
+from ensign_scan.scanner import Scanner  # noqa: E402
+
+EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR" + b"-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+
+
+def fds_open_under(folder: Path) -> list[str]:
+    """Descriptors this process holds on files under `folder`. (Not a plain
+    count: SQLite's connection pool opens and keeps its own.)"""
+    held = []
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith(f"{folder}/"):
+            held.append(target)
+    return held
+
+
+# --- clamd.conf: the limits are read the way clamd reads them ------------------------------
+conf = parse_clamd_config(
+    "# Example\n"
+    "MaxFileSize 25M\n"
+    "MaxScanSize   1G   # trailing comment\n"
+    "MaxFileSize 300M\n"             # the last one wins, as in clamd
+    "DatabaseDirectory /var/lib/clamav\n"
+    "AlertExceedsMax yes\n",
+    "test",
+)
+assert conf.max_file_size == 300 * 2**20 and conf.max_scan_size == 2**30, conf
+assert conf.database_dir == "/var/lib/clamav" and conf.alert_exceeds_max
+assert conf.scan_limit == 300 * 2**20, "the smaller of the two limits"
+assert parse_clamd_config("MaxFileSize 512\nMaxScanSize 4k", "t").scan_limit == 512, "bytes and K"
+unlimited = parse_clamd_config("MaxFileSize 0\nMaxScanSize 0", "t")
+assert unlimited.scan_limit == 2000 * 2**20, "0 = no setting, but ClamAV's own ceiling still applies"
+assert parse_clamd_config("", "t").scan_limit == 100 * 2**20, "missing settings: ClamAV's defaults"
+assert parse_clamd_config("MaxFileSize lots", "t").max_file_size == 100 * 2**20, "unparsable: the default"
+print("clamd.conf limits test passed ✓")
+
+# --- clamd's reply: the verdict is read from clamd's words, not from the filename --------------
+spoof = _outcome("/h/x: PUA.Harmless FOUND y.exe: Win.Trojan.Agent-1 FOUND", "Win.Trojan.Agent-1 FOUND")
+assert spoof.status == ScanStatus.INFECTED and spoof.threat_name == "Win.Trojan.Agent-1", spoof
+assert _outcome("/h/FOUND.txt: Access denied. ERROR", "Access denied. ERROR").status == ScanStatus.ERROR
+assert _outcome("/h/a: Eicar FOUND.txt: OK", "OK").status == ScanStatus.CLEAN
+print("clamd reply parsing test passed ✓")
+
+# --- clamscan's output, through a stand-in clamscan --------------------------------------------
+# It prints what real clamscan prints, for whichever descriptors it is given.
+with tempfile.TemporaryDirectory() as d:
+    fake = Path(d, "clamscan")
+    fake.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  case "$a" in /proc/self/fd/*)\n'
+        '    n=${a#/proc/self/fd/}\n'
+        '    [ -e "$a" ] || { echo "$a: No such file or directory ERROR"; continue; }\n'
+        '    case "$(head -c 4 "$a")" in\n'
+        '      EVIL) echo "$a: Test.Evil FOUND" ;;\n'
+        '      HUGE) echo "$a: Heuristics.Limits.Exceeded.MaxFileSize FOUND"; '
+        'echo "$a: Virus(es) detected ERROR" ;;\n'
+        '      GONE) ;;\n'
+        '      *) echo "$a: OK" ;;\n'
+        "    esac ;;\n"
+        "  esac\n"
+        "done\n"
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    files = {}
+    for name in ("EVIL", "HUGE", "GONE", "fine"):
+        p = Path(d, f"{name}.bin")
+        p.write_bytes(name.encode() + b" data")
+        files[name] = os.open(p, os.O_RDONLY)
+    real_path = os.environ["PATH"]
+    os.environ["PATH"] = f"{d}:{real_path}"
+    try:
+        got = scan_fds_with_clamscan(list(files.values()), DEFAULT_LIMITS, timeout=30)
+    finally:
+        os.environ["PATH"] = real_path
+        for fd in files.values():
+            os.close(fd)
+    by_name = {name: got[fd] for name, fd in files.items()}
+    assert by_name["EVIL"].status == ScanStatus.INFECTED and by_name["EVIL"].threat_name == "Test.Evil"
+    assert by_name["HUGE"].status == ScanStatus.INCOMPLETE, "a limits alert is 'not scanned', not infected"
+    assert by_name["HUGE"].threat_name == "Heuristics.Limits.Exceeded.MaxFileSize"
+    assert by_name["GONE"].status == ScanStatus.ERROR, "no answer is an error, never clean"
+    assert by_name["fine"].status == ScanStatus.CLEAN and by_name["fine"].raw == "clamscan: OK"
+print("clamscan output parsing test passed ✓")
+
+
+# --- the scanner: large files go to clamscan, in batches, and are never "clean" by default -------
+class FakeClamd:
+    """clamd with a 1 KiB limit. Like the real one, it says OK for anything
+    it is sent -- so if a large file reached it, the test would see "clean"."""
+    def __init__(self):
+        self.sent: list[str] = []
+
+    def daemon_uid(self):
+        return 1000
+
+    def supports_fildes(self):
+        return True
+
+    def signature_version(self):
+        return 27455
+
+    def max_threads(self):
+        return 2
+
+    def limits(self):
+        return ClamdLimits(1024, 0, None, False, "test")
+
+    def scan_fd(self, fd, label=""):
+        self.sent.append(os.path.basename(label))
+        if "archive" in label:  # AlertExceedsMax: an archive that unpacks past MaxScanSize
+            return ScanOutcome(ScanStatus.INFECTED, f"{label}: Heuristics.Limits.Exceeded.MaxScanSize FOUND",
+                               "Heuristics.Limits.Exceeded.MaxScanSize")
+        return ScanOutcome(ScanStatus.CLEAN, f"{label}: OK")
+
+
+batches: list[list[int]] = []
+
+
+def fake_clamscan(fds, limits, timeout, run_as=None):
+    """Reads each file through the descriptor it was given -- the one Ensign
+    opened -- the way the real clamscan does through /proc/self/fd/N."""
+    batches.append(list(fds))
+    out = {}
+    for fd in fds:
+        os.fstat(fd)  # still open: raises if Ensign closed it too early
+        data = os.pread(fd, 1 << 20, 0)
+        if b"EVIL" in data:
+            out[fd] = ScanOutcome(ScanStatus.INFECTED, "clamscan: Test.Evil FOUND", "Test.Evil")
+        elif len(data) > 10_000:
+            out[fd] = ScanOutcome(ScanStatus.INCOMPLETE, "clamscan: Heuristics.Limits.Exceeded.MaxFileSize FOUND",
+                                  "Heuristics.Limits.Exceeded.MaxFileSize")
+        else:
+            out[fd] = ScanOutcome(ScanStatus.CLEAN, "clamscan: OK")
+    return out
+
+
+real = (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
+        scanner_mod.clamscan_user, scanner_mod._CLAMSCAN_BATCH)
+scanner_mod.scan_fds_with_clamscan = fake_clamscan
+scanner_mod.clamscan_cli_available = lambda: True
+scanner_mod.clamscan_user = lambda: None
+scanner_mod._CLAMSCAN_BATCH = 2
+try:
+    with tempfile.TemporaryDirectory() as d:
+        tree = Path(d, "tree")
+        tree.mkdir()
+        (tree / "small.txt").write_bytes(b"small and clean")
+        (tree / "big-evil.bin").write_bytes(b"\0" * 2000 + b"EVIL" + b"\0" * 2000)  # padded past the limit
+        (tree / "big-clean.bin").write_bytes(b"A" * 4096)
+        (tree / "huge.img").write_bytes(b"B" * 20_000)
+        (tree / "archive.zip").write_bytes(b"PK small, but unpacks past the limit")
+        Path(d, "data").mkdir()
+        config = Config(db_url=f"sqlite:///{d}/data/system.db", log_file=Path(d, "data", "e.txt"),
+                        max_workers=2)
+        clamd = FakeClamd()
+        scanner = Scanner(config, clamd=clamd)
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            scanner.scan_tree(tree)
+        out = buf.getvalue()
+
+        with Session(scanner.engine) as session:
+            rows = {Path(r.filepath).name: (r.scan_status, r.scan_result, r.threat_name)
+                    for r in session.query(FileRecord)}
+        assert set(clamd.sent) == {"small.txt", "archive.zip"}, \
+            f"files past clamd's limit must not be sent to it: {clamd.sent}"
+        assert rows["small.txt"][0] == "clean"
+        assert rows["big-evil.bin"][:2] == ("infected", "clamscan: Test.Evil FOUND"), rows["big-evil.bin"]
+        assert rows["big-clean.bin"][:2] == ("clean", "clamscan: OK"), rows["big-clean.bin"]
+        assert rows["huge.img"][0] == "incomplete", rows["huge.img"]
+        assert rows["archive.zip"][0] == "clean" and rows["archive.zip"][1].startswith("clamscan:"), \
+            f"clamd's limits alert is rescanned by clamscan, not counted as infected: {rows['archive.zip']}"
+        assert sum(len(b) for b in batches) == 4 and all(len(b) <= 2 for b in batches), batches
+        assert fds_open_under(tree) == [], f"queued descriptors left open: {fds_open_under(tree)}"
+        assert "queued for clamscan" in out and "Scanning 2 large file(s)" in out, out
+        print("large-file routing test passed ✓")
+
+        # --- reported as not fully scanned, with the disclaimer --------------------------------
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            summary = reports.scan_summary(scanner.engine)
+            reports.incomplete_report(scanner.engine)
+        text = " ".join(buf.getvalue().split())
+        assert summary["incomplete"] == 1 and "Not fully scanned: 1" in text, text
+        assert "NOT FULLY SCANNED (1 files)" in text and "huge.img" in text, text
+        assert "does not call them clean" in text and "no ClamAV tool can scan" in text, text
+        print("not-fully-scanned report test passed ✓")
+
+        # --- unchanged next run: nothing rehashed, nothing rescanned ---------------------------
+        batches.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            stats = scanner.scan_tree(tree)
+        assert stats.unchanged == 5 and not batches, (stats, batches)
+        print("unchanged large files test passed ✓")
+
+        # --- upgrading from 0.4.0: a large file clamd "passed" is rescanned once --------------------
+        db = sqlite3.connect(f"{d}/data/system.db")
+        db.execute("UPDATE files SET scan_result = ? WHERE filename = 'big-clean.bin'",
+                   (f"{tree}/big-clean.bin: OK",))
+        db.commit()
+        db.close()
+        with contextlib.redirect_stdout(io.StringIO()):
+            stats = scanner.scan_tree(tree)
+        assert stats.big_recheck == 1 and sum(len(b) for b in batches) == 1, (stats, batches)
+        with contextlib.redirect_stdout(io.StringIO()):
+            stats = scanner.scan_tree(tree)
+        assert stats.big_recheck == 0, "rescanned once, not every run"
+        print("0.4.0 upgrade recheck test passed ✓")
+
+        # --- no clamscan: not fully scanned (never clean), retried once clamscan is there -----------
+        (tree / "big-new.bin").write_bytes(b"C" * 4096)
+        scanner_mod.clamscan_cli_available = lambda: False
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            scanner.scan_tree(tree)
+        with Session(scanner.engine) as session:
+            row = session.query(FileRecord).filter(FileRecord.filename == "big-new.bin").one()
+            assert row.scan_status == "incomplete" and row.scan_result.startswith("not scanned:"), \
+                (row.scan_status, row.scan_result)
+        assert "isn't installed" in buf.getvalue()
+        with contextlib.redirect_stdout(io.StringIO()):
+            stats = scanner.scan_tree(tree)
+        assert stats.big_recheck == 0, "not retried while clamscan is still missing"
+        scanner_mod.clamscan_cli_available = lambda: True
+        with contextlib.redirect_stdout(io.StringIO()):
+            stats = scanner.scan_tree(tree)
+        with Session(scanner.engine) as session:
+            row = session.query(FileRecord).filter(FileRecord.filename == "big-new.bin").one()
+            assert stats.big_recheck == 1 and row.scan_status == "clean", (stats, row.scan_status)
+        print("missing-clamscan test passed ✓")
+finally:
+    (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
+     scanner_mod.clamscan_user, scanner_mod._CLAMSCAN_BATCH) = real
+
+# --- real ClamAV (CI) --------------------------------------------------------------------------
+socket_path = os.environ.get("ENSIGN_TEST_CLAMD_SOCKET")
+if not socket_path or not shutil.which("clamscan"):
+    print("\nAll large-file tests passed ✓ (real-ClamAV tests skipped: set ENSIGN_TEST_CLAMD_SOCKET, "
+          "and install clamscan)")
+    raise SystemExit(0)
+
+limits = ClamdClient(socket_path).limits()
+assert limits.source != "test" and limits.scan_limit > 0, limits
+with tempfile.TemporaryDirectory() as d:
+    padded = Path(d, "padded.bin")
+    padded.write_bytes(EICAR + b"\0" * 8192)        # the hash signature can't match; the body one does
+    huge = Path(d, "huge.img")
+    with open(huge, "wb") as fh:                      # sparse: no disk used, but past ClamAV's ceiling
+        fh.write(EICAR)
+        fh.truncate(2049 * 2**20)
+    clean = Path(d, "clean.bin")
+    clean.write_bytes(b"nothing here " * 1000)
+    fds = [os.open(p, os.O_RDONLY) for p in (padded, huge, clean)]
+    try:
+        got = scan_fds_with_clamscan(fds, limits, timeout=600)
+    finally:
+        for fd in fds:
+            os.close(fd)
+    padded_r, huge_r, clean_r = (got[fd] for fd in fds)
+    assert padded_r.status == ScanStatus.INFECTED and "EICAR" in padded_r.threat_name.upper(), padded_r
+    assert huge_r.status == ScanStatus.INCOMPLETE, f"ClamAV can't scan past ~2 GiB: {huge_r}"
+    assert huge_r.threat_name == "Heuristics.Limits.Exceeded.MaxFileSize", huge_r
+    assert clean_r.status == ScanStatus.CLEAN, clean_r
+    print("real clamscan test passed ✓")
+
+    # End to end with the real clamd: EICAR padded past clamd's own limit.
+    tree = Path(d, "tree")
+    tree.mkdir()
+    with open(tree / "padded-past-clamd.bin", "wb") as fh:
+        fh.write(EICAR)
+        fh.truncate(limits.scan_limit + 4096)
+    Path(d, "data").mkdir()
+    config = Config(db_url=f"sqlite:///{d}/data/system.db", log_file=Path(d, "data", "e.txt"),
+                    clamd_socket=socket_path, max_workers=2)
+    live = Scanner(config)
+    with contextlib.redirect_stdout(io.StringIO()):
+        live.scan_tree(tree)
+    with Session(live.engine) as session:
+        row = session.query(FileRecord).one()
+    assert row.scan_status == "infected" and row.scan_result.startswith("clamscan:"), \
+        (row.scan_status, row.scan_result)
+    print("real clamd + clamscan end-to-end test passed ✓")
+
+print("\nAll large-file tests passed ✓")

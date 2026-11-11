@@ -84,7 +84,7 @@ Ensign makes no network connections. It talks to clamd over a local Unix socket 
 
 | Program | When | What for |
 |---|---|---|
-| `clamscan` | Only for a file clamd rejects as over its size limit | Scans that one file with the command-line scanner, which has no such limit |
+| `clamscan` | Only for files larger than clamd scans (see Large files) | Scans them, in batches, with the size limits switched off. Under `sudo`, as the `clamav` user |
 | `pacman -Qkk` / `dpkg --verify` / `rpm -Va` | Only with `--verify-packages` (whichever matches your distribution) | Read-only integrity check of installed files |
 | `pacman -Qo` / `dpkg-query -S` / `rpm -qf` `<file>` | When listing infected files (whichever matches your distribution) | Read-only lookup of which package owns a flagged file |
 | `notify-send` | At the end of a run, if installed | Desktop notification |
@@ -177,7 +177,24 @@ These run one job and exit — no full scan.
 
 Before it scans, purges or retries errors, Ensign takes a lock: a small file called `ensign.lock` in your data directory (`~/.local/share/ensign/` unless you've set a custom `data_dir`). If another Ensign already holds it, the new one prints which process has it, exits with code 75 and scans nothing. That way a scheduled run and a manual run can't overlap and scan the same files twice.
 
-A run that finishes normally exits with code 0. It exits with code 1 if some results couldn't be saved to the database (a full disk, say), so a script or a scheduled run can tell "finished" from "finished, but incomplete". Those results are still reported and alerted on, listed at the end under "scanned but not saved".
+A scan's exit code says how it went, so a script or a scheduled run can act on it:
+
+| Code | Meaning |
+|---|---|
+| 0 | Finished, nothing infected |
+| 3 | Finished, and infected files are present: found this run, or found before and still on disk. One you've deleted no longer counts. This outranks code 1 |
+| 1 | Finished, but some results couldn't be saved to the database (a full disk, say). Those results are still reported and alerted on, listed at the end under "scanned but not saved" |
+| 75 | Another Ensign is running; nothing was scanned |
+
+### Large files
+
+clamd skips any file larger than its `MaxFileSize` or `MaxScanSize` setting (100 MiB and 400 MiB by default), and still answers "OK" for it. Ensign doesn't take that answer. It reads the limits from clamd's config and sends larger files to `clamscan` instead, with the limits switched off. `clamscan` comes with ClamAV. It is slower: each run loads its own copy of the signatures, which takes seconds and some extra memory, so Ensign scans large files in batches, one batch at a time, after the rest. Large files you scanned with Ensign 0.4.0 or older were never really checked, so they are rescanned once.
+
+ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This is a limit in ClamAV itself, and its developers have said so. Ensign marks those files **not fully scanned** and lists them at the end of each run, never as clean. They are hashed and tracked, so a changed one is looked at again.
+
+`clamscan` reads the files through descriptors Ensign has already opened, the same way clamd does, so it never reopens a file by name. Run under `sudo`, Ensign starts `clamscan` as the `clamav` user, not as root: like clamd, it parses untrusted files.
+
+`AlertExceedsMax yes` in clamd.conf is worth setting. Without it, clamd also says "OK" for an archive that unpacks to more than `MaxScanSize`, and Ensign can't tell from the file's size. With it, clamd flags these, and Ensign rescans them with `clamscan` (it doesn't count them as infected).
 
 Filenames that aren't valid UTF-8 (common in old archives, Wine/Proton folders and files from Windows) are tracked like any other: they're stored as their original bytes and shown with those bytes as `\xNN`, e.g. `caf\xe9.txt`.
 

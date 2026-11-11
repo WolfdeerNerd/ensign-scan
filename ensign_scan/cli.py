@@ -26,11 +26,22 @@ from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
 from ensign_scan import diagnostics, explanations, logsetup, notify, pkgdb, secrets
 from ensign_scan.fsutil import shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
-from ensign_scan.reports import error_summary, integrity_report, list_infected, package_report, scan_summary, suggest_fixes, unreadable_report, unsaved_report
+from ensign_scan.reports import (
+    error_summary,
+    incomplete_report,
+    integrity_report,
+    list_infected,
+    package_report,
+    scan_summary,
+    suggest_fixes,
+    unreadable_report,
+    unsaved_report,
+)
 from ensign_scan.scanner import ClamdRunsAsRoot, Scanner
 
 EXIT_BUSY = 75  # sysexits EX_TEMPFAIL: another Ensign holds the lock; try again later
 EXIT_UNSAVED = 1  # the run finished, but some results couldn't be saved (see unsaved_report)
+EXIT_INFECTED = 3  # the run finished and infected files are present (outranks EXIT_UNSAVED)
 
 
 def ensign_version() -> str:
@@ -219,6 +230,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
     if missing:
         print(f"Broken symlinks / vanished files skipped: {len(missing)}")
     error_summary(scanner.engine, paths=args.targets or None)
+    incomplete_report(scanner.engine, paths=args.targets or None)
     unreadable_report(unreadable)
     integrity_report(scanner.integrity_changes)
     unsaved_infected = [u for u in scanner.unsaved if u.status == "infected"]
@@ -241,8 +253,12 @@ def run(args: argparse.Namespace, config: Config) -> int:
     print(" Feel free to call upon me again.")
     print("     — Ensign")
     print()
-    # Non-zero when results are missing from the database, so a script or a
-    # scheduled run can tell "finished" from "finished, but incomplete".
+    # Non-zero when something needs attention, so a script or a scheduled
+    # run can act on it: infected files (in the database or unsaved) first,
+    # then results missing from the database. An infected file that has
+    # since been deleted is still listed above, but no longer counts here.
+    if any(os.path.lexists(os.fsencode(item["filepath"])) for item in infected):
+        return EXIT_INFECTED
     return EXIT_UNSAVED if scanner.unsaved else 0
 
 

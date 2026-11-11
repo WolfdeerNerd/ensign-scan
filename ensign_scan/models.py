@@ -30,6 +30,12 @@ class ScanStatus(str, Enum):
     # ERROR so it naturally drops out of error_summary() and
     # suggest_fixes() without either needing to special-case it.
     CLASSIFIED = "classified"
+    # ClamAV did not scan all of this file: it is past a scan limit ClamAV
+    # can't lift -- most often larger than ~2 GiB, which no ClamAV tool can
+    # scan. Hashed and tracked for changes like any file, but its contents
+    # were not checked, so it must never count as clean. threat_name holds
+    # ClamAV's reason (Heuristics.Limits.Exceeded.MaxFileSize, ...).
+    INCOMPLETE = "incomplete"
 
 
 # scan_result for a file Ensign itself couldn't open or read, so clamd never
