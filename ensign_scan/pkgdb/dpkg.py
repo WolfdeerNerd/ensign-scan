@@ -61,12 +61,17 @@ def _parse_search(stdout: str) -> dict[str, str]:
     return owners
 
 
-def _search(paths: list[str], timeout: float) -> dict[str, str] | None:
-    """dpkg-query -S for several paths at once. None if the command failed.
+def _search_with_answers(paths: list[str], timeout: float) -> tuple[dict[str, str], set[str]] | None:
+    """dpkg-query -S for several paths at once: (owners, paths dpkg said
+    nothing owns). None if the command couldn't run at all.
 
     dpkg-query treats its arguments as shell patterns, so a path containing
     "*" or "[" could match OTHER files. Only results whose path equals the
     one asked about are kept; nothing is ever matched by pattern.
+
+    "Nothing owns it" counts only when dpkg says so in its own words for
+    that path. dpkg-query exits non-zero for that AND for real failures (a
+    damaged database), and a failure must come out as "unknown".
     """
     try:
         result = subprocess.run(["dpkg-query", "-S", "--", *paths], capture_output=True,
@@ -74,7 +79,14 @@ def _search(paths: list[str], timeout: float) -> dict[str, str] | None:
     except (subprocess.TimeoutExpired, OSError):
         return None
     found = _parse_search(result.stdout)
-    return {p: found[p] for p in paths if p in found}
+    unowned = {p for p in paths if f"no path found matching pattern {p}" in result.stderr}
+    return {p: found[p] for p in paths if p in found}, unowned
+
+
+def _search(paths: list[str], timeout: float) -> dict[str, str] | None:
+    """Owners only (see _search_with_answers)."""
+    answer = _search_with_answers(paths, timeout)
+    return None if answer is None else answer[0]
 
 
 def _version(package: str, timeout: float) -> str | None:
@@ -91,17 +103,20 @@ def owner(path: str, timeout: float = 10.0) -> tuple[str, str | None]:
     if not available():
         return ("unknown", None)
     candidates = list(dict.fromkeys([path, _parent_resolved(path)]))
-    found = _search(candidates, timeout)
-    if found is None:
+    answer = _search_with_answers(candidates, timeout)
+    if answer is None:
         return ("unknown", None)
+    found, unowned = answer
     for candidate in candidates:
         if candidate in found:
             package = found[candidate]
             version = _version(package, timeout)
             return ("owned", f"{package} {version}" if version else package)
-    # dpkg-query exits non-zero both for "no package owns this" and for
-    # real errors; it ran and answered for every path, so this is unowned.
-    return ("unowned", None)
+    if all(candidate in unowned for candidate in candidates):
+        return ("unowned", None)
+    # A pattern match for some other file (see _search_with_answers), or an
+    # error dpkg reported in other words: either way, no real answer.
+    return ("unknown", None)
 
 
 def read_path_filters(cfg_file: Path = _CFG_FILE, cfg_dir: Path = _CFG_DIR) -> list[tuple[str, str]]:
@@ -110,7 +125,10 @@ def read_path_filters(cfg_file: Path = _CFG_FILE, cfg_dir: Path = _CFG_DIR) -> l
     dpkg reads the files in dpkg.cfg.d/ in name order, then dpkg.cfg. A
     setting may be written "path-exclude=/x/*" or "path-exclude /x/*".
     """
-    files = sorted(p for p in cfg_dir.iterdir() if p.is_file()) if cfg_dir.is_dir() else []
+    try:
+        files = sorted(p for p in cfg_dir.iterdir() if p.is_file()) if cfg_dir.is_dir() else []
+    except OSError:  # unreadable: dpkg itself couldn't read it either, so nothing applies
+        files = []
     files.append(cfg_file)
     filters: list[tuple[str, str]] = []
     for cfg in files:

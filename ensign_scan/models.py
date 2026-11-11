@@ -32,6 +32,22 @@ class ScanStatus(str, Enum):
     CLASSIFIED = "classified"
 
 
+# scan_result for a file Ensign itself couldn't open or read, so clamd never
+# saw it. Kept apart from clamd's own error text: reports.suggest_fixes()
+# explains the two differently, and error_summary() groups by this text.
+OPEN_FAILED = "Ensign could not open this file"
+
+
+def open_failed_result(exc: OSError) -> str:
+    """e.g. "Ensign could not open this file (Permission denied)". No ": "
+    in it, so error_summary() keeps the whole sentence as the cause."""
+    return f"{OPEN_FAILED} ({exc.strerror or type(exc).__name__})"
+
+
+def is_open_failed(raw: str | None) -> bool:
+    return (raw or "").startswith(OPEN_FAILED)
+
+
 class FsPath(TypeDecorator):
     """A filesystem path or name, stored so that ANY name round-trips exactly.
 
