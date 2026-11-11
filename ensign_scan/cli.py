@@ -160,7 +160,15 @@ def run(args: argparse.Namespace, config: Config) -> int:
     if args.verify_packages:
         backend = pkgdb.active()
         if backend.name != "none":
-            package_report(scanner.engine, backend.verify_all(), backend)
+            print(f"Checking every installed file against {backend.label}'s records. On a system "
+                  f"with many packages this can take a while; Ctrl+C stops it.")
+            try:
+                result = backend.verify_all()
+            except KeyboardInterrupt:
+                # subprocess.run has already stopped the package manager.
+                print(f"\n[yellow]Stopped. {backend.label} was only reading files; nothing was changed.[/yellow]")
+                return 130
+            package_report(scanner.engine, result, backend)
         else:
             print(f"[yellow]Package verification isn't available: {backend.reason}. Skipping.[/yellow]")
         return 0

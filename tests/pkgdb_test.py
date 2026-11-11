@@ -350,6 +350,37 @@ for flag in ("--verify-packages", "--verify-pacman"):
     assert cli.parse_args().verify_packages is True, f"{flag} sets verify_packages"
 print("CLI alias tests passed ✓")
 
+# --- --verify-packages: no time limit, and Ctrl+C stops it cleanly ------------------
+import inspect  # noqa: E402
+
+from ensign_scan.pkgdb import pacman as pacman_mod  # noqa: E402
+for mod in (pacman_mod, dpkg_mod, rpm_mod):
+    default = inspect.signature(mod.verify_all).parameters["timeout"].default
+    assert default is None, f"{mod.__name__}.verify_all has a default time limit ({default})"
+
+
+class InterruptedBackend(PacmanBackend):
+    def verify_all(self):
+        raise KeyboardInterrupt
+
+
+with tempfile.TemporaryDirectory() as d:
+    cfg = Path(d, "config.toml")
+    cfg.write_text(f'data_dir = "{d}/data"\n')
+    real_configure = cli.pkgdb.configure
+    cli.pkgdb.configure = lambda setting: setattr(pkgdb, "_active", InterruptedBackend())
+    sys.argv = ["ensign-scan", "--verify-packages", "--config", str(cfg)]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            code = cli.main()
+    finally:
+        cli.pkgdb.configure = real_configure
+        pkgdb._active = None
+    out = " ".join(buf.getvalue().split())
+    assert code == 130, code
+    assert "Ctrl+C stops it" in out and "nothing was changed" in out, out
+print("--verify-packages interrupt tests passed ✓")
+
 # --- packaging: every subpackage ships ------------------------------------------
 # setuptools only installs the packages listed in pyproject.toml. A new
 # subpackage that isn't listed works from a checkout but is missing from
@@ -367,7 +398,13 @@ print("packaging test passed ✓")
 # ENSIGN_EXPECT_BACKEND names what detection must pick on this machine
 # ("none" is a valid answer). For a real backend, everything is then
 # checked against the real package manager: ownership, and every line
-# of a full verify run parsing.
+# of a full verify run parsing. Optional:
+#   ENSIGN_SKIP_FULL_VERIFY=1         ownership checks only (for machines
+#                                     with so many packages that a full
+#                                     verify outlasts its timeout)
+#   ENSIGN_EXPECT_VERIFY_FINDINGS=1   the verify run must find something
+#                                     (CI plants changes so the parser is
+#                                     tested on real findings, not on "clean")
 KNOWN_FILE = {"pacman": "/usr/bin/pacman", "dpkg": "/usr/bin/dpkg", "rpm": "/usr/bin/rpm"}
 expected = os.environ.get("ENSIGN_EXPECT_BACKEND")
 if expected:
@@ -387,6 +424,9 @@ if expected:
             assert backend.owner(f.name) == ("unowned", None), "a fresh temp file belongs to no package"
         assert backend.owner("/usr/bin/ensign-no-such-file")[0] in ("unowned", "unknown")
 
+    if expected != "none" and os.environ.get("ENSIGN_SKIP_FULL_VERIFY") == "1":
+        print("  full verify skipped (ENSIGN_SKIP_FULL_VERIFY=1)")
+    elif expected != "none":
         result = backend.verify_all()
         assert result is not None and result.error is None, result and result.error
         parsed = getattr(result, "parsed_line_count", 0) or len(result.mismatches)
@@ -396,6 +436,10 @@ if expected:
         )
         out = report(result, backend)
         assert f"{expected.upper()} FILE INTEGRITY" in out and "parser may need updating" not in out
+        if os.environ.get("ENSIGN_EXPECT_VERIFY_FINDINGS") == "1":
+            assert parsed > 0, "CI planted changes, but the verify run found none"
+            assert any(m.excluded for m in result.mismatches) or expected != "dpkg", \
+                "the planted path-exclude file wasn't recognised"
         print(f"  {parsed} verify lines parsed, {sum(m.excluded for m in result.mismatches)} excluded")
     print(f"live detection test passed ✓ ({backend.name})")
 else:

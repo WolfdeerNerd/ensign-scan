@@ -169,7 +169,7 @@ These run one job and exit — no full scan.
 |---|---|
 | `python3 main.py --purge-missing` | Remove DB records for files that no longer exist on disk |
 | `python3 main.py --rescan-errors` | Retry only files currently marked `ERROR` |
-| `python3 main.py --verify-packages` | Cross-check installed files against the package manager's own checksums, flag mismatches (can be slow; `--verify-pacman` still works as the old name) |
+| `python3 main.py --verify-packages` | Cross-check installed files against the package manager's own checksums, flag mismatches (can be slow, and has no time limit: Ctrl+C stops it; `--verify-pacman` still works as the old name) |
 | `python3 main.py --suggest-fixes` | List files clamd could not read, grouped by directory, optionally scoped to given targets |
 | `python3 main.py --diagnostics` | Print versions, settings and counts for a bug report. Contains no paths, usernames, hostnames or file names, and writes nothing |
 

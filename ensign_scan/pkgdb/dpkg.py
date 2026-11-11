@@ -163,8 +163,9 @@ def parse_verify(output: str, owners: dict[str, str], filters: list[tuple[str, s
                         parsed_line_count=parsed_lines)
 
 
-def verify_all(timeout: float = 600.0) -> VerifyResult | None:
-    """`dpkg --verify`, with each finding's package looked up afterwards."""
+def verify_all(timeout: float | None = None) -> VerifyResult | None:
+    """`dpkg --verify`, with each finding's package looked up afterwards.
+    No time limit unless one is passed (see pacman.verify_all)."""
     if not available():
         return None
     try:
@@ -172,7 +173,7 @@ def verify_all(timeout: float = 600.0) -> VerifyResult | None:
                                 timeout=timeout, env=c_locale_env())
     except subprocess.TimeoutExpired:
         return VerifyResult([], 0, error=f"dpkg --verify did not finish within {timeout:.0f}s. It "
-                                         f"checks every file of every installed package; try again.")
+                                         f"checks every file of every installed package.")
     except OSError as exc:
         return VerifyResult([], 0, error=f"dpkg --verify failed to run: {exc}")
 
