@@ -1,4 +1,13 @@
-"""Tests for the multi-machine config loader. Run: python3 config_test.py"""
+"""Tests for the multi-machine config loader. Run: python3 tests/config_test.py"""
+
+import sys as _sys_path
+from pathlib import Path as _Path
+
+# Run against THIS checkout, never an installed copy of Ensign: the tests
+# live in tests/, so without this "import ensign_scan" would find whatever
+# is installed (or nothing) instead of the code next to them.
+ROOT = _Path(__file__).resolve().parent.parent
+_sys_path.path.insert(0, str(ROOT))
 import os
 import tempfile
 from pathlib import Path
@@ -102,7 +111,7 @@ print("signature-rescan range test passed ✓")
 # config.example.toml exactly -- they drifted apart before -- and must
 # parse as valid TOML that Config.load() accepts.
 import tomllib
-example_path = Path(__file__).parent / "config.example.toml"
+example_path = ROOT / "config.example.toml"
 assert EXAMPLE_CONFIG == example_path.read_text(), \
     "EXAMPLE_CONFIG in ensign_scan/config.py has drifted from config.example.toml"
 tomllib.loads(EXAMPLE_CONFIG)

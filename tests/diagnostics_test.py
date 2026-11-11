@@ -5,9 +5,18 @@ real home, a fake file name, hash and threat name, a host section for this
 machine), runs the diagnostics report against them, and fails if any of it
 shows up in the output -- or if the database was modified.
 
-Run: python3 diagnostics_test.py
+Run: python3 tests/diagnostics_test.py
 """
 from __future__ import annotations
+
+import sys as _sys_path
+from pathlib import Path as _Path
+
+# Run against THIS checkout, never an installed copy of Ensign: the tests
+# live in tests/, so without this "import ensign_scan" would find whatever
+# is installed (or nothing) instead of the code next to them.
+ROOT = _Path(__file__).resolve().parent.parent
+_sys_path.path.insert(0, str(ROOT))
 
 import hashlib
 import re
@@ -132,7 +141,7 @@ max_workers = 2
     #    clean exit, and no starter config written.
     result = subprocess.run(
         [sys.executable, "-m", "ensign_scan.cli", "--diagnostics", "--config", str(cfg)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=60, cwd=ROOT,
     )
     assert result.returncode == 0, result.stderr
     assert "Greetings" not in result.stdout, "the greeting must not run"

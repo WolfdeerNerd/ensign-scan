@@ -1,8 +1,17 @@
 """Tests for the pacman integrity parser and notification message logic.
 
 Both are pure functions with no clamd/DB dependency, so these run fast
-and standalone. Run: python3 integrations_test.py
+and standalone. Run: python3 tests/integrations_test.py
 """
+
+import sys as _sys_path
+from pathlib import Path as _Path
+
+# Run against THIS checkout, never an installed copy of Ensign: the tests
+# live in tests/, so without this "import ensign_scan" would find whatever
+# is installed (or nothing) instead of the code next to them.
+ROOT = _Path(__file__).resolve().parent.parent
+_sys_path.path.insert(0, str(ROOT))
 from ensign_scan.pacman import PacmanMismatch, PacmanVerifyResult, _MISMATCH_RE
 from ensign_scan.reports import pacman_report
 from ensign_scan.notify import build_message
@@ -598,7 +607,7 @@ _second.release()                              # releasing twice is harmless
 _child = _sp.Popen([_sys.executable, "-c",
                     "import sys,time; from ensign_scan.runlock import RunLock; "
                     "RunLock(sys.argv[1]).acquire(); print('held', flush=True); time.sleep(60)",
-                    str(_lock_path)], stdout=_sp.PIPE, text=True)
+                    str(_lock_path)], stdout=_sp.PIPE, text=True, cwd=ROOT)
 assert _child.stdout.readline().strip() == "held"
 try:
     RunLock(_lock_path).acquire()
@@ -626,8 +635,8 @@ _cfg_dir = _P(_tf.mkdtemp())
 (_cfg_dir / "c.toml").write_text(f'data_dir = "{_cfg_dir}"\n')
 _holder = RunLock(_cfg_dir / "ensign.lock"); _holder.acquire()
 _env = dict(_os.environ, HOME=str(_cfg_dir))
-_run = _sp.run([_sys.executable, "main.py", "--config", str(_cfg_dir / "c.toml"), "--no-scan"],
-               capture_output=True, text=True, env=_env, timeout=60)
+_run = _sp.run([_sys.executable, str(ROOT / "main.py"), "--config", str(_cfg_dir / "c.toml"), "--no-scan"],
+               capture_output=True, text=True, env=_env, timeout=60, cwd=ROOT)
 assert _run.returncode == 75, (_run.returncode, _run.stdout, _run.stderr)
 assert "already running" in _run.stdout and str(_os.getpid()) in _run.stdout, _run.stdout
 assert "Greetings" not in _run.stdout, "refused before the greeting / any scanning"

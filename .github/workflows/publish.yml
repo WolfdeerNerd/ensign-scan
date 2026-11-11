@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # Only for cli_live_test.py and pyproject.toml; the package under
+      # Only for tests/cli_live_test.py and pyproject.toml; the package under
       # test comes from the downloaded dist files, not this checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -76,7 +76,7 @@ jobs:
           export ENSIGN_EXPECT_VERSION="${GITHUB_REF_NAME#v}"
           for venv in /tmp/wheel-venv /tmp/sdist-venv; do
             echo "::group::$venv"
-            ENSIGN_CLI="$venv/bin/ensign-scan" python cli_live_test.py
+            ENSIGN_CLI="$venv/bin/ensign-scan" python tests/cli_live_test.py
             echo "::endgroup::"
           done
 

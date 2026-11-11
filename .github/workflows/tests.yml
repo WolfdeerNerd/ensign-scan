@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -r requirements.txt
-      # Every *_test.py in the repo root, so a new test file is picked up
+      # Every tests/*_test.py, so a new test file is picked up
       # without editing this workflow. No real clamd is needed: the tests
       # use an in-process fake, and the live checks skip themselves unless
       # their environment variables are set (the live and distro jobs set
@@ -50,8 +50,8 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          tests=(*_test.py)
-          (( ${#tests[@]} )) || { echo "::error::no *_test.py files found"; exit 1; }
+          tests=(tests/*_test.py)
+          (( ${#tests[@]} )) || { echo "::error::no tests/*_test.py files found"; exit 1; }
           for t in "${tests[@]}"; do
             echo "::group::$t"
             python "$t"
@@ -113,8 +113,8 @@ jobs:
           useradd -m tester
           chown -R tester .
           shopt -s nullglob
-          tests=(*_test.py)
-          (( ${#tests[@]} )) || { echo "::error::no *_test.py files found"; exit 1; }
+          tests=(tests/*_test.py)
+          (( ${#tests[@]} )) || { echo "::error::no tests/*_test.py files found"; exit 1; }
           for t in "${tests[@]}"; do
             echo "::group::$t"
             # LIVE_ENV is unquoted on purpose: empty, or VAR=value words for env
@@ -155,7 +155,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install -r requirements.txt
-          for t in *_test.py; do
+          for t in tests/*_test.py; do
             echo "::group::$t"
             python "$t"
             echo "::endgroup::"
@@ -163,7 +163,7 @@ jobs:
       # Under sudo: "~" must still mean the runner user's home, and a root
       # run must still hand clamd open files rather than run clamd as root.
       - name: Run the installed command under sudo
-        run: sudo --preserve-env=ENSIGN_CLI,ENSIGN_TEST_CLAMD_SOCKET "$(command -v python)" cli_live_test.py
+        run: sudo --preserve-env=ENSIGN_CLI,ENSIGN_TEST_CLAMD_SOCKET "$(command -v python)" tests/cli_live_test.py
       - name: Show the clamd log and any AppArmor denials
         if: failure()
         run: |

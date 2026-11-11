@@ -1,9 +1,18 @@
 """Regression tests for bugs found in the Nov 2026 review sweep.
-Run: python3 hardening_test.py   (as your normal user)
+Run: python3 tests/hardening_test.py   (as your normal user)
 
 Each test reproduces the original failure; each fails without its fix.
 """
 from __future__ import annotations
+
+import sys as _sys_path
+from pathlib import Path as _Path
+
+# Run against THIS checkout, never an installed copy of Ensign: the tests
+# live in tests/, so without this "import ensign_scan" would find whatever
+# is installed (or nothing) instead of the code next to them.
+ROOT = _Path(__file__).resolve().parent.parent
+_sys_path.path.insert(0, str(ROOT))
 
 import contextlib
 import io
@@ -27,7 +36,7 @@ from ensign_scan.notify import build_message
 from ensign_scan.reports import error_summary, list_infected, scan_summary
 from ensign_scan.runlock import RunLock
 
-REPO = Path(__file__).resolve().parent
+REPO = ROOT
 tmp = Path(tempfile.mkdtemp(prefix="ensign_hardening_"))
 
 
