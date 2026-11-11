@@ -11,7 +11,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from . import explanations, pacman
+from . import explanations, pkgdb
 from .clamd import is_permission_error
 from .fsutil import shown
 from .models import FileRecord, ScanStatus, path_under
@@ -39,20 +39,22 @@ def _human_size(n: int) -> str:
 
 def _file_facts(filepath: str) -> str:
     """One local line of context about a flagged file: does it still exist,
-    how big, how old, and does a pacman package own it. Everything here is
-    a local stat or a read-only `pacman -Qo`; nothing leaves the machine."""
+    how big, how old, and does a package own it. Everything here is a local
+    stat or a read-only ownership query to the system's package manager
+    (see pkgdb); nothing leaves the machine."""
     try:
         st = os.lstat(filepath)
     except OSError:
         return "no longer on disk (or not readable now)"
     modified = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d")
     parts = [_human_size(st.st_size), f"modified {modified}"]
-    state, pkg = pacman.owner(filepath)
+    backend = pkgdb.active()
+    state, pkg = backend.owner(filepath)
     if state == "owned":
-        name = pkg.split()[0]
-        parts.append(f"owned by package {pkg} (check it with: pacman -Qkk {name})")
+        hint = backend.verify_command(pkg.split()[0])
+        parts.append(f"owned by package {pkg}" + (f" (check it with: {hint})" if hint else ""))
     elif state == "unowned":
-        parts.append("not owned by any pacman package")
+        parts.append(f"not owned by any {backend.label} package")
     return " · ".join(parts)
 
 

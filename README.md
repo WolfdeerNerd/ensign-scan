@@ -70,7 +70,7 @@ sudo pacman -S --needed python-sqlalchemy python-rich
 
 Ensign's core scanning, hashing, and database tracking are plain Python + SQLAlchemy + ClamAV — nothing Arch-specific. It should run on any Linux distro with Python 3.11+ and ClamAV installed.
 
-The one exception is `--verify-pacman`, which cross-checks files against `pacman -Qkk`'s own integrity data — that's an Arch-only feature by nature (there's no equivalent on Debian/Fedora/etc.). If `pacman` isn't found on the system, Ensign detects that and skips the check cleanly rather than erroring; every other command works the same regardless of distro.
+The one exception is package verification: `--verify-packages`, and the "owned by package …" context line under infected files. These ask your package manager which package owns a file and whether it still matches what the package installed. Ensign picks the package manager from `/etc/os-release` (setting: `package_verification`, default `"auto"`). So far it supports pacman, so on Arch and Arch-based distributions. Support for other package managers is planned. Until then, on other distributions package verification is skipped cleanly with a note saying why, and every other command works the same.
 
 `notify-send` (desktop notifications) isn't Arch-specific either — it's standard Linux tooling available on most major distros, just under a different package name (e.g. Debian/Ubuntu: `libnotify-bin`).
 
@@ -85,8 +85,8 @@ Ensign makes no network connections. It talks to clamd over a local Unix socket 
 | Program | When | What for |
 |---|---|---|
 | `clamscan` | Only for a file clamd rejects as over its size limit | Scans that one file with the command-line scanner, which has no such limit |
-| `pacman -Qkk` | Only with `--verify-pacman` | Read-only integrity check of installed files |
-| `pacman -Qo <file>` | When listing infected files | Read-only lookup of which package owns a flagged file |
+| `pacman -Qkk` | Only with `--verify-packages` (on pacman systems) | Read-only integrity check of installed files |
+| `pacman -Qo <file>` | When listing infected files (on pacman systems) | Read-only lookup of which package owns a flagged file |
 | `notify-send` | At the end of a run, if installed | Desktop notification |
 | `gdbus` | After an infected-files alert | Closes that notification after its timeout |
 | `pgrep` | When sending an infected-files alert | Checks whether a Steam game is running (see Alerts) |
@@ -169,7 +169,7 @@ These run one job and exit — no full scan.
 |---|---|
 | `python3 main.py --purge-missing` | Remove DB records for files that no longer exist on disk |
 | `python3 main.py --rescan-errors` | Retry only files currently marked `ERROR` |
-| `python3 main.py --verify-pacman` | Cross-check installed files against pacman's own checksums, flag mismatches (Arch only, can be slow) |
+| `python3 main.py --verify-packages` | Cross-check installed files against the package manager's own checksums, flag mismatches (can be slow; `--verify-pacman` still works as the old name) |
 | `python3 main.py --suggest-fixes` | List files clamd could not read, grouped by directory, optionally scoped to given targets |
 | `python3 main.py --diagnostics` | Print versions, settings and counts for a bug report. Contains no paths, usernames, hostnames or file names, and writes nothing |
 
@@ -179,7 +179,7 @@ Before it scans, purges or retries errors, Ensign takes a lock: a small file cal
 
 - **The lock frees itself.** It belongs to the running process, so it is released when that process ends, even after a crash or `kill -9`. There is never a stale lock to clean up.
 - **Leave the file in place.** Deleting `ensign.lock` while a run is using it can let a second run start.
-- **Read-only commands skip it.** `--verify-pacman`, `--suggest-fixes` and `--diagnostics` only read the database, so they can run while a scan is going.
+- **Read-only commands skip it.** `--verify-packages`, `--suggest-fixes` and `--diagnostics` only read the database, so they can run while a scan is going.
 
 ### If clamd still can't read some files
 
@@ -218,11 +218,11 @@ Errors are written to one log file per run: `<data_dir>/logs/ensign-YYYYMMDD-HHM
 
 ## Explaining Findings
 
-When a scan finds an infected file, or `--verify-pacman` finds a mismatch, Ensign prints a short `ⓘ` note under it saying what the threat name or mismatch reason generally means. The point is to help you tell a false positive from something worth chasing.
+When a scan finds an infected file, or `--verify-packages` finds a mismatch, Ensign prints a short `ⓘ` note under it saying what the threat name or mismatch reason generally means. The point is to help you tell a false positive from something worth chasing.
 
 - **Curated notes first.** Ensign ships a small table of researched notes, and you can add your own (see Customizing below).
 - **Everything else is decoded from the name.** ClamAV names follow `Platform.Category.Name-SignatureID-Revision`, so for a name with no curated note Ensign describes what the name says. A Windows-only signature on Linux, for example, gets a **Hint** that it is often a false positive. A hint is a pointer, not a verdict.
-- **Findings are grouped by threat name,** so a signature that hits many files is explained once. Each file gets a context line: size, last modified date, and whether a pacman package owns it.
+- **Findings are grouped by threat name,** so a signature that hits many files is explained once. Each file gets a context line: size, last modified date, and whether a package owns it.
 - **All local and advisory.** Nothing is looked up online, and the notes never change a scan result.
 
 ## Customizing

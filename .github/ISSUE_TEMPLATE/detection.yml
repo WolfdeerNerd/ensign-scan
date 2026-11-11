@@ -35,7 +35,7 @@ body:
       label: Which check produced the result?
       options:
         - ClamAV scan (threat name)
-        - Package verification (--verify-pacman)
+        - Package verification (--verify-packages)
         - Secrets classification
         - Not sure
     validations:

@@ -22,6 +22,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .pkgdb import CHOICES as PACKAGE_VERIFICATION_CHOICES
+
 
 # ----------------------------------------------------------------------
 # Identity: who is really running this, and on which machine?
@@ -102,6 +104,10 @@ class Config:
     # Warn (not block) if the loaded virus-signature database is older
     # than this. Usually means freshclam has silently stopped running.
     signature_max_age_days: int = 3
+    # Which package manager answers "which package owns this file, and is
+    # it unmodified?": "auto" (from /etc/os-release), "off", or a backend
+    # name. See ensign_scan/pkgdb.
+    package_verification: str = "auto"
     snapshot_roots: tuple[str, ...] = ()
     # Path prefixes to skip entirely (high-churn temp/cache trees).
     excludes: tuple[str, ...] = ()
@@ -165,7 +171,7 @@ class Config:
             "infected_alert_seconds", "infected_alert_only_while_gaming",
             "log_keep_days", "log_max_total_mb",
             "scan_targets", "snapshot_roots",
-            "excludes", "signature_max_age_days",
+            "excludes", "signature_max_age_days", "package_verification",
             "custom_secrets", "custom_threats", "custom_pacman_reasons",
         }
         for key in raw.keys() - known:
@@ -192,6 +198,14 @@ class Config:
         for key in ("custom_secrets", "custom_threats", "custom_pacman_reasons"):
             if key in raw:
                 kwargs[key] = raw[key]
+        if "package_verification" in raw:
+            # A typo here must not quietly mean "off": fail loudly, like a
+            # malformed hosts table.
+            value = raw["package_verification"]
+            if value not in PACKAGE_VERIFICATION_CHOICES:
+                choices = ", ".join(f'"{c}"' for c in PACKAGE_VERIFICATION_CHOICES)
+                raise ValueError(f"{source}: package_verification must be one of {choices}, got {value!r}")
+            kwargs["package_verification"] = value
         n = kwargs.get("rescan_after_signature_updates")
         if isinstance(n, int) and n != 0:
             clamped = min(max(n, SIGNATURE_RESCAN_MIN), SIGNATURE_RESCAN_MAX)
@@ -262,6 +276,13 @@ log_max_total_mb = 2048
 # Warn if the virus-signature database is older than this many days
 # (usually means freshclam has silently stopped running). 0 disables.
 signature_max_age_days = 3
+
+# Which package manager Ensign asks "which package owns this file, and is
+# it unmodified?" -- used by --verify-packages and the context line under
+# infected files. "auto" picks it from /etc/os-release; "off" never asks
+# one. Supported so far: "pacman" (Arch and Arch-based distributions).
+# Elsewhere "auto" currently means off; every other feature works the same.
+package_verification = "auto"
 clamd_socket = "/var/run/clamav/clamd.ctl"
 
 scan_targets = [
