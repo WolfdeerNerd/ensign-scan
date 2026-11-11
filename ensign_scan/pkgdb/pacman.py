@@ -17,7 +17,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from .base import Backend
+from .base import Backend, c_locale_env
 
 # Best-effort parser: pacman's exact wording for `-Qkk` output has not
 # been verified against a live install in this environment. Two prefix
@@ -58,6 +58,13 @@ class PacmanMismatch:
         """pacman couldn't read this file, so it was never actually compared."""
         return self.reason in UNVERIFIED_REASONS
 
+    # The same shape as base.FileMismatch, so one report serves every backend.
+    @property
+    def is_config(self) -> bool:
+        return self.is_backup
+
+    excluded = False  # pacman has no path-exclude equivalent
+
 
 @dataclass(frozen=True)
 class PacmanVerifyResult:
@@ -94,7 +101,7 @@ def owner(path: str, timeout: float = 10.0) -> tuple[str, str | None]:
         return ("unknown", None)
     try:
         result = subprocess.run(["pacman", "-Qo", "--", path], capture_output=True,
-                                text=True, timeout=timeout)
+                                text=True, timeout=timeout, env=c_locale_env())
     except (subprocess.TimeoutExpired, OSError):
         return ("unknown", None)
     match = _OWNER_RE.search(result.stdout)
@@ -120,6 +127,7 @@ def verify_all(timeout: float = 600.0) -> PacmanVerifyResult | None:
     try:
         result = subprocess.run(
             ["pacman", "-Qkk"], capture_output=True, text=True, timeout=timeout,
+            env=c_locale_env(),
         )
     except subprocess.TimeoutExpired:
         return PacmanVerifyResult(
@@ -153,6 +161,8 @@ class PacmanBackend(Backend):
     """Arch Linux and derivatives (Manjaro, EndeavourOS, ...)."""
     name = "pacman"
     label = "pacman"
+    verify_all_command = "sudo pacman -Qkk"
+    config_word = "backup/config"
 
     def available(self) -> bool:
         return available()
@@ -165,3 +175,7 @@ class PacmanBackend(Backend):
 
     def verify_command(self, package: str) -> str | None:
         return f"pacman -Qkk {package}"
+
+    def explain_reason(self, reason: str) -> str | None:
+        from .. import explanations  # imported here: explanations is a sibling package module
+        return explanations.explain_pacman_reason(reason)

@@ -26,7 +26,7 @@ from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
 from ensign_scan import diagnostics, explanations, logsetup, notify, pkgdb, secrets
 from ensign_scan.fsutil import shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
-from ensign_scan.reports import error_summary, integrity_report, list_infected, pacman_report, scan_summary, suggest_fixes, unreadable_report
+from ensign_scan.reports import error_summary, integrity_report, list_infected, package_report, scan_summary, suggest_fixes, unreadable_report
 from ensign_scan.scanner import ClamdRunsAsRoot, Scanner
 
 EXIT_BUSY = 75  # sysexits EX_TEMPFAIL: another Ensign holds the lock; try again later
@@ -159,8 +159,8 @@ def run(args: argparse.Namespace, config: Config) -> int:
         return 0
     if args.verify_packages:
         backend = pkgdb.active()
-        if backend.name == "pacman":
-            pacman_report(scanner.engine, backend.verify_all())
+        if backend.name != "none":
+            package_report(scanner.engine, backend.verify_all(), backend)
         else:
             print(f"[yellow]Package verification isn't available: {backend.reason}. Skipping.[/yellow]")
         return 0

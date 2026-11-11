@@ -225,17 +225,18 @@ def unreadable_report(unreadable: dict[str, str], top: int = 10) -> None:
         print(f"  … and {len(listed) - top} more (all are in the error log)")
 
 
-def _print_unverified(unverified) -> None:
-    """Files pacman could not read. These were never compared against the
-    package, so they are NOT mismatches -- reported separately, grouped by
-    package so a root-only package doesn't bury the real findings."""
-    n = len(unverified)
-    print(f"\n-- {n} file{'s' if n != 1 else ''} pacman could not verify (not mismatches) --")
+def _print_unverified(unverified, backend) -> None:
+    """Files the package manager could not read. These were never compared
+    against the package, so they are NOT mismatches -- reported separately,
+    grouped by package so a root-only package doesn't bury the real findings."""
+    n = len({m.filepath for m in unverified})
+    label = backend.label
+    print(f"\n-- {n} file{'s' if n != 1 else ''} {label} could not verify (not mismatches) --")
     if os.geteuid() == 0:
-        print("  pacman could not read these even as root; the files may be missing or damaged.")
+        print(f"  {label} could not read these even as root; the files may be missing or damaged.")
     else:
-        print("  pacman wasn't run as root, so root-only files could not be opened. To check "
-              "them, run: sudo pacman -Qkk")
+        print(f"  {label} wasn't run as root, so root-only files could not be opened. To check "
+              f"them, run: {backend.verify_all_command}")
     by_pkg: dict[str, list] = {}
     for m in unverified:
         by_pkg.setdefault(m.package, []).append(m)
@@ -248,29 +249,55 @@ def _print_unverified(unverified) -> None:
         if len(items) > 3:
             print(f"    … and {len(items) - 3} more")
     for reason in sorted({m.reason for m in unverified}):
-        note = explanations.explain_pacman_reason(reason)
+        note = backend.explain_reason(reason)
         if note:
             _note("ⓘ", f"{reason}: {note}")
 
 
-def pacman_report(engine: Engine, result) -> None:
-    """Print pacman -Qkk mismatches, cross-referenced against Ensign's
-    own tracked files where possible. Purely informational."""
+def _print_excluded(excluded) -> None:
+    """Files the system's own settings told the package manager not to
+    install (dpkg path-exclude: minimal and container installs drop docs,
+    man pages and translations this way). Expected, so shown as a count
+    with the biggest folders, not one line per file."""
+    paths = sorted({m.filepath for m in excluded})
+    print(f"\n-- {len(paths)} file{'s' if len(paths) != 1 else ''} left out on purpose by this "
+          f"system's path-exclude settings (expected, not a concern) --")
+    by_dir: dict[str, int] = {}
+    for path in paths:
+        top = "/".join(path.split("/")[:4]) or path  # e.g. /usr/share/doc
+        by_dir[top] = by_dir.get(top, 0) + 1
+    for top, count in sorted(by_dir.items(), key=lambda kv: -kv[1])[:5]:
+        print(f"  {shown(top)}/…  {count}")
+
+
+def package_report(engine: Engine, result, backend) -> None:
+    """Print a package manager's verify results, cross-referenced against
+    Ensign's own tracked files where possible. Purely informational.
+
+    `result` is a pkgdb VerifyResult (or pacman's equivalent); `backend`
+    supplies the wording, so the same report serves pacman, dpkg and rpm.
+    """
+    label = backend.label
     if result is None:
-        print("[yellow]pacman is not installed on this system — skipping.[/yellow]")
+        print(f"[yellow]{label} is not installed on this system — skipping.[/yellow]")
         return
     if result.error:
-        print(f"[red]✗ pacman verification failed: {result.error}[/red]")
+        print(f"[red]✗ {label} verification failed: {result.error}[/red]")
         return
 
-    print(f"\n=== PACMAN FILE INTEGRITY ({len(result.mismatches)} of {result.candidate_line_count} candidate lines parsed) ===")
+    # pacman prints one line per mismatch; dpkg and rpm one line per file,
+    # which can hold several. Count lines either way.
+    parsed = getattr(result, "parsed_line_count", 0) or len(result.mismatches)
+    print(f"\n=== {label.upper()} FILE INTEGRITY ({parsed} of "
+          f"{result.candidate_line_count} candidate lines parsed) ===")
     if result.candidate_line_count and not result.mismatches:
-        print("[yellow]! pacman reported mismatch-shaped lines but none matched the expected "
-              "format — the parser may need updating for this pacman version. Run 'pacman -Qkk' "
-              "directly to see the raw output.[/yellow]")
+        print(f"[yellow]! {label} reported mismatch-shaped lines but none matched the expected "
+              f"format — the parser may need updating for this {label} version. Run "
+              f"'{backend.verify_all_command.removeprefix('sudo ')}' directly to see the raw "
+              f"output.[/yellow]")
         return
     if not result.mismatches:
-        print("No mismatches — all installed files match pacman's records.")
+        print(f"No mismatches — all installed files match {label}'s records.")
         return
 
     with Session(engine) as session:
@@ -279,37 +306,58 @@ def pacman_report(engine: Engine, result) -> None:
             for row in session.query(FileRecord.filepath, FileRecord.scan_status)
         }
 
-    unverified = [m for m in result.mismatches if m.unverified and not m.is_backup]
-    real = [m for m in result.mismatches if not m.is_backup and not m.unverified]
-    backups = [m for m in result.mismatches if m.is_backup]
+    excluded = [m for m in result.mismatches if m.excluded]
+    rest = [m for m in result.mismatches if not m.excluded]
+    # Couldn't-read beats is-a-config-file: an unread /etc/sudoers was never
+    # compared, so it can't count as "edited on purpose".
+    unverified = [m for m in rest if m.unverified]
+    real = [m for m in rest if not m.is_config and not m.unverified]
+    configs = [m for m in rest if m.is_config and not m.unverified]
 
     if real:
-        print(f"\n-- {len(real)} file{'s' if len(real) != 1 else ''} differ from pacman's records --")
+        # One heading per file, then each way it differs: a file with a
+        # size AND a checksum change is one file, not two.
+        by_file: dict[tuple[str, str], list[str]] = {}
         for m in real:
-            status = known.get(m.filepath)
+            by_file.setdefault((m.package, m.filepath), []).append(m.reason)
+        n = len(by_file)
+        print(f"\n-- {n} file{'s' if n != 1 else ''} differ{'s' if n == 1 else ''} from {label}'s records --")
+        for (package, filepath), reasons in by_file.items():
+            status = known.get(filepath)
             tracked = f"Ensign last saw this file: {status}" if status else "not tracked by Ensign"
-            print(f"  {shown(m.package)}: {shown(m.filepath)}")
-            print(f"    {shown(m.reason)} — {tracked}")
-            reason_note = explanations.explain_pacman_reason(m.reason)
-            if reason_note:
-                _note("ⓘ", reason_note, indent=4)
-    elif unverified:
-        print("\nNo files differ from pacman's records.")
+            print(f"  {shown(package)}: {shown(filepath)}")
+            for reason in reasons:
+                print(f"    {shown(reason)} — {tracked}")
+                reason_note = backend.explain_reason(reason)
+                if reason_note:
+                    _note("ⓘ", reason_note, indent=4)
+    elif unverified or excluded:
+        print(f"\nNo files differ from {label}'s records.")
 
     if unverified:
-        _print_unverified(unverified)
+        _print_unverified(unverified, backend)
 
-    if backups:
-        # pacman marks these files "backup" specifically so it won't
-        # complain when you edit them -- a mismatch here means "you
-        # configured your system," not "something is wrong."
-        print(f"\n-- {len(backups)} backup/config file{'s' if len(backups) != 1 else ''} "
-              f"locally modified (expected, not a concern) --")
+    if configs:
+        # Package managers mark these files as configuration specifically so
+        # they won't complain when you edit them -- a mismatch here means
+        # "you configured your system," not "something is wrong."
         by_path: dict[str, list[str]] = {}
-        for m in backups:
+        for m in configs:
             by_path.setdefault(m.filepath, []).append(m.reason)
+        n = len(by_path)
+        print(f"\n-- {n} {backend.config_word} file{'s' if n != 1 else ''} "
+              f"locally modified (expected, not a concern) --")
         for path, reasons in by_path.items():
             print(f"  {shown(path)}  ({shown(', '.join(reasons))})")
+
+    if excluded:
+        _print_excluded(excluded)
+
+
+def pacman_report(engine: Engine, result) -> None:
+    """The pacman report. Kept under its old name for existing callers."""
+    from .pkgdb.pacman import PacmanBackend
+    package_report(engine, result, PacmanBackend())
 
 
 def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, int]:

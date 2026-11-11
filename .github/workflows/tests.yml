@@ -89,14 +89,12 @@ jobs:
               python3 -m venv /opt/venv &&
               /opt/venv/bin/pip install -q -r requirements.txt
             python: /opt/venv/bin/python
-            # No dpkg/rpm backend yet, so detection must say "none" here.
-            live_env: ENSIGN_EXPECT_BACKEND=none
+            live_env: ENSIGN_EXPECT_BACKEND=dpkg
           - name: Fedora
             image: fedora:latest
             setup: dnf install -y -q python3 python3-sqlalchemy python3-rich shadow-utils util-linux
             python: python3
-            # No dpkg/rpm backend yet, so detection must say "none" here.
-            live_env: ENSIGN_EXPECT_BACKEND=none
+            live_env: ENSIGN_EXPECT_BACKEND=rpm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -132,6 +130,9 @@ jobs:
     env:
       ENSIGN_CLI: /tmp/ensign-venv/bin/ensign-scan
       ENSIGN_TEST_CLAMD_SOCKET: /run/clamav/clamd.ctl
+      # A full Ubuntu install (unlike the trimmed container images), so
+      # pkgdb_test.py's live checks see a real-world dpkg --verify.
+      ENSIGN_EXPECT_BACKEND: dpkg
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

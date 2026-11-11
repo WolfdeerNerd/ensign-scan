@@ -70,7 +70,7 @@ sudo pacman -S --needed python-sqlalchemy python-rich
 
 Ensign's core scanning, hashing, and database tracking are plain Python + SQLAlchemy + ClamAV — nothing Arch-specific. It should run on any Linux distro with Python 3.11+ and ClamAV installed.
 
-The one exception is package verification: `--verify-packages`, and the "owned by package …" context line under infected files. These ask your package manager which package owns a file and whether it still matches what the package installed. Ensign picks the package manager from `/etc/os-release` (setting: `package_verification`, default `"auto"`). So far it supports pacman, so on Arch and Arch-based distributions. Support for other package managers is planned. Until then, on other distributions package verification is skipped cleanly with a note saying why, and every other command works the same.
+The one exception is package verification: `--verify-packages`, and the "owned by package …" context line under infected files. These ask your package manager which package owns a file and whether it still matches what the package installed. Ensign picks the package manager from `/etc/os-release` (setting: `package_verification`, default `"auto"`). It supports pacman (Arch and derivatives), dpkg (Debian, Ubuntu and derivatives) and rpm (Fedora, RHEL and its rebuilds, openSUSE). On any other distribution, package verification is skipped cleanly with a note saying why, and every other command works the same. dpkg's records are MD5 checksums: good for catching accidental or careless changes, not an attacker who deliberately builds a file with a matching checksum.
 
 `notify-send` (desktop notifications) isn't Arch-specific either — it's standard Linux tooling available on most major distros, just under a different package name (e.g. Debian/Ubuntu: `libnotify-bin`).
 
@@ -85,8 +85,8 @@ Ensign makes no network connections. It talks to clamd over a local Unix socket 
 | Program | When | What for |
 |---|---|---|
 | `clamscan` | Only for a file clamd rejects as over its size limit | Scans that one file with the command-line scanner, which has no such limit |
-| `pacman -Qkk` | Only with `--verify-packages` (on pacman systems) | Read-only integrity check of installed files |
-| `pacman -Qo <file>` | When listing infected files (on pacman systems) | Read-only lookup of which package owns a flagged file |
+| `pacman -Qkk` / `dpkg --verify` / `rpm -Va` | Only with `--verify-packages` (whichever matches your distribution) | Read-only integrity check of installed files |
+| `pacman -Qo` / `dpkg-query -S` / `rpm -qf` `<file>` | When listing infected files (whichever matches your distribution) | Read-only lookup of which package owns a flagged file |
 | `notify-send` | At the end of a run, if installed | Desktop notification |
 | `gdbus` | After an infected-files alert | Closes that notification after its timeout |
 | `pgrep` | When sending an infected-files alert | Checks whether a Steam game is running (see Alerts) |

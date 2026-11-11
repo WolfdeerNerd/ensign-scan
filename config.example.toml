@@ -47,8 +47,9 @@ signature_max_age_days = 3
 # Which package manager Ensign asks "which package owns this file, and is
 # it unmodified?" -- used by --verify-packages and the context line under
 # infected files. "auto" picks it from /etc/os-release; "off" never asks
-# one. Supported so far: "pacman" (Arch and Arch-based distributions).
-# Elsewhere "auto" currently means off; every other feature works the same.
+# one. Supported: "pacman" (Arch and derivatives), "dpkg" (Debian,
+# Ubuntu and derivatives), "rpm" (Fedora, RHEL and rebuilds, openSUSE).
+# On any other distribution "auto" means off; everything else still works.
 package_verification = "auto"
 clamd_socket = "/var/run/clamav/clamd.ctl"
 

@@ -93,6 +93,37 @@ _BUILTIN_PACMAN_REASONS: dict[str, str] = {
         "file is gone).",
 }
 
+# dpkg and rpm report differences with the same test letters (see
+# pkgdb/verifyfmt.py); these are the reasons that parser produces.
+_BUILTIN_PACKAGE_REASONS: dict[str, str] = {
+    "Size mismatch":
+        "File size differs from the package's record.",
+    "Mode mismatch":
+        "File type or permissions differ from what the package installed.",
+    "Checksum mismatch":
+        "File content itself differs from what the package installed -- "
+        "the one actually worth a closer look.",
+    "Device number mismatch":
+        "A device file's numbers differ from the package's record.",
+    "Symlink path mismatch":
+        "Symlink target differs from what the package installed.",
+    "Owner mismatch":
+        "Owning user differs from what the package expects.",
+    "Group mismatch":
+        "Owning group differs from what the package expects.",
+    "Modification time mismatch":
+        "Timestamp differs from install time -- common after any edit or "
+        "package update; says nothing about the file's content.",
+    "Capabilities mismatch":
+        "The file's Linux capabilities (fine-grained root powers) differ "
+        "from what the package set.",
+    "File missing":
+        "The package installed this file, but it isn't there now.",
+    "Could not read file":
+        "The package manager couldn't open this file, so its content was not "
+        "checked. Usually means the check wasn't run as root.",
+}
+
 # Module-level tables load_custom() extends in place. Everything else
 # reads from these, never from the _BUILTIN_* dicts directly.
 THREAT_EXPLANATIONS: dict[str, ThreatExplanation] = dict(_BUILTIN_THREATS)
@@ -206,6 +237,11 @@ def explain_threat(threat_name: str | None) -> ThreatExplanation | None:
 
 def explain_pacman_reason(reason: str) -> str | None:
     return PACMAN_REASON_EXPLANATIONS.get(reason)
+
+
+def explain_package_reason(reason: str) -> str | None:
+    """Notes for dpkg and rpm findings (their reasons share one wording)."""
+    return _BUILTIN_PACKAGE_REASONS.get(reason)
 
 
 def load_custom(config) -> None:
