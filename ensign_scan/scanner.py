@@ -89,6 +89,21 @@ class _Known(NamedTuple):
     sig_version: int | None
 
 
+@dataclass(frozen=True)
+class UnsavedResult:
+    """A file Ensign looked at but could not record in its database.
+
+    Kept in memory for the end-of-run report, so a result -- above all an
+    infection -- is still reported and alerted on even though the database
+    write failed (a full disk, a locked or damaged database). Without this,
+    a failed write would turn a detection into "nothing found".
+    """
+    path: str
+    status: str            # "infected", "clean", "error", "classified", or "not scanned"
+    threat_name: str | None
+    error: str
+
+
 @dataclass
 class TreeStats:
     seen: int = 0
@@ -131,6 +146,9 @@ class Scanner:
         # threads, read by the CLI after the scan.
         self.integrity_changes: list[IntegrityChange] = []
         self._integrity_lock = threading.Lock()
+        # Results that couldn't be saved (see UnsavedResult), for the report.
+        self.unsaved: list[UnsavedResult] = []
+        self._unsaved_lock = threading.Lock()
         # Watched files that didn't exist at the last scan of a tree that
         # had been scanned before: a new authorized_keys is a change too.
         self._watched_new: set[str] = set()
@@ -530,8 +548,7 @@ class Scanner:
         try:
             previous_hash = self._upsert_file(path, st, digest, outcome)
         except Exception as exc:
-            print(f"[red]✗ DB error on {shown(path.name)}: {shown(exc)}[/red]")
-            log.error("%s: %s", path, exc)
+            self._remember_unsaved(path, outcome, exc)
             return None, "failed"
 
         if secrets.is_integrity_watched(str(path)):
@@ -549,6 +566,20 @@ class Scanner:
         symbol = _STATUS_SYMBOLS.get(status, "?")
         print(f"{symbol} {shown(path.name):.<50} {digest[:16]}… {status}")
         return digest, status
+
+    def _remember_unsaved(self, path: Path, outcome: ScanOutcome | None, exc: Exception) -> None:
+        """A result the database refused: say so now, keep it for the report."""
+        status = outcome.status.value if outcome else "not scanned"
+        threat = outcome.threat_name if outcome else None
+        with self._unsaved_lock:
+            self.unsaved.append(UnsavedResult(str(path), status, threat, str(exc)))
+        log.error("result not saved for %s (%s): %s", path, status, exc)
+        if status == ScanStatus.INFECTED.value:
+            print(f"[bold red]! {shown(path.name)}: {shown(threat)} FOUND -- but the result "
+                  f"couldn't be saved. It is listed at the end of this run.[/bold red]")
+        else:
+            print(f"[red]✗ Couldn't save the result for {shown(path.name)} ({status}): "
+                  f"{shown(exc)}[/red]")
 
     def _known_infected(self, path: Path) -> bool:
         """True if the database already has this file as INFECTED. Such a
@@ -570,8 +601,7 @@ class Scanner:
         try:
             self._upsert_file(path, st, "", outcome)
         except Exception as exc:
-            print(f"[red]✗ DB error on {shown(path.name)}: {shown(exc)}[/red]")
-            log.error("%s: %s", path, exc)
+            self._remember_unsaved(path, outcome, exc)
             return None, "failed"
         status = ScanStatus.CLASSIFIED.value
         print(f"{_STATUS_SYMBOLS[status]} {shown(path.name):.<50} {'not read':<17} {status}")

@@ -66,7 +66,10 @@ def run(*args: str, expect: int = 0, cwd: Path) -> str:
 def rows(db: Path) -> dict[str, tuple]:
     """filepath -> (scan_status, threat_name, last_scanned), read with plain sqlite3."""
     with sqlite3.connect(db) as con:
-        return {p: (s, t, ls) for p, s, t, ls in
+        # A name that isn't valid UTF-8 is stored as its bytes (a BLOB):
+        # decode it the way Python names such files, so keys compare equal.
+        return {(p.decode("utf-8", "surrogateescape") if isinstance(p, bytes) else p): (s, t, ls)
+                for p, s, t, ls in
                 con.execute("SELECT filepath, scan_status, threat_name, last_scanned FROM files")}
 
 
@@ -202,5 +205,22 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
         # read-only reports don't take the lock, so they still work
         run("--suggest-fixes", "--config", str(config), cwd=work)
     print("run-lock test passed ✓")
+
+    # --- a name that isn't valid UTF-8 is scanned, saved and reported ------------------
+    odd_tree = tmp / "odd"
+    odd_tree.mkdir()
+    odd = os.fsdecode(os.path.join(os.fsencode(odd_tree), b"eicar-caf\xe9.com"))
+    with open(os.fsencode(odd), "wb") as fh:
+        fh.write(EICAR)
+    out = run("--config", str(config), str(odd_tree), cwd=work)
+    flat = " ".join(out.split())
+    assert "INFECTED FILES" in flat and "eicar-caf\\xe9.com" in flat, \
+        "listed with its byte as \\xe9, so it can be found"
+    assert "SCANNED BUT NOT SAVED" not in flat, out
+    first = rows(db)[odd]
+    assert first[0] == "infected", first
+    run("--config", str(config), str(odd_tree), cwd=work)
+    assert rows(db)[odd][0] == "infected", "still tracked on the next run"
+    print("undecodable-filename test passed ✓")
 
 print("\nAll installed-CLI tests passed ✓")

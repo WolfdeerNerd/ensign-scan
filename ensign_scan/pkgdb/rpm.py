@@ -33,7 +33,7 @@ def _query_owner(path: str, timeout: float) -> tuple[str, str | None]:
     try:
         result = subprocess.run(
             ["rpm", "-qf", "--qf", "%{NAME} %{VERSION}-%{RELEASE}\\n", "--", path],
-            capture_output=True, text=True, timeout=timeout, env=c_locale_env(),
+            capture_output=True, text=True, timeout=timeout, env=c_locale_env(), errors="surrogateescape",
         )
     except (subprocess.TimeoutExpired, OSError):
         return ("unknown", None)
@@ -70,7 +70,7 @@ def _all_owners(timeout: float) -> dict[str, str]:
     """
     try:
         result = subprocess.run(["rpm", "-qa", "--qf", _ALL_FILES_QF], capture_output=True,
-                                text=True, timeout=timeout, env=c_locale_env())
+                                text=True, timeout=timeout, env=c_locale_env(), errors="surrogateescape")
     except (subprocess.TimeoutExpired, OSError):
         return {}
     owners: dict[str, str] = {}
@@ -111,7 +111,7 @@ def verify_all(timeout: float | None = None) -> VerifyResult | None:
         return None
     try:
         result = subprocess.run(["rpm", "-Va", "--nodeps"], capture_output=True, text=True,
-                                timeout=timeout, env=c_locale_env())
+                                timeout=timeout, env=c_locale_env(), errors="surrogateescape")
     except subprocess.TimeoutExpired:
         return VerifyResult([], 0, error=f"rpm -Va did not finish within {timeout:.0f}s. It checks "
                                          f"every file of every installed package.")

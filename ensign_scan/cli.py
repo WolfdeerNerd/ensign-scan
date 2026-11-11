@@ -26,10 +26,11 @@ from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
 from ensign_scan import diagnostics, explanations, logsetup, notify, pkgdb, secrets
 from ensign_scan.fsutil import shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
-from ensign_scan.reports import error_summary, integrity_report, list_infected, package_report, scan_summary, suggest_fixes, unreadable_report
+from ensign_scan.reports import error_summary, integrity_report, list_infected, package_report, scan_summary, suggest_fixes, unreadable_report, unsaved_report
 from ensign_scan.scanner import ClamdRunsAsRoot, Scanner
 
 EXIT_BUSY = 75  # sysexits EX_TEMPFAIL: another Ensign holds the lock; try again later
+EXIT_UNSAVED = 1  # the run finished, but some results couldn't be saved (see unsaved_report)
 
 
 def ensign_version() -> str:
@@ -220,7 +221,14 @@ def run(args: argparse.Namespace, config: Config) -> int:
     error_summary(scanner.engine, paths=args.targets or None)
     unreadable_report(unreadable)
     integrity_report(scanner.integrity_changes)
-    infected = list_infected(scanner.engine, paths=args.targets or None)
+    unsaved_infected = [u for u in scanner.unsaved if u.status == "infected"]
+    infected = list_infected(scanner.engine, paths=args.targets or None,
+                             more_elsewhere=bool(unsaved_infected))
+    # Results the database refused are reported (and alerted on) from memory,
+    # so a failed save can never turn a detection into "nothing found".
+    infected += unsaved_report(scanner.unsaved)
+    if unsaved_infected:
+        summary = {**summary, "infected": summary.get("infected", 0) + len({u.path for u in unsaved_infected})}
     suggest_fixes(scanner.engine, paths=args.targets or None)
     notify.send(summary, infected, config.infected_alert_seconds,
                 only_when_gaming=config.infected_alert_only_while_gaming,
@@ -233,7 +241,9 @@ def run(args: argparse.Namespace, config: Config) -> int:
     print(" Feel free to call upon me again.")
     print("     — Ensign")
     print()
-    return 0
+    # Non-zero when results are missing from the database, so a script or a
+    # scheduled run can tell "finished" from "finished, but incomplete".
+    return EXIT_UNSAVED if scanner.unsaved else 0
 
 
 if __name__ == "__main__":

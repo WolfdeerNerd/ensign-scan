@@ -94,6 +94,8 @@ def _upgrade_to_fd_passing(conn) -> None:
     wipe: list[tuple[int]] = []
     rescan: list[tuple[int]] = []
     for row_id, path, status, result in rows:
+        if isinstance(path, bytes):  # a name that isn't valid UTF-8 (see models.FsPath)
+            path = path.decode("utf-8", "surrogateescape")
         if secrets.is_integrity_watched(path):
             if status in ("classified", "error"):
                 rescan.append((row_id,))
