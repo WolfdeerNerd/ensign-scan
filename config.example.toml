@@ -43,6 +43,13 @@ log_max_total_mb = 2048
 # Warn if the virus-signature database is older than this many days
 # (usually means freshclam has silently stopped running). 0 disables.
 signature_max_age_days = 3
+
+# Which package manager Ensign asks "which package owns this file, and is
+# it unmodified?" -- used by --verify-packages and the context line under
+# infected files. "auto" picks it from /etc/os-release; "off" never asks
+# one. Supported so far: "pacman" (Arch and Arch-based distributions).
+# Elsewhere "auto" currently means off; every other feature works the same.
+package_verification = "auto"
 clamd_socket = "/var/run/clamav/clamd.ctl"
 
 scan_targets = [

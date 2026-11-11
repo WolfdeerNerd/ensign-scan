@@ -77,7 +77,7 @@ jobs:
             # upgrading is a partial upgrade, which Arch doesn't support.
             setup: pacman -Syu --noconfirm python python-sqlalchemy python-rich
             python: python3
-            live_env: ENSIGN_TEST_PACMAN=1
+            live_env: ENSIGN_TEST_PACMAN=1 ENSIGN_EXPECT_BACKEND=pacman
           - name: Debian 12
             image: debian:12
             # Debian 12 ships Python 3.11 (Ensign's minimum) but SQLAlchemy
@@ -89,12 +89,14 @@ jobs:
               python3 -m venv /opt/venv &&
               /opt/venv/bin/pip install -q -r requirements.txt
             python: /opt/venv/bin/python
-            live_env: ""
+            # No dpkg/rpm backend yet, so detection must say "none" here.
+            live_env: ENSIGN_EXPECT_BACKEND=none
           - name: Fedora
             image: fedora:latest
             setup: dnf install -y -q python3 python3-sqlalchemy python3-rich shadow-utils util-linux
             python: python3
-            live_env: ""
+            # No dpkg/rpm backend yet, so detection must say "none" here.
+            live_env: ENSIGN_EXPECT_BACKEND=none
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

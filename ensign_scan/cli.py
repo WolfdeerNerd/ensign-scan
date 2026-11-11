@@ -23,7 +23,7 @@ from importlib.metadata import PackageNotFoundError, version as dist_version
 from rich import print
 
 from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
-from ensign_scan import diagnostics, explanations, logsetup, notify, pacman, secrets
+from ensign_scan import diagnostics, explanations, logsetup, notify, pkgdb, secrets
 from ensign_scan.fsutil import shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
 from ensign_scan.reports import error_summary, integrity_report, list_infected, pacman_report, scan_summary, suggest_fixes, unreadable_report
@@ -62,8 +62,9 @@ def parse_args() -> argparse.Namespace:
                         help="Remove DB records for files that no longer exist, then exit")
     parser.add_argument("--rescan-errors", action="store_true",
                         help="Retry only files currently marked ERROR, then exit (no full scan)")
-    parser.add_argument("--verify-pacman", action="store_true",
-                        help="Check installed files against pacman's records, then exit (Arch only, can be slow)")
+    parser.add_argument("--verify-packages", "--verify-pacman", dest="verify_packages", action="store_true",
+                        help="Check installed files against the package manager's records, then exit "
+                             "(can be slow; --verify-pacman is the old name)")
     parser.add_argument("--diagnostics", action="store_true",
                         help="Print versions, settings and counts for a bug report, then exit. "
                              "Contains no paths, usernames, hostnames or file names.")
@@ -105,6 +106,7 @@ def main() -> int:
     config = Config.load(args.config)
     secrets.load_custom(config)
     explanations.load_custom(config)
+    pkgdb.configure(config.package_verification)
     setup_logging(config)
 
     # The read-only reports never write to the database, so they don't need
@@ -112,7 +114,7 @@ def main() -> int:
     # and --rescan-errors first, so with either one also given, the run
     # writes and must take the lock like any other.
     writes = args.purge_missing or args.rescan_errors
-    if (args.verify_pacman or args.suggest_fixes) and not writes:
+    if (args.verify_packages or args.suggest_fixes) and not writes:
         return run(args, config)
 
     lock = RunLock(config.data_dir / "ensign.lock")
@@ -155,8 +157,12 @@ def run(args: argparse.Namespace, config: Config) -> int:
             return 1
         scanner.rescan_errors()
         return 0
-    if args.verify_pacman:
-        pacman_report(scanner.engine, pacman.verify_all())
+    if args.verify_packages:
+        backend = pkgdb.active()
+        if backend.name == "pacman":
+            pacman_report(scanner.engine, backend.verify_all())
+        else:
+            print(f"[yellow]Package verification isn't available: {backend.reason}. Skipping.[/yellow]")
         return 0
     if args.suggest_fixes:
         suggest_fixes(scanner.engine, paths=args.targets or None)

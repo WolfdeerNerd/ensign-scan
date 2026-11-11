@@ -34,4 +34,4 @@ Source = "https://github.com/WolfdeerNerd/ensign-scan"
 ensign-scan = "ensign_scan.cli:main"
 
 [tool.setuptools]
-packages = ["ensign_scan"]
+packages = ["ensign_scan", "ensign_scan.pkgdb"]

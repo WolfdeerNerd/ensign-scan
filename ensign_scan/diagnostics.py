@@ -25,6 +25,7 @@ import tomllib
 from importlib.metadata import PackageNotFoundError, distribution, version as dist_version
 from pathlib import Path
 
+from . import pkgdb
 from .clamd import ClamdClient
 from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATA_DIR, HOME, HOSTNAME, Config
 
@@ -33,6 +34,7 @@ _SAFE_VALUE_SETTINGS = (
     "max_workers", "rescan_after_days", "rescan_after_signature_updates",
     "infected_alert_seconds", "infected_alert_only_while_gaming",
     "log_keep_days", "log_max_total_mb", "signature_max_age_days",
+    "package_verification",
 )
 
 _DEFAULT_SOCKET = Config.clamd_socket  # the dataclass default
@@ -118,6 +120,14 @@ def _config_section(args_config: str | None) -> tuple[list[str], Config]:
         f"  custom_pacman_reasons: {len(config.custom_pacman_reasons)} entries",
     ]
     return lines, config
+
+
+def _packages_section(config: Config) -> list[str]:
+    """Which package backend this run would use, and why if none."""
+    backend = pkgdb.select(config.package_verification)
+    if backend.name == "none":
+        return ["  backend:             none", f"  reason:              {backend.reason}"]
+    return [f"  backend:             {backend.name}"]
 
 
 def _clamav_section(config: Config) -> list[str]:
@@ -222,6 +232,7 @@ def report(args_config: str | None) -> str:
         "Config",
         *config_lines,
     ]
+    lines += ["", "Packages", *_packages_section(config)]
     lines += ["", "ClamAV", *_clamav_section(config)]
     lines += ["", "Database", *_database_section(config)]
     return _scrub("\n".join(_align(line) for line in lines))
