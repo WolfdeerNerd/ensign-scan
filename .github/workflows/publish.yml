@@ -3,9 +3,13 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
-  # Manual fallback if a release event is missed. Pick the release TAG
-  # (e.g. v0.3.1) as the ref, not a branch: the pypi environment only
-  # deploys from v* tags, so a branch run stops before publishing.
+  # Two uses:
+  #  * Release fallback: if a release event is missed, run this with the
+  #    release TAG (e.g. v0.4.0) as the ref.
+  #  * Dry run: run it with `main` as the ref to rehearse a release --
+  #    tests, build, and verify-dist all run for real, then the publish job
+  #    is refused, because the pypi environment only deploys from v* tags.
+  #    Nothing reaches PyPI. (A failed publish job is the expected result.)
   workflow_dispatch:
 
 # Least privilege for every job's GITHUB_TOKEN: read the repo, nothing else.
@@ -73,7 +77,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export ENSIGN_EXPECT_VERSION="${GITHUB_REF_NAME#v}"
+          # On a release tag, the built version must equal the tag. On a
+          # dry run from a branch there's no tag, so it's checked against
+          # pyproject.toml instead (cli_live_test.py's default).
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            export ENSIGN_EXPECT_VERSION="${GITHUB_REF_NAME#v}"
+          fi
           for venv in /tmp/wheel-venv /tmp/sdist-venv; do
             echo "::group::$venv"
             ENSIGN_CLI="$venv/bin/ensign-scan" python tests/cli_live_test.py
