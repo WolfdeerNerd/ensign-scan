@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from . import explanations, pkgdb
 from .clamd import is_permission_error
 from .fsutil import shown
+from .models import is_open_failed
 from .models import FileRecord, ScanStatus, path_under
 
 
@@ -105,17 +106,37 @@ def suggest_fixes(engine: Engine, top: int = 10, paths: list[str] | None = None)
         rows = query.all()
 
     hotspots: dict[str, list[str]] = {}
+    unopened: dict[str, list[str]] = {}
     for filepath, result in rows:
-        if is_permission_error(result or ""):
+        if is_open_failed(result):
+            unopened.setdefault(os.path.dirname(filepath), []).append(filepath)
+        elif is_permission_error(result or ""):
             hotspots.setdefault(os.path.dirname(filepath), []).append(filepath)
 
+    if unopened:
+        _print_hotspots(
+            f"FILES ENSIGN COULD NOT OPEN ({len(unopened)} directories)",
+            ["The user running Ensign can't read these, so they were not scanned. Usually",
+             "files owned by root (created with sudo, say) or by another user. Ensign",
+             "doesn't suggest permission changes; it retries these on every run."],
+            unopened, top)
     if not hotspots:
         return
 
-    print(f"\n=== FILES CLAMD COULD NOT READ ({len(hotspots)} directories) ===")
-    print("clamd was refused these files even though Ensign passed it an open handle.")
-    print("Usually AppArmor/SELinux confining clamd, or a clamd that can't receive")
-    print("open files (the run warns if so). Ensign doesn't suggest permission changes.\n")
+    _print_hotspots(
+        f"FILES CLAMD COULD NOT READ ({len(hotspots)} directories)",
+        ["clamd was refused these files even though Ensign passed it an open handle.",
+         "Usually AppArmor/SELinux confining clamd, or a clamd that can't receive",
+         "open files (the run warns if so). Ensign doesn't suggest permission changes."],
+        hotspots, top)
+
+
+def _print_hotspots(title: str, intro: list[str], hotspots: dict[str, list[str]], top: int) -> None:
+    """One suggest_fixes() section: directories with the most refused files first."""
+    print(f"\n=== {title} ===")
+    for line in intro:
+        print(line)
+    print()
 
     stale_only = 0
     for parent, files in sorted(hotspots.items(), key=lambda kv: -len(kv[1]))[:top]:

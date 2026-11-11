@@ -207,6 +207,13 @@ with tempfile.TemporaryDirectory() as d:
     assert ex("/usr/share/locale/de/LC_MESSAGES/coreutils.mo")
     assert not ex("/usr/bin/ls")
     assert dpkg_mod.read_path_filters(Path(d, "none"), Path(d, "nodir")) == [], "no config: nothing excluded"
+    if os.geteuid() != 0:  # root can list anything, so this can only be checked as a normal user
+        locked = Path(d, "locked.d"); locked.mkdir(); (locked / "x").write_text("path-exclude=/x\n")
+        locked.chmod(0o000)
+        try:
+            assert dpkg_mod.read_path_filters(Path(d, "none"), locked) == [], "unreadable: no crash"
+        finally:
+            locked.chmod(0o700)
 print("dpkg path-exclude tests passed ✓")
 
 # --- dpkg: ownership lookups ---------------------------------------------------------
@@ -244,9 +251,10 @@ present("dpkg", "rpm")
 dpkg_mod.available = rpm_mod.available = lambda: True
 try:
     # dpkg-query takes arguments as shell patterns: "/x/*" can match OTHER
-    # files. Only an answer for exactly the path asked about counts.
+    # files. Only an answer for exactly the path asked about counts -- and
+    # since dpkg didn't say "nothing owns it" either, the answer is unknown.
     dpkg_mod.subprocess.run = FakeRun(("coreutils: /usr/bin/ls\n", "", 0))
-    assert dpkg_mod.owner("/usr/bin/l*") == ("unowned", None), "a pattern match is not ownership"
+    assert dpkg_mod.owner("/usr/bin/l*") == ("unknown", None), "a pattern match is neither owned nor unowned"
 
     fake = FakeRun(("coreutils: /usr/bin/ls\n", "", 0), ("9.4-3\n", "", 0))
     dpkg_mod.subprocess.run = fake
@@ -256,6 +264,11 @@ try:
 
     dpkg_mod.subprocess.run = FakeRun(("", "dpkg-query: no path found matching pattern /tmp/x\n", 1))
     assert dpkg_mod.owner("/tmp/x") == ("unowned", None)
+
+    # A real failure exits non-zero too, and must not read as "nothing owns it"
+    dpkg_mod.subprocess.run = FakeRun(("", "dpkg-query: error: parsing file '/var/lib/dpkg/status' "
+                                           "near line 12: missing 'Package' field\n", 2))
+    assert dpkg_mod.owner("/tmp/x") == ("unknown", None), "a damaged dpkg database is not 'unowned'"
 
     def boom(*a, **k):
         raise OSError("gone")

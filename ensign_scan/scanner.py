@@ -45,7 +45,7 @@ from .clamd import ClamdClient, ScanOutcome, clamscan_cli_available, is_size_lim
 from .config import Config
 from .db import make_engine
 from .fsutil import NotScannable, is_scannable, open_for_scan, safe_lstat, sha256_fd, shown, stat_or_error
-from .models import DirectoryRecord, FileRecord, ScanStatus, path_under, utcnow
+from .models import DirectoryRecord, FileRecord, ScanStatus, open_failed_result, path_under, utcnow
 from .progress import RunProgress
 
 log = logging.getLogger(__name__)
@@ -500,8 +500,11 @@ class Scanner:
         except FileNotFoundError:
             return None, "skipped"
         except OSError as exc:
-            log.error("read failed for %s: %s", path, exc)
-            return None, "failed"
+            # Most often a file owned by root or another user. Recorded as
+            # an error, never dropped: a silently missing file reads as
+            # "scanned, nothing found", and an old "clean" record for it
+            # would stay in place for a file nobody can check any more.
+            return self._record_unreadable(path, st, exc)
         try:
             # The link could have been re-pointed between realpath() above
             # and open(). Ask the kernel what was actually opened, and
@@ -516,9 +519,8 @@ class Scanner:
                     return self._record_classified(path, st, late)
             try:
                 digest = sha256_fd(fd)
-            except OSError as exc:
-                log.error("read failed for %s: %s", path, exc)
-                return None, "failed"
+            except OSError as exc:  # opened, but reading failed (an I/O error, say)
+                return self._record_unreadable(path, st, exc)
             if not scan:
                 outcome = None
             elif self._transport == "path":
@@ -607,11 +609,35 @@ class Scanner:
         print(f"{_STATUS_SYMBOLS[status]} {shown(path.name):.<50} {'not read':<17} {status}")
         return "", status
 
+    def _record_unreadable(
+        self, path: Path, st: os.stat_result, exc: OSError
+    ) -> tuple[str | None, str]:
+        """Record a file Ensign couldn't open or read as an ERROR.
+
+        Its hash isn't known, so a stored one is kept (an integrity
+        baseline survives a spell of being unreadable). The errors pass
+        retries it on every run, and error_summary()/suggest_fixes() list it.
+        """
+        log.error("could not read %s: %s", path, exc)
+        outcome = ScanOutcome(ScanStatus.ERROR, open_failed_result(exc))
+        try:
+            self._upsert_file(path, st, None, outcome)
+        except Exception as db_exc:
+            self._remember_unsaved(path, outcome, db_exc)
+            return None, "failed"
+        status = ScanStatus.ERROR.value
+        reason = exc.strerror or type(exc).__name__
+        print(f"{_STATUS_SYMBOLS[status]} {shown(path.name):.<50} {'not read':<17} {status} ({shown(reason)})")
+        return None, status
+
     def _upsert_file(
-        self, path: Path, st: os.stat_result, digest: str, outcome: ScanOutcome | None
+        self, path: Path, st: os.stat_result, digest: str | None, outcome: ScanOutcome | None
     ) -> str | None:
         """Insert or update the file's row. Returns the hash the row held
-        before this update, or None if the file wasn't in the database."""
+        before this update, or None if the file wasn't in the database.
+
+        digest=None means "not known this time": a stored hash is kept,
+        and a new row gets "" (the column can't be NULL)."""
         with Session(self.engine) as session:
             try:
                 record = session.query(FileRecord).filter(
@@ -619,9 +645,10 @@ class Scanner:
                 ).first()
                 previous_hash = record.file_hash if record is not None else None
                 if record is None:
-                    record = FileRecord(filepath=str(path), filename=path.name, file_hash=digest)
+                    record = FileRecord(filepath=str(path), filename=path.name, file_hash=digest or "")
                     session.add(record)
-                record.file_hash = digest
+                if digest is not None:
+                    record.file_hash = digest
                 record.file_size = st.st_size
                 record.mtime_ns = st.st_mtime_ns
                 record.ctime_ns = st.st_ctime_ns
