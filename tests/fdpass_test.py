@@ -1,16 +1,25 @@
 """Tests for passing open files to clamd, and for credential files never
-being opened. Run: python3 fdpass_test.py
+being opened. Run: python3 tests/fdpass_test.py
 
 Run it as your normal user, not root: one check makes sure Ensign refuses
 a clamd running as root, and this test's fake clamd runs as whoever runs
 the test.
 
 Optional live check against your real clamd:
-    ENSIGN_TEST_CLAMD_SOCKET=/run/clamav/clamd.ctl python3 fdpass_test.py
+    ENSIGN_TEST_CLAMD_SOCKET=/run/clamav/clamd.ctl python3 tests/fdpass_test.py
 It writes the harmless EICAR test string to a private temp file, scans it
 through Ensign, and deletes it.
 """
 from __future__ import annotations
+
+import sys as _sys_path
+from pathlib import Path as _Path
+
+# Run against THIS checkout, never an installed copy of Ensign: the tests
+# live in tests/, so without this "import ensign_scan" would find whatever
+# is installed (or nothing) instead of the code next to them.
+ROOT = _Path(__file__).resolve().parent.parent
+_sys_path.path.insert(0, str(ROOT))
 
 import contextlib
 import hashlib

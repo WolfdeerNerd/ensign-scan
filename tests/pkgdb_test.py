@@ -1,14 +1,23 @@
 """Tests for package-manager backend selection (ensign_scan/pkgdb).
-Run: python3 pkgdb_test.py
+Run: python3 tests/pkgdb_test.py
 
 No real package manager is needed: availability is faked, and os-release
 contents are passed in directly.
 
 Optional live check against the real system:
-    ENSIGN_EXPECT_BACKEND=pacman python3 pkgdb_test.py
+    ENSIGN_EXPECT_BACKEND=pacman python3 tests/pkgdb_test.py
 detects from the machine's own /etc/os-release and asserts the result
 ("none" is a valid expectation too). CI sets it in each distro container.
 """
+
+import sys as _sys_path
+from pathlib import Path as _Path
+
+# Run against THIS checkout, never an installed copy of Ensign: the tests
+# live in tests/, so without this "import ensign_scan" would find whatever
+# is installed (or nothing) instead of the code next to them.
+ROOT = _Path(__file__).resolve().parent.parent
+_sys_path.path.insert(0, str(ROOT))
 import os
 import sys
 import tempfile
@@ -152,7 +161,7 @@ print("CLI alias tests passed ✓")
 # setuptools only installs the packages listed in pyproject.toml. A new
 # subpackage that isn't listed works from a checkout but is missing from
 # the PyPI install -- an ImportError only users would see.
-root = Path(__file__).parent
+root = ROOT
 listed = set(tomllib.loads((root / "pyproject.toml").read_text())["tool"]["setuptools"]["packages"])
 found = {
     ".".join(p.parent.relative_to(root).parts)

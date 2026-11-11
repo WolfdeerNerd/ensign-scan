@@ -1,8 +1,17 @@
 """Smoke test: fake clamd server + temp tree, verifies the full pipeline.
 
-Run: python3 smoke_test.py
+Run: python3 tests/smoke_test.py
 """
 from __future__ import annotations
+
+import sys as _sys_path
+from pathlib import Path as _Path
+
+# Run against THIS checkout, never an installed copy of Ensign: the tests
+# live in tests/, so without this "import ensign_scan" would find whatever
+# is installed (or nothing) instead of the code next to them.
+ROOT = _Path(__file__).resolve().parent.parent
+_sys_path.path.insert(0, str(ROOT))
 
 import os
 import socket

@@ -6,7 +6,7 @@ points ENSIGN_CLI there, so this tests the package users get from PyPI,
 not this checkout. It never imports ensign_scan itself, for the same
 reason: everything goes through the command, in a separate process.
 
-    ENSIGN_CLI=/path/to/venv/bin/ensign-scan python3 cli_live_test.py
+    ENSIGN_CLI=/path/to/venv/bin/ensign-scan python3 tests/cli_live_test.py
 
 Optional:
   ENSIGN_TEST_CLAMD_SOCKET  a real clamd. Adds the scanning tests (EICAR
@@ -36,7 +36,7 @@ from pathlib import Path
 
 CLI = os.environ.get("ENSIGN_CLI")
 SOCKET = os.environ.get("ENSIGN_TEST_CLAMD_SOCKET")
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # the repo root (this file is in tests/)
 
 if not CLI:
     print("installed-CLI test skipped (set ENSIGN_CLI to run it)")
