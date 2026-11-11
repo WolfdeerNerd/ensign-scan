@@ -132,7 +132,10 @@ def setup(config: Config, now: datetime | None = None) -> Path:
     path = log_dir / f"ensign-{now:%Y%m%d-%H%M%S}.log"
     prune(log_dir, config.log_keep_days, config.log_max_total_mb, protect=path)
 
-    _handler = logging.FileHandler(path, delay=True)
+    # backslashreplace: a filename that isn't valid UTF-8 is logged as
+    # \xNN instead of making the handler fail ("--- Logging error ---")
+    # and lose the very line that says what went wrong.
+    _handler = logging.FileHandler(path, delay=True, encoding="utf-8", errors="backslashreplace")
     _handler.setFormatter(logging.Formatter(_FORMAT))
     _filter = RepeatFilter()
     _handler.addFilter(_filter)

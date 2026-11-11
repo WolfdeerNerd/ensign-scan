@@ -177,6 +177,10 @@ These run one job and exit — no full scan.
 
 Before it scans, purges or retries errors, Ensign takes a lock: a small file called `ensign.lock` in your data directory (`~/.local/share/ensign/` unless you've set a custom `data_dir`). If another Ensign already holds it, the new one prints which process has it, exits with code 75 and scans nothing. That way a scheduled run and a manual run can't overlap and scan the same files twice.
 
+A run that finishes normally exits with code 0. It exits with code 1 if some results couldn't be saved to the database (a full disk, say), so a script or a scheduled run can tell "finished" from "finished, but incomplete". Those results are still reported and alerted on, listed at the end under "scanned but not saved".
+
+Filenames that aren't valid UTF-8 (common in old archives, Wine/Proton folders and files from Windows) are tracked like any other: they're stored as their original bytes and shown with those bytes as `\xNN`, e.g. `caf\xe9.txt`.
+
 - **The lock frees itself.** It belongs to the running process, so it is released when that process ends, even after a crash or `kill -9`. There is never a stale lock to clean up.
 - **Leave the file in place.** Deleting `ensign.lock` while a run is using it can let a second run start.
 - **Read-only commands skip it.** `--verify-packages`, `--suggest-fixes` and `--diagnostics` only read the database, so they can run while a scan is going.

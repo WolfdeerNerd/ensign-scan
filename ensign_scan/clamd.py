@@ -86,6 +86,7 @@ def scan_with_clamscan_cli(filepath: Path | str, timeout: float = 180.0) -> "Sca
             ["clamscan", "--no-summary", "--infected",
              "--max-filesize=0", "--max-scansize=0", str(filepath)],
             capture_output=True, text=True, timeout=timeout,
+            errors="surrogateescape",  # its output repeats the filename
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return ScanOutcome(ScanStatus.ERROR, f"clamscan CLI fallback failed: {exc}")
@@ -121,7 +122,9 @@ class ClamdClient:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(self.timeout)
             sock.connect(self.socket_path)
-            sock.sendall(f"n{command}\n".encode())
+            # surrogateescape: a path that isn't valid UTF-8 goes to clamd as
+            # its original bytes (a plain .encode() would raise on it).
+            sock.sendall(f"n{command}\n".encode("utf-8", "surrogateescape"))
             chunks: list[bytes] = []
             while True:
                 data = sock.recv(4096)
@@ -130,7 +133,8 @@ class ClamdClient:
                 chunks.append(data)
                 if data.endswith(b"\n"):
                     break
-        return b"".join(chunks).decode().strip()
+        # clamd's reply repeats the path; decode it the same way.
+        return b"".join(chunks).decode("utf-8", "surrogateescape").strip()
 
     def ping(self) -> bool:
         """True if clamd is up and answering on the socket."""

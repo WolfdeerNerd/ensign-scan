@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import Column, DateTime, Integer, String, Text, and_
+from sqlalchemy import Column, DateTime, Integer, LargeBinary, String, Text, TypeDecorator, and_, or_, type_coerce
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -32,6 +32,62 @@ class ScanStatus(str, Enum):
     CLASSIFIED = "classified"
 
 
+class FsPath(TypeDecorator):
+    """A filesystem path or name, stored so that ANY name round-trips exactly.
+
+    Linux filenames are bytes; most are valid UTF-8, but not all (old
+    archives, Wine/Proton folders and files from Windows can hold names in
+    other encodings). Python represents the undecodable bytes as
+    "surrogate" characters, which SQLite's text type can't store, so such
+    files used to be silently dropped from the database.
+
+    Valid UTF-8 names -- practically all of them -- are stored as TEXT,
+    exactly as before, so existing databases need no migration. Any other
+    name is stored as its original bytes (a BLOB) in the same column, and
+    turned back into the same Python string when read. Each name has one
+    stored form, so the UNIQUE constraint and == lookups work unchanged.
+
+    The one thing that differs is sorting: SQLite orders every BLOB after
+    every TEXT value, so range queries need a second, byte-wise branch --
+    see path_under().
+    """
+    impl = String
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        value = str(value)
+        try:
+            value.encode("utf-8")
+            return value
+        except UnicodeEncodeError:
+            return value.encode("utf-8", "surrogateescape")
+
+    def process_result_value(self, value, dialect):
+        if isinstance(value, bytes):
+            return value.decode("utf-8", "surrogateescape")
+        return value
+
+
+class SafeText(TypeDecorator):
+    """Free text that may quote a filename: clamd's and clamscan's replies
+    repeat the path they scanned. Unlike a path it's only ever displayed,
+    so a name that isn't valid UTF-8 is stored with its bytes written as
+    \\xNN (lossless enough to read, and valid text for SQLite)."""
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        try:
+            value.encode("utf-8")
+            return value
+        except UnicodeEncodeError:
+            return value.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+
+
 def path_under(column, directory: str):
     """SQL condition: `column` is a path inside `directory` (at any depth).
 
@@ -43,15 +99,25 @@ def path_under(column, directory: str):
     sensitive, and able to use the column's index.
     """
     base = directory.rstrip("/") + "/"
-    return and_(column >= base, column < base[:-1] + "0")
+    end = base[:-1] + "0"
+    text_range = and_(column >= base, column < end)
+    # Names stored as bytes (see FsPath) sort after all text in SQLite, so
+    # the text range never reaches them. The same range, compared as bytes,
+    # finds them; for text rows it's always false, so nothing is counted
+    # twice. UTF-8 sorts in the same order as the characters it encodes,
+    # so both branches agree on what "inside" means.
+    as_bytes = type_coerce(column, LargeBinary)
+    byte_range = and_(as_bytes >= base.encode("utf-8", "surrogateescape"),
+                      as_bytes < end.encode("utf-8", "surrogateescape"))
+    return or_(text_range, byte_range)
 
 
 class FileRecord(Base):
     __tablename__ = "files"
 
     id = Column(Integer, primary_key=True)
-    filepath = Column(String, unique=True, nullable=False)
-    filename = Column(String, nullable=False)
+    filepath = Column(FsPath, unique=True, nullable=False)
+    filename = Column(FsPath, nullable=False)
     file_hash = Column(String, nullable=False, index=True)
     file_size = Column(Integer)
 
@@ -73,8 +139,8 @@ class FileRecord(Base):
     sig_version = Column(Integer)
 
     scan_status = Column(String, default=ScanStatus.PENDING.value, index=True)
-    scan_result = Column(Text)
-    threat_name = Column(String)
+    scan_result = Column(SafeText)
+    threat_name = Column(SafeText)
     last_scanned = Column(DateTime)
 
     created_at = Column(DateTime, default=utcnow)
@@ -90,8 +156,8 @@ class DirectoryRecord(Base):
     __tablename__ = "directories"
 
     id = Column(Integer, primary_key=True)
-    directory_path = Column(String, unique=True, nullable=False)
-    directory_name = Column(String, nullable=False)
+    directory_path = Column(FsPath, unique=True, nullable=False)
+    directory_name = Column(FsPath, nullable=False)
     mtime_ns = Column(Integer)
     last_scanned = Column(DateTime)
 

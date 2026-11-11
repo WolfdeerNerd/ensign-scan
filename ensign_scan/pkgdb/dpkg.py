@@ -70,7 +70,7 @@ def _search(paths: list[str], timeout: float) -> dict[str, str] | None:
     """
     try:
         result = subprocess.run(["dpkg-query", "-S", "--", *paths], capture_output=True,
-                                text=True, timeout=timeout, env=c_locale_env())
+                                text=True, timeout=timeout, env=c_locale_env(), errors="surrogateescape")
     except (subprocess.TimeoutExpired, OSError):
         return None
     found = _parse_search(result.stdout)
@@ -80,7 +80,7 @@ def _search(paths: list[str], timeout: float) -> dict[str, str] | None:
 def _version(package: str, timeout: float) -> str | None:
     try:
         result = subprocess.run(["dpkg-query", "-W", "-f=${Version}", "--", package],
-                                capture_output=True, text=True, timeout=timeout, env=c_locale_env())
+                                capture_output=True, text=True, timeout=timeout, env=c_locale_env(), errors="surrogateescape")
     except (subprocess.TimeoutExpired, OSError):
         return None
     return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
@@ -170,7 +170,7 @@ def verify_all(timeout: float | None = None) -> VerifyResult | None:
         return None
     try:
         result = subprocess.run(["dpkg", "--verify"], capture_output=True, text=True,
-                                timeout=timeout, env=c_locale_env())
+                                timeout=timeout, env=c_locale_env(), errors="surrogateescape")
     except subprocess.TimeoutExpired:
         return VerifyResult([], 0, error=f"dpkg --verify did not finish within {timeout:.0f}s. It "
                                          f"checks every file of every installed package.")

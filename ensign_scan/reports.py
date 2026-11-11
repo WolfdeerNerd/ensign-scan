@@ -386,10 +386,13 @@ def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, in
 
 
 def list_infected(engine: Engine, paths: list[str] | None = None,
-                  files_per_threat: int = 25) -> list[dict]:
+                  files_per_threat: int = 25, more_elsewhere: bool = False) -> list[dict]:
     """Print infected files grouped by threat name, so a signature that hits
     many files (a game's assets, say) is explained once, not once per file.
-    Returns one dict per infected file, as before."""
+    Returns one dict per infected file, as before.
+
+    more_elsewhere: infections were also found that couldn't be saved (see
+    unsaved_report). Then "none found" would be false, so it isn't printed."""
     with Session(engine) as session:
         query = session.query(
             FileRecord.filepath,
@@ -403,7 +406,8 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
         rows = query.all()
 
     if not rows:
-        print("No infected files found")
+        if not more_elsewhere:
+            print("No infected files found")
         return []
 
     groups: dict[str | None, list] = {}
@@ -434,6 +438,40 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
                 print(f"\n  … and {len(group) - files_per_threat} more files with this "
                       f"threat (all are recorded in the database)")
             results.append({"filepath": filepath, "threat": threat, "scanned": scanned})
+    return results
+
+
+def unsaved_report(unsaved) -> list[dict]:
+    """Results Ensign got but couldn't save (scanner.UnsavedResult).
+
+    Printed loudly, infections first, because nothing else in the run's
+    output knows about them: every other report reads the database. Returns
+    the infected ones in list_infected()'s shape, for the alert.
+    """
+    if not unsaved:
+        return []
+    by_path = {u.path: u for u in unsaved}  # a file reached twice is listed once
+    items = sorted(by_path.values(), key=lambda u: (u.status != ScanStatus.INFECTED.value, u.path))
+    infected = [u for u in items if u.status == ScanStatus.INFECTED.value]
+
+    n = len(items)
+    colour = "red" if infected else "yellow"
+    print(f"\n[{colour}]=== {n} FILE{'S' if n != 1 else ''} SCANNED BUT NOT SAVED ===[/{colour}]")
+    print("  Ensign's database refused these results, so they aren't counted in the summary "
+          "above and will be scanned again next run.")
+    if infected:
+        print(f"[bold red]  {len(infected)} of them {'is' if len(infected) == 1 else 'are'} "
+              f"INFECTED:[/bold red]")
+    results = []
+    for u in items:
+        if u.status == ScanStatus.INFECTED.value:
+            print(f"\n  [bold red]! {shown(u.threat_name)}[/bold red]")
+            print(f"  File: {shown(u.path)}")
+            _note("›", _file_facts(u.path), label="Context", indent=2)
+            results.append({"filepath": u.path, "threat": u.threat_name, "scanned": None})
+        else:
+            print(f"  {shown(u.status)}: {shown(u.path)}")
+    print(f"  Reason: {shown(items[0].error)}")
     return results
 
 

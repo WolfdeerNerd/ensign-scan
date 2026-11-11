@@ -101,7 +101,7 @@ def owner(path: str, timeout: float = 10.0) -> tuple[str, str | None]:
         return ("unknown", None)
     try:
         result = subprocess.run(["pacman", "-Qo", "--", path], capture_output=True,
-                                text=True, timeout=timeout, env=c_locale_env())
+                                text=True, timeout=timeout, env=c_locale_env(), errors="surrogateescape")
     except (subprocess.TimeoutExpired, OSError):
         return ("unknown", None)
     match = _OWNER_RE.search(result.stdout)
@@ -131,7 +131,7 @@ def verify_all(timeout: float | None = None) -> PacmanVerifyResult | None:
     try:
         result = subprocess.run(
             ["pacman", "-Qkk"], capture_output=True, text=True, timeout=timeout,
-            env=c_locale_env(),
+            env=c_locale_env(), errors="surrogateescape",
         )
     except subprocess.TimeoutExpired:
         return PacmanVerifyResult(

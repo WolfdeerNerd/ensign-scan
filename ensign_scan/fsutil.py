@@ -86,8 +86,17 @@ def shown(text: object) -> str:
     and stop the report, and a file named "x[black on black]" hides the
     rest of its own line -- including the verdict. Newlines are shown as
     "\\n" so a name can't start a fake line of output.
+
+    A name that isn't valid UTF-8 (Python holds those bytes as "surrogate"
+    characters) is shown with the raw bytes as \\xNN -- "caf\\xe9.txt",
+    not "caf\ufffd.txt" -- so the file can actually be found from the output.
     """
-    return escape(str(text).replace("\r", "\\r").replace("\n", "\\n"))
+    text = str(text)
+    try:
+        text = text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+    except UnicodeEncodeError:
+        pass  # a stray surrogate that didn't come from a filename: leave it
+    return escape(text.replace("\r", "\\r").replace("\n", "\\n"))
 
 
 class NotScannable(OSError):
