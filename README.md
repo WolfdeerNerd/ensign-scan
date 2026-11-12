@@ -8,7 +8,7 @@ I decided to make a logic brain for this madness, Ensign. The idea was for Ensig
 
 The idea was to be as paranoid as possible when designing this. That being said, it is completely possible that someone one else will notice something I missed and that in itself, is okay.
 
-**Status: alpha.** Ensign has so far been tested only by its author, on Arch Linux. Expect rough edges, and read its reports as advice, not verdicts.
+**Status: alpha.** Ensign has so far been tested only by its author, on Arch Linux. Expect rough edges, and treat its reports as advice: you make the final call.
 
 ## Disclaimer
 Ensign is an independent project. It is not affiliated with Ensign InfoSecurity, The Ensign Group, the U.S. Navy or the U.S. Government.
@@ -101,7 +101,7 @@ Ensign never changes permissions, and never asks you to. It also never deletes, 
 - **Symlinked directories.** They are never walked into (see the Proton note below). Symlinks to individual files are followed and scanned.
 - **Excluded paths, and unchanged snapshot subtrees.** Whatever you list under `excludes` is not scanned, and subtrees under `snapshot_roots` are skipped while their modification time is unchanged.
 - **Files that vanish mid-scan.** Temp files and browser caches come and go; they are counted as skipped, not as errors.
-- **Anything ClamAV has no signature for.** Ensign is a file scanner built on ClamAV. It doesn't look at memory or running processes, and a clean result means "no known signature matched", not "safe".
+- **Anything ClamAV has no signature for.** Ensign is a file scanner built on ClamAV. It doesn't look at memory or running processes, and a clean result only means "no known signature matched". It doesn't prove a file is safe.
 
 ## How clamd Reads Your Files
 
@@ -112,7 +112,7 @@ clamd runs as its own unprivileged user, `clamav`, not as you. Ensign doesn't as
 - **Ensign refuses a clamd running as root.** clamd parses untrusted files, and ClamAV advises against running it as root. If yours does, Ensign stops before scanning anything and tells you how to fix it (`User clamav` in `clamd.conf`).
 - **A clamd without `FILDES`** (rare; it needs a local socket and a build with descriptor passing) makes Ensign fall back to asking clamd to open files itself. The run warns you, and files the `clamav` user can't read are recorded as errors.
 
-**Credential files are never opened.** A file whose path matches a high-confidence credential pattern (SSH and GPG private keys, password-manager vaults, crypto wallets, cloud credentials; see `ensign_scan/secrets.py`) is recorded as `classified` without being read, hashed or sent to clamd. Those files are what malware *steals*, not where it hides, so scanning them finds almost nothing, while reading them and storing their hash is exposure for no gain. Three exceptions keep this from becoming a hiding place:
+**Credential files are never opened.** A file whose path matches a high-confidence credential pattern (SSH and GPG private keys, password-manager vaults, crypto wallets, cloud credentials; see `ensign_scan/secrets.py`) is recorded as `classified` without being read, hashed or sent to clamd. Malware *steals* those files; it rarely hides in them. So scanning them finds almost nothing, while reading them and storing their hash is exposure for no gain. Three exceptions keep this from becoming a hiding place:
 
 - **Executables are always scanned**, even in `~/.ssh`. Credential files are never executable, so an executable there is exactly what an intruder would plant.
 - **`~/.ssh/authorized_keys`, `authorized_keys2`, `config` and `rc` are scanned and watched.** They hold no secrets, but they decide who can log in and what runs, so an intruder edits them to get back in. If one changes between runs, or appears where it didn't exist before, the run ends with an "SSH FILES CHANGED SINCE LAST RUN" section. A change you made yourself shows up there too; it's there so no change goes unnoticed.
@@ -128,7 +128,7 @@ Worker count is either set explicitly (`max_workers` in config) or resolved auto
 
 `cpu_share` (default 50) is how much of your CPU a scan may use, in percent of its threads, so you can keep using the machine while it runs. The scan workers and any `clamscan` runs share it: a `clamscan` starts only if it fits alongside the workers busy at that moment, though one always runs so large files still get scanned. Set it to 100 to let a scan have the whole machine. When clamd's `MaxThreads` is what holds Ensign below that share, the start of a scan suggests the `MaxThreads` that would reach it. Ensign never changes clamd's settings itself.
 
-If clamd can't be reached to ask, Ensign falls back to a safe default of 5 workers (fewer if `cpu_share` allows fewer) rather than guessing wildly. And no matter how constrained the machine — single core, a very low `MaxThreads` on clamd — the worker count can never drop below 1. **Ensign will always run, even on modest hardware;** it just scans one file at a time in that case rather than failing or requiring a separate no-threading mode.
+If clamd can't be reached to ask, Ensign falls back to a safe default of 5 workers (fewer if `cpu_share` allows fewer). And no matter how constrained the machine — single core, a very low `MaxThreads` on clamd — the worker count can never drop below 1. **Ensign will always run, even on modest hardware;** it just scans one file at a time in that case rather than failing or requiring a separate no-threading mode.
 
 ## Usage
 
@@ -271,7 +271,7 @@ Errors are written to one log file per run: `<data_dir>/logs/ensign-YYYYMMDD-HHM
 When a scan finds an infected file, or `--verify-packages` finds a mismatch, Ensign prints a short `ⓘ` note under it saying what the threat name or mismatch reason generally means. The point is to help you tell a false positive from something worth chasing.
 
 - **Curated notes first.** Ensign ships a small table of researched notes, and you can add your own (see Customizing below).
-- **Everything else is decoded from the name.** ClamAV names follow `Platform.Category.Name-SignatureID-Revision`, so for a name with no curated note Ensign describes what the name says. A Windows-only signature on Linux, for example, gets a **Hint** that it is often a false positive. A hint is a pointer, not a verdict.
+- **Everything else is decoded from the name.** ClamAV names follow `Platform.Category.Name-SignatureID-Revision`, so for a name with no curated note Ensign describes what the name says. A Windows-only signature on Linux, for example, gets a **Hint** that it is often a false positive. A hint is only a pointer: check the file before you decide.
 - **Findings are grouped by threat name,** so a signature that hits many files is explained once. Each file gets a context line: size, last modified date, and whether a package owns it.
 - **All local and advisory.** Nothing is looked up online, and the notes never change a scan result.
 
@@ -330,7 +330,7 @@ sqlite3 ~/.local/share/ensign/system.db "SELECT * FROM files WHERE filepath='/fu
 
 ### A note on infected results
 
-ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match on legitimate code patterns — for example, JS build tools that generate functions at runtime from template/markup content (Vue's `compiler-sfc`, Vite's dependency cache) can trigger a phishing-heuristic match despite being ordinary framework code. An `infected` status is worth investigating, not treating as an automatic threat. Check what the file actually is and, if it looks like legitimate tooling, search the threat name plus the library name before assuming compromise.
+ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match on legitimate code patterns — for example, JS build tools that generate functions at runtime from template/markup content (Vue's `compiler-sfc`, Vite's dependency cache) can trigger a phishing-heuristic match despite being ordinary framework code. Treat an `infected` status as a reason to look closer: it doesn't prove the file is malicious. Check what the file actually is and, if it looks like legitimate tooling, search the threat name plus the library name before assuming compromise.
 
 **If you're sure it's a false positive**, `--allow PATH` tells Ensign so, and you can do two more things besides:
 
