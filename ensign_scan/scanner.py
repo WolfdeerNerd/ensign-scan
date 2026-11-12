@@ -355,6 +355,9 @@ class Scanner:
         # with the clamscans.
         self._busy_workers = 0
         self._busy_lock = threading.Lock()
+        # The running pass's progress line (its advance()), for files that
+        # finish in a clamscan batch; None outside a pass.
+        self._advance = None
         self._warned_clamscan: set[str] = set()
 
     def prepare_clamd(self) -> None:
@@ -724,20 +727,28 @@ class Scanner:
         progress line pinned under the per-file output. Returns the hashes
         (None for failures) in input order."""
         with RunProgress(label, len(paths), self.workers) as bar:
-            def work(path) -> str | None:
-                with self._busy_lock:
-                    self._busy_workers += 1
-                try:
-                    digest, status = self._process_file(path, scan)
-                finally:
+            # A file queued for clamscan is counted when clamscan's result is
+            # recorded, not when it is queued, and the line stays up until
+            # the last clamscan is done: the run isn't finished before that.
+            self._advance = bar.advance
+            try:
+                def work(path) -> str | None:
                     with self._busy_lock:
-                        self._busy_workers -= 1
-                bar.advance(status)
-                return digest
+                        self._busy_workers += 1
+                    try:
+                        digest, status = self._process_file(path, scan)
+                    finally:
+                        with self._busy_lock:
+                            self._busy_workers -= 1
+                    if status != "queued":
+                        bar.advance(status)
+                    return digest
 
-            with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                results = list(pool.map(work, paths))
-        self.scan_oversized()
+                with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                    results = list(pool.map(work, paths))
+                self.scan_oversized()
+            finally:
+                self._advance = None
         return results
 
     def process_file(self, path: Path | str, scan: bool = True) -> str | None:
@@ -909,13 +920,21 @@ class Scanner:
               f"[dim]{alongside}[/dim]")
         try:
             outcomes = self._clamscan_outcomes(batch, total)
+        except Exception as exc:  # every file still gets a result, and is counted
+            log.exception("clamscan batch failed")
+            outcomes = {item.fd_was: ScanOutcome(ScanStatus.ERROR, f"clamscan: {exc}")
+                        for item in batch}
         finally:
             _close_queued(batch)
+        advance = self._advance
         for item in batch:
+            status = ScanStatus.ERROR.value
             try:
-                self._finish(item.path, item.st, item.digest, outcomes[item.fd_was])
+                status = self._finish(item.path, item.st, item.digest, outcomes[item.fd_was])[1]
             except Exception:  # one file failing to record must not drop the rest
                 log.exception("could not record the clamscan result for %s", item.path)
+            if advance is not None:
+                advance(status)
 
     def _clamscan_outcomes(self, batch: list[_Oversized], total: int) -> dict[int, ScanOutcome]:
         def not_scanned(why: str) -> dict[int, ScanOutcome]:
