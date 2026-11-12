@@ -207,7 +207,7 @@ PCREMaxFileSize 2000M
 
 ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This is a limit in ClamAV itself, and its developers have said so. Ensign marks those files **not fully scanned** and lists them at the end of each run, never as clean. They are hashed and tracked, so a changed one is looked at again.
 
-`clamscan` reads the files through descriptors Ensign has already opened, the same way clamd does, so it never reopens a file by name. Run under `sudo`, Ensign starts `clamscan` as the `clamav` user, not as root: like clamd, it parses untrusted files.
+`clamscan` unpacks archives in `/var/tmp` rather than `/tmp`, which on many systems (Arch among them) is held in RAM. `clamscan` reads the files through descriptors Ensign has already opened, the same way clamd does, so it never reopens a file by name. Run under `sudo`, Ensign starts `clamscan` as the `clamav` user, not as root: like clamd, it parses untrusted files.
 
 `AlertExceedsMax yes` in clamd.conf is worth setting. Without it, clamd also says "OK" for an archive that unpacks to more than `MaxScanSize`, and Ensign can't tell from the file's size. With it, clamd flags these, and Ensign rescans them with `clamscan` (it doesn't count them as infected).
 

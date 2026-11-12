@@ -235,6 +235,16 @@ def process_memory(pid: int) -> int | None:
 
 # --- clamscan, for what clamd won't scan --------------------------------------
 
+def clamscan_temp_dir() -> str:
+    """Where clamscan unpacks archives. clamscan's own default is /tmp, which
+    on many systems (Arch among them) is held in RAM: several clamscans
+    unpacking large archives there would use memory outside Ensign's budget.
+    /var/tmp is on disk and writable by everyone. Not clamd's
+    TemporaryDirectory: that is often writable only by the clamav user,
+    and clamscan runs as you unless Ensign runs as root."""
+    return "/var/tmp" if os.path.isdir("/var/tmp") else "/tmp"
+
+
 def clamscan_user() -> tuple[int, int] | None:
     """(uid, gid) to run clamscan as. As root, the 'clamav' user, for the
     same reason Ensign refuses a root clamd: clamscan parses untrusted
@@ -269,7 +279,7 @@ def scan_fds_with_clamscan(
     """
     argv = ["clamscan", "--no-summary", "--stdout",
             "--max-filesize=0", "--max-scansize=0", "--pcre-max-filesize=0",
-            "--alert-exceeds-max"]
+            "--alert-exceeds-max", f"--tempdir={clamscan_temp_dir()}"]
     if limits.database_dir:
         argv.append(f"--database={limits.database_dir}")
     argv += [f"/proc/self/fd/{fd}" for fd in fds]

@@ -150,8 +150,24 @@ class _Oversized:
     """A large file waiting for clamscan: hashed, and still open."""
     path: Path
     st: os.stat_result
-    fd: int
+    fd: int          # -1 once closed
     digest: str
+    fd_was: int = -1  # the number it had, to look up its clamscan result
+
+    def __post_init__(self) -> None:
+        self.fd_was = self.fd
+
+
+def _close_queued(batch: list[_Oversized]) -> None:
+    """Close each queued file's descriptor exactly once. A number is marked
+    closed as soon as it is: the kernel hands closed numbers straight out
+    again, to another file, clamd's socket or the database, and closing one
+    a second time would close that instead."""
+    for item in batch:
+        if item.fd >= 0:
+            fd, item.fd = item.fd, -1
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 class _ClamscanPool:
@@ -224,9 +240,7 @@ class _ClamscanPool:
             self._run_batch(batch, running)
         except Exception:  # a batch must never take the scan down with it
             log.exception("clamscan batch failed")
-            for item in batch:
-                with contextlib.suppress(OSError):
-                    os.close(item.fd)
+            _close_queued(batch)
         finally:
             with self._cond:
                 del self._started[me]
@@ -872,10 +886,12 @@ class Scanner:
         try:
             outcomes = self._clamscan_outcomes(batch, total)
         finally:
-            for item in batch:
-                os.close(item.fd)
+            _close_queued(batch)
         for item in batch:
-            self._finish(item.path, item.st, item.digest, outcomes[item.fd])
+            try:
+                self._finish(item.path, item.st, item.digest, outcomes[item.fd_was])
+            except Exception:  # one file failing to record must not drop the rest
+                log.exception("could not record the clamscan result for %s", item.path)
 
     def _clamscan_outcomes(self, batch: list[_Oversized], total: int) -> dict[int, ScanOutcome]:
         def not_scanned(why: str) -> dict[int, ScanOutcome]:
