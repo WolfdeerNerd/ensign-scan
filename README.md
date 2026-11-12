@@ -140,7 +140,7 @@ The examples below are written as `python3 main.py` (running from a checkout). I
 
 1. Make sure ClamAV's daemon is running (Ensign tells you if it isn't): `sudo systemctl start clamav-daemon`
 2. Run Ensign on a small tree, as your own username: `python3 path/to/main.py ~/Downloads`
-3. If clamd couldn't read some files, the run ends with a "FILES CLAMD COULD NOT READ" section saying what usually causes it.
+3. If some files couldn't be scanned, the end of the run says which and what usually causes it: "FILES ENSIGN COULD NOT OPEN" for files your user can't read (often ones owned by root), and "FILES CLAMD COULD NOT READ" for files clamd was refused (often AppArmor or SELinux confining clamd).
 
 For a full scan, you only need to run:
 ```
