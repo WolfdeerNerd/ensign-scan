@@ -361,6 +361,7 @@ class Scanner:
         # with the clamscans.
         self._busy_workers = 0
         self._busy_lock = threading.Lock()
+        self._worker_state = threading.local()  # .busy: this thread is counted in _busy_workers
         # The running pass's progress line (its advance()), for files that
         # finish in a clamscan batch; None outside a pass.
         self._advance = None
@@ -741,9 +742,11 @@ class Scanner:
                 def work(path) -> str | None:
                     with self._busy_lock:
                         self._busy_workers += 1
+                    self._worker_state.busy = True
                     try:
                         digest, status = self._process_file(path, scan)
                     finally:
+                        self._worker_state.busy = False
                         with self._busy_lock:
                             self._busy_workers -= 1
                     if status != "queued":
@@ -887,7 +890,20 @@ class Scanner:
             if batch is not None:
                 self._oversized, self._oversized_bytes = [], 0
         if batch is not None:
-            self._clamscan_pool().submit(batch)
+            # A worker waiting for room in the clamscan queue uses no CPU, so
+            # it stops counting against the CPU budget while it waits:
+            # otherwise workers stuck here would hold the budget and keep the
+            # very clamscans they wait on from starting.
+            counted = getattr(self._worker_state, "busy", False)
+            if counted:
+                with self._busy_lock:
+                    self._busy_workers -= 1
+            try:
+                self._clamscan_pool().submit(batch)
+            finally:
+                if counted:
+                    with self._busy_lock:
+                        self._busy_workers += 1
 
     def scan_oversized(self) -> None:
         """Scan every queued large file and wait until all of them are done.

@@ -600,6 +600,48 @@ print("non-blocking workers test passed ✓")
 assert Config._from_dict({"max_clamscans": 3}, "t").max_clamscans == 3
 print("max_clamscans setting test passed ✓")
 
+# --- a worker waiting for room in the clamscan queue doesn't count as using CPU ---------------
+# 8 CPU threads at cpu_share 50% = a budget of 4; 4 workers; up to 3 clamscans. The workers
+# fill the queue and wait. If waiting workers still counted as busy, they'd hold the whole
+# budget and only the one guaranteed clamscan could run: 20 batches of 0.5 s one at a time
+# is 10 s. With them not counted, up to 3 run at once: about 3.5 s.
+real = (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
+        scanner_mod.clamscan_user, scanner_mod._CLAMSCAN_BATCH, scanner_mod.memory_available)
+real_cpu_count = os.cpu_count
+
+
+def half_second_clamscan(fds, limits, timeout, run_as=None, on_result=None):
+    time.sleep(0.5)
+    return {fd: ScanOutcome(ScanStatus.CLEAN, "clamscan: OK") for fd in fds}
+
+
+try:
+    scanner_mod.scan_fds_with_clamscan = half_second_clamscan
+    scanner_mod.clamscan_cli_available = lambda: True
+    scanner_mod.clamscan_user = lambda: None
+    scanner_mod._CLAMSCAN_BATCH = 2
+    scanner_mod.memory_available = lambda: (60 * GiB, 64 * GiB)
+    os.cpu_count = lambda: 8
+    with tempfile.TemporaryDirectory() as d:
+        tree = Path(d, "t")
+        tree.mkdir()
+        for i in range(40):
+            (tree / f"big{i}.bin").write_bytes(b"x" * 4096)
+        config = Config(db_url=f"sqlite:///{d}/s.db", log_file=Path(d, "e.txt"),
+                        max_workers=4, max_clamscans=3)
+        s = Scanner(config, clamd=FakeClamd())
+        t0 = time.monotonic()
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.scan_tree(tree)
+        took = time.monotonic() - t0
+finally:
+    (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
+     scanner_mod.clamscan_user, scanner_mod._CLAMSCAN_BATCH, scanner_mod.memory_available) = real
+    os.cpu_count = real_cpu_count
+assert s._busy_workers == 0, "every worker counted back out"
+assert took < 0.7 * 20 * 0.5, f"waiting workers must not hold the CPU budget: took {took:.1f}s of a 10s one-at-a-time run"
+print("waiting workers free the CPU budget test passed ✓")
+
 
 # --- advice to raise clamd's MaxThreads, only when the CPU could take more ------------------------
 class ThreadsClamd(FakeClamd):
