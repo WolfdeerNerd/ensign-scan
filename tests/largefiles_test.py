@@ -406,15 +406,17 @@ try:
             config = Config(db_url=f"sqlite:///{d}/w.db", log_file=Path(d, "e.txt"), **cfg)
             s = Scanner(config, clamd=ThreadsClamd(clamd_threads))
             return s.workers, s.thread_hint()
+        # At most 3/4 of the CPU threads: 12 threads -> 9, 16 -> 12, 24 or more -> 14.
         workers, tip = hint(7, 12)
-        assert workers == 5 and "MaxThreads 7 limits Ensign to 5" in tip and "MaxThreads 12" in tip \
-            and "would allow 10" in tip, tip
+        assert workers == 5 and "MaxThreads 7 limits Ensign to 5" in tip and "MaxThreads 9" in tip \
+            and "would allow 7, leaving 5 CPU threads free" in tip, tip
+        workers, tip = hint(7, 16)
+        assert "MaxThreads 12" in tip and "would allow 10, leaving 6" in tip, tip
         workers, tip = hint(7, 32)
         assert "MaxThreads 14" in tip and "would allow 12" in tip, f"capped at 12 workers: {tip}"
-        workers, tip = hint(7, 8)
-        assert "MaxThreads 8" in tip and "would allow 6" in tip, f"never past the CPU count: {tip}"
-        assert hint(7, 6)[1] is None, "CPU already the limit: nothing to suggest"
-        assert hint(7, 7)[1] is None
+        assert hint(7, 8)[1] is None, "3/4 of 8 is 6, below the current 7: nothing to suggest"
+        assert hint(7, 6)[1] is None
+        assert hint(9, 12)[1] is None, "already at 3/4"
         assert hint(14, 32)[1] is None, "already at Ensign's maximum"
         assert hint(None, 32)[1] is None, "clamd didn't say: no advice"
         assert hint(7, 32, max_workers=3)[1] is None, "workers set by hand: no advice"
