@@ -83,6 +83,7 @@ conf = parse_clamd_config(
     "MaxFileSize 25M\n"
     "MaxScanSize   1G   # trailing comment\n"
     "MaxFileSize 300M\n"             # the last one wins, as in clamd
+    "PCREMaxFileSize 2000M\n"
     "DatabaseDirectory /var/lib/clamav\n"
     "AlertExceedsMax yes\n",
     "test",
@@ -91,7 +92,9 @@ assert conf.max_file_size == 300 * 2**20 and conf.max_scan_size == 2**30, conf
 assert conf.database_dir == "/var/lib/clamav" and conf.alert_exceeds_max
 assert conf.scan_limit == 300 * 2**20, "the smaller of the two limits"
 assert parse_clamd_config("MaxFileSize 512\nMaxScanSize 4k", "t").scan_limit == 512, "bytes and K"
-unlimited = parse_clamd_config("MaxFileSize 0\nMaxScanSize 0", "t")
+assert parse_clamd_config("MaxFileSize 2000M\nMaxScanSize 4000M", "t").scan_limit == 100 * 2**20, \
+    "PCREMaxFileSize (default 100M) counts too: regex signatures skip files past it"
+unlimited = parse_clamd_config("MaxFileSize 0\nMaxScanSize 0\nPCREMaxFileSize 0", "t")
 assert unlimited.scan_limit == 2000 * 2**20, "0 = no setting, but ClamAV's own ceiling still applies"
 assert parse_clamd_config("", "t").scan_limit == 100 * 2**20, "missing settings: ClamAV's defaults"
 assert parse_clamd_config("MaxFileSize lots", "t").max_file_size == 100 * 2**20, "unparsable: the default"
@@ -402,13 +405,19 @@ with tempfile.TemporaryDirectory() as d:
         fh.truncate(2049 * 2**20)
     clean = Path(d, "clean.bin")
     clean.write_bytes(b"nothing here " * 1000)
-    fds = [os.open(p, os.O_RDONLY) for p in (padded, huge, clean)]
+    regex = Path(d, "regex-past-100m.bin")      # only a regex (PCRE) signature matches this
+    with open(regex, "wb") as fh:
+        fh.write(b"ENSIGN-PCRE" + b"-TEST-MARKER")
+        fh.truncate(150 * 2**20)
+    fds = [os.open(p, os.O_RDONLY) for p in (padded, huge, clean, regex)]
     try:
         got = scan_fds_with_clamscan(fds, limits, timeout=600)
     finally:
         for fd in fds:
             os.close(fd)
-    padded_r, huge_r, clean_r = (got[fd] for fd in fds)
+    padded_r, huge_r, clean_r, regex_r = (got[fd] for fd in fds)
+    assert regex_r.status == ScanStatus.INFECTED and "PCRE" in regex_r.threat_name, \
+        f"regex signatures must apply past PCREMaxFileSize too: {regex_r}"
     assert padded_r.status == ScanStatus.INFECTED and "EICAR" in padded_r.threat_name.upper(), padded_r
     assert huge_r.status == ScanStatus.INCOMPLETE, f"ClamAV can't scan past ~2 GiB: {huge_r}"
     assert huge_r.threat_name == "Heuristics.Limits.Exceeded.MaxFileSize", huge_r

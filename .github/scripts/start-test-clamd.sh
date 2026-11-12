@@ -61,6 +61,13 @@ body="EICAR-STANDARD"
 body+="-ANTIVIRUS-TEST-FILE"
 body_hex=$(printf '%s' "$body" | od -An -tx1 | tr -d ' \n')
 echo "Ensign.Test.EICAR-Body:0:*:$body_hex" > "$DB/ensign-test.ndb"
+# .ldb with a regex (PCRE) subsignature: ClamAV skips these for files past
+# PCREMaxFileSize (100M by default), which Ensign must switch off for the
+# files it sends to clamscan. Trigger: the hex of "ENSIGN-PCRE"; then the
+# regex. (Halves again, so this script doesn't match it.)
+marker="ENSIGN-PCRE"
+trigger_hex=$(printf '%s' "$marker" | od -An -tx1 | tr -d ' \n')
+echo "Ensign.Test.PCRE;Engine:81-255,Target:0;0&1;$trigger_hex;0/ENSIGN-PCRE-TEST[-]MARKER/" > "$DB/ensign-test.ldb"
 chown -R clamav:clamav "$DB"
 
 cat > "$CONF" <<CONF

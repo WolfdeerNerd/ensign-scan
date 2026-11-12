@@ -195,7 +195,15 @@ clamd skips any file larger than its `MaxFileSize` or `MaxScanSize` setting (100
 
 One always runs, so large files are always scanned. `max_clamscans` caps how many run at once (0 = auto: up to half your CPU cores, at most 8).
 
-Faster still: raise `MaxFileSize` (up to `2000M`) and `MaxScanSize` (e.g. `4000M`) in clamd.conf and restart clamd. Ensign reads the new limits, and clamd, which already has the signatures loaded and scans with several threads, handles those files itself. Large files you scanned with Ensign 0.4.0 or older were never really checked, so they are rescanned once.
+Faster still: raise these together in clamd.conf and restart clamd. Ensign reads the new limits, and clamd, which already has the signatures loaded and scans with several threads, handles those files itself:
+
+```
+MaxFileSize 2000M
+MaxScanSize 4000M
+PCREMaxFileSize 2000M
+```
+
+`PCREMaxFileSize` matters too: signatures that use regular expressions are skipped for files past it (100M by default), and clamd still answers "OK". Ensign counts it as one of clamd's limits, and switches it off for `clamscan`. Large files you scanned with Ensign 0.4.0 or older were never really checked, so they are rescanned once.
 
 ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This is a limit in ClamAV itself, and its developers have said so. Ensign marks those files **not fully scanned** and lists them at the end of each run, never as clean. They are hashed and tracked, so a changed one is looked at again.
 
