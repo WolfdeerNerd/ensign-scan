@@ -157,6 +157,8 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
         infected.unlink()
         run("--purge-missing", "--config", str(config), cwd=work)
         assert str(infected) not in rows(db), "--purge-missing kept a deleted file"
+        out = run("--config", str(config), "--clamav-report", str(clean), expect=1, cwd=work)
+        assert "clamd is not answering" in out and "Traceback" not in out, out
         print("no-clamd run test passed ✓")
         print("\nAll installed-CLI tests passed ✓ (scanning tests skipped: set ENSIGN_TEST_CLAMD_SOCKET)")
         sys.exit(0)
