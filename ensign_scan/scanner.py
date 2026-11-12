@@ -441,7 +441,7 @@ class Scanner:
         return (f"Tip: clamd's MaxThreads {clamd_max} limits Ensign to {workers} workers. "
                 f"This machine has {cpus} CPU threads: MaxThreads {suggested} in clamd.conf "
                 f"would allow {suggested - _CLAMD_HEADROOM}, still leaving {_CLAMD_HEADROOM} free. "
-                f"Restart clamd after changing it.")
+                f"If you change it, restart clamd.")
 
     # ------------------------------------------------------------------
     # Tree scanning
