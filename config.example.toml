@@ -23,6 +23,13 @@ max_clamscans = 0
 # The most memory those clamscans may use together, as a percent of total
 # RAM, however much happens to be free (5-75; one always runs).
 clamscan_memory_percent = 25
+
+# ClamAV can't scan files over about 2 GiB at all. true = after each scan,
+# sweep such files in overlapping slices through clamd: it finds malware
+# bytes sitting in the raw file, but not inside compressed archives, so a
+# swept file is never called clean. Reads each one once more, only when it
+# is new or has changed. --sweep runs it for a single scan.
+sweep_huge_files = false
 rescan_after_days = 90
 
 # Rescan an unchanged, previously-clean file once the virus-signature

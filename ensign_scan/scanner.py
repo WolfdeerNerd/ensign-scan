@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from rich import print
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from . import allowlist, secrets
@@ -133,6 +134,20 @@ _CLAMSCAN_LOADING_SECONDS = 60.0
 # against cpu_share alongside the scan workers.
 _CLAMSCAN_AUTO_MAX = 8
 
+# The sweep (sweep_huge()): files ClamAV can't scan whole are read in slices
+# of up to this size, each passed to clamd like any file, never larger than
+# clamd will scan. Slices overlap, so a signature cut in two by a slice
+# boundary is still found whole in one of them.
+_SWEEP_SLICE_MAX = 256 * 2**20
+_SWEEP_OVERLAP_MAX = 2**20
+# scan_result of a file the sweep flagged ("sweep: ... FOUND ..."), and of
+# one it swept and found nothing in ("swept: ..."). The rescan passes leave
+# sweep verdicts alone: a whole-file rescan can't see what the sweep saw,
+# and would quietly turn "infected" back into "not fully scanned".
+SWEEP_HIT_PREFIX = "sweep: "
+SWEPT_PREFIX = "swept: "
+_HEURISTIC_PREFIX = "Heuristics."
+
 
 def _mib(n: int) -> str:
     return f"{n / 2**20:,.0f} MiB"
@@ -172,6 +187,32 @@ def _close_queued(batch: list[_Oversized]) -> None:
             fd, item.fd = item.fd, -1
             with contextlib.suppress(OSError):
                 os.close(fd)
+
+
+def _not_from_sweep():
+    """Rows the sweep hasn't judged (scan_result neither "sweep:" nor
+    "swept:"). A whole-file rescan of the others can't learn anything --
+    ClamAV refuses them again -- and would only wipe the sweep's verdict;
+    the sweep re-checks them itself when the signatures move on. NULL
+    counts as not judged: NOT LIKE alone would drop NULL rows."""
+    return or_(FileRecord.scan_result.is_(None),
+               and_(~FileRecord.scan_result.like(f"{SWEEP_HIT_PREFIX}%"),
+                    ~FileRecord.scan_result.like(f"{SWEPT_PREFIX}%")))
+
+
+def _sweep_slices(size: int, slice_size: int, overlap: int) -> list[tuple[int, int]]:
+    """(start, end) byte ranges covering 0..size, each at most slice_size
+    long, each overlapping the next by `overlap` bytes."""
+    if size <= 0:
+        return []
+    step = slice_size - overlap
+    ranges, start = [], 0
+    while True:
+        end = min(start + slice_size, size)
+        ranges.append((start, end))
+        if end >= size:
+            return ranges
+        start += step
 
 
 class _ClamscanPool:
@@ -283,6 +324,9 @@ class _Known(NamedTuple):
     # Recorded as INCOMPLETE because clamscan couldn't be run (not
     # installed, or root with no clamav user): scan_result "not scanned:".
     clamscan_missing: bool = False
+    # A verdict from the sweep (scan_result "sweep: ..."): only the sweep
+    # itself, or a change to the file, may replace it.
+    by_sweep: bool = False
 
 
 @dataclass(frozen=True)
@@ -667,7 +711,7 @@ class Scanner:
         # Allowed files too: newer signatures may have fixed the false
         # positive (it turns clean) or flag it with something else (infected).
         if threshold <= 0 or current is None or prev.status not in (
-                ScanStatus.CLEAN.value, ScanStatus.ALLOWED.value):
+                ScanStatus.CLEAN.value, ScanStatus.ALLOWED.value) or prev.by_sweep:
             return False
         if prev.sig_version is None:
             return True  # clean under an unknown database: can't vouch for it
@@ -683,8 +727,10 @@ class Scanner:
                 FileRecord.ctime_ns, FileRecord.scan_status, FileRecord.sig_version,
                 FileRecord.scan_result.like("clamscan:%"),
                 FileRecord.scan_result.like("not scanned:%"),
+                FileRecord.scan_result.like(f"{SWEEP_HIT_PREFIX}%"),
             ).filter(path_under(FileRecord.filepath, str(root))).all()
-        return {row[0]: _Known(*row[1:6], bool(row[6]), bool(row[7])) for row in rows if row[2] is not None}
+        return {row[0]: _Known(*row[1:6], bool(row[6]), bool(row[7]), bool(row[8]))
+                for row in rows if row[2] is not None}
 
     # ------------------------------------------------------------------
     # Snapshot-subtree pruning
@@ -1018,6 +1064,153 @@ class Scanner:
         return scan_fds_with_clamscan([item.fd for item in batch], self.limits or DEFAULT_LIMITS,
                                       timeout, run_as, on_result=on_result)
 
+    # ------------------------------------------------------------------
+    # The sweep: files too large for ClamAV, in slices
+    # ------------------------------------------------------------------
+
+    def sweep_huge(self, roots: list[str] | None = None) -> int:
+        """Sweep files ClamAV refused as too large (over ~2 GiB), within
+        `roots` (None: everywhere), that haven't been swept since they last
+        changed. Returns how many were swept.
+
+        Also re-swept: files the sweep already judged ("sweep:" hits, allowed
+        or not, and "swept:" misses) once the signatures have moved on by
+        rescan_after_signature_updates, so a fixed false positive or a new
+        signature applies to them too.
+
+        Each file is read in overlapping slices, and each slice goes to
+        clamd like an ordinary file -- through an in-memory file (memfd)
+        the kernel copies the bytes into, never a copy on disk. A signature
+        match in any slice flags the whole file as infected ("sweep: ...").
+        What the sweep can't see -- inside compressed archives, whole-file
+        hash signatures, file-structure checks -- it can't vouch for, so a
+        sweep that finds nothing leaves the file "not fully scanned"
+        ("swept: ..."), never clean. Heuristic hits (Heuristics.*) on a slice
+        are noted, not flagged: a slice isn't a real file, and structure
+        heuristics misfire on fragments.
+        """
+        self.prepare_clamd()
+        self._sig_version = self.clamd.signature_version()
+        unswept = and_(
+            FileRecord.scan_status == ScanStatus.INCOMPLETE.value,
+            FileRecord.threat_name == f"{LIMITS_EXCEEDED_PREFIX}.MaxFileSize",
+            FileRecord.scan_result.like("clamscan:%"),  # ClamAV's own refusal, not yet swept
+        )
+        criteria = [unswept]
+        threshold = self.config.rescan_after_signature_updates
+        if threshold > 0 and self._sig_version is not None:
+            judged = or_(FileRecord.scan_result.like(f"{SWEEP_HIT_PREFIX}%"),
+                         FileRecord.scan_result.like(f"{SWEPT_PREFIX}%"))
+            stale = or_(FileRecord.sig_version.is_(None),
+                        FileRecord.sig_version <= self._sig_version - threshold,
+                        FileRecord.sig_version > self._sig_version)
+            criteria = [or_(unswept, and_(judged, stale))]
+        if roots:
+            criteria.append(or_(*[c for r in roots for c in (
+                FileRecord.filepath == str(r).rstrip("/"), path_under(FileRecord.filepath, str(r)))]))
+        with Session(self.engine) as session:
+            rows = session.query(FileRecord.filepath, FileRecord.file_hash, FileRecord.file_size,
+                                 FileRecord.mtime_ns, FileRecord.ctime_ns).filter(*criteria).all()
+        print(f"\nSweeping {len(rows)} file(s) too large for ClamAV…")
+        if not rows:
+            return 0
+        limit = self._scan_limit()
+        slice_size = min(_SWEEP_SLICE_MAX, limit - 1)  # clamd must scan each slice whole
+        overlap = min(_SWEEP_OVERLAP_MAX, slice_size // 4)
+        if slice_size < 4096:
+            print(f"[yellow]! clamd's limits ({human_size(limit)}) are too small to sweep "
+                  f"in slices. Skipping the sweep.[/yellow]")
+            return 0
+        # Slices in flight at once: up to the worker count, as memory allows
+        # (each is held in RAM while clamd reads it).
+        mem = memory_available()
+        room = 1
+        if mem is not None:
+            free, total = mem
+            reserve = max(_MEMORY_RESERVE_MIN, int(total * _MEMORY_RESERVE_FRACTION))
+            room = max(1, (free - reserve) // slice_size)
+        in_flight = max(1, min(self.workers, room))
+        swept = 0
+        for filepath, digest, size, mtime_ns, ctime_ns in rows:
+            if self._sweep_one(Path(filepath), digest, size, mtime_ns, ctime_ns,
+                               slice_size, overlap, in_flight):
+                swept += 1
+        return swept
+
+    def _sweep_one(self, path: Path, digest: str, size: int, mtime_ns: int, ctime_ns: int,
+                   slice_size: int, overlap: int, in_flight: int) -> bool:
+        try:
+            fd, st = open_for_scan(path)
+        except (OSError, NotScannable) as exc:
+            print(f"[yellow]~ {shown(path.name)}: couldn't open it to sweep ({exc}); skipped[/yellow]")
+            return False
+        try:
+            if (st.st_size, st.st_mtime_ns, st.st_ctime_ns) != (size, mtime_ns, ctime_ns):
+                # Changed since it was hashed: the next scan picks it up.
+                print(f"[dim]~ {shown(path.name)} changed since it was scanned; "
+                      f"it will be swept after the next scan[/dim]")
+                return False
+            ranges = _sweep_slices(st.st_size, slice_size, overlap)
+            print(f"[dim]→ sweeping {shown(path.name)} ({human_size(st.st_size)}) "
+                  f"in {len(ranges)} slices[/dim]")
+            found: list[tuple[str, int, int]] = []    # (signature, start, end)
+            notes: list[str] = []                     # heuristic hits, errors
+            stop = threading.Event()
+
+            def scan_slice(span: tuple[int, int]) -> None:
+                if stop.is_set():
+                    return
+                start, end = span
+                mfd = os.memfd_create("ensign-sweep", os.MFD_CLOEXEC)
+                try:
+                    offset, remaining = start, end - start
+                    while remaining:
+                        copied = os.sendfile(mfd, fd, offset, min(remaining, 64 * 2**20))
+                        if copied == 0:
+                            break
+                        offset += copied
+                        remaining -= copied
+                    outcome = self.clamd.scan_fd(mfd, label=f"{path} [bytes {start}-{end}]")
+                finally:
+                    os.close(mfd)
+                if outcome.status == ScanStatus.INFECTED:
+                    name = outcome.threat_name or "Unknown"
+                    if name.startswith(_HEURISTIC_PREFIX):
+                        notes.append(f"{name} in bytes {start}-{end} (heuristic, not counted)")
+                    else:
+                        found.append((name, start, end))
+                        stop.set()  # one real hit decides it
+                elif outcome.status == ScanStatus.ERROR:
+                    notes.append(f"bytes {start}-{end} couldn't be swept ({outcome.raw[-80:]})")
+
+            with ThreadPoolExecutor(max_workers=in_flight) as pool:
+                list(pool.map(scan_slice, ranges))
+        finally:
+            os.close(fd)
+
+        if found:
+            name, start, end = min(found, key=lambda f: f[1])
+            raw = (f"{SWEEP_HIT_PREFIX}{name} FOUND in bytes {start}-{end} of {st.st_size}. "
+                   f"ClamAV can't scan this file whole; the sweep found this signature in it.")
+            self._finish(path, st, digest, ScanOutcome(ScanStatus.INFECTED, raw, name))
+            return True
+        summary = f"{SWEPT_PREFIX}nothing found in the raw bytes ({len(ranges)} slices); not a full scan"
+        if notes:
+            summary += ". Notes: " + "; ".join(notes[:5])
+        # Still not fully scanned (also if an earlier sweep had flagged it and
+        # newer signatures no longer match), stamped with the signatures used.
+        with Session(self.engine) as session:
+            session.query(FileRecord).filter(FileRecord.filepath == str(path)).update({
+                FileRecord.scan_status: ScanStatus.INCOMPLETE.value,
+                FileRecord.threat_name: f"{LIMITS_EXCEEDED_PREFIX}.MaxFileSize",
+                FileRecord.scan_result: summary,
+                FileRecord.sig_version: self._sig_version,
+                FileRecord.last_scanned: utcnow(),
+            })
+            session.commit()
+        print(f"{_STATUS_SYMBOLS[ScanStatus.INCOMPLETE.value]} {shown(path.name):.<50} swept, nothing found")
+        return True
+
     def _remember_unsaved(self, path: Path, outcome: ScanOutcome | None, exc: Exception) -> None:
         """A result the database refused: say so now, keep it for the report."""
         status = outcome.status.value if outcome else "not scanned"
@@ -1148,7 +1341,7 @@ class Scanner:
     # ------------------------------------------------------------------
 
     def rescan_infected(self) -> None:
-        self._rescan("infected", FileRecord.scan_status == ScanStatus.INFECTED.value)
+        self._rescan("infected", FileRecord.scan_status == ScanStatus.INFECTED.value, _not_from_sweep())
 
     def rescan_errors(self) -> None:
         self._rescan("errored", FileRecord.scan_status == ScanStatus.ERROR.value)
@@ -1159,6 +1352,7 @@ class Scanner:
         self._rescan(
             f"stale (>{days} days)",
             (FileRecord.last_scanned < cutoff) | (FileRecord.last_scanned.is_(None)),
+            _not_from_sweep(),
         )
 
     def _rescan(self, label: str, *criteria) -> None:
