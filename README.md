@@ -188,7 +188,12 @@ A scan's exit code says how it went, so a script or a scheduled run can act on i
 
 ### Large files
 
-clamd skips any file larger than its `MaxFileSize` or `MaxScanSize` setting (100 MiB and 400 MiB by default), and still answers "OK" for it. Ensign doesn't take that answer. It reads the limits from clamd's config and sends larger files to `clamscan` instead, with the limits switched off. `clamscan` comes with ClamAV. Each `clamscan` run loads its own copy of the signatures, which takes seconds and about as much memory as clamd uses. So Ensign scans large files in batches of up to 64, alongside the files clamd scans. Several batches run at once when there's memory for it. Before each one starts, Ensign checks free memory again and starts it only if another copy of the signatures fits, with a reserve left over (the larger of 2 GiB or 10% of RAM). Starting a game mid-scan stops it adding more. One always runs, so large files are always scanned. `max_clamscans` in the config caps how many run at once (0 = auto: up to half your CPU cores, at most 8).
+clamd skips any file larger than its `MaxFileSize` or `MaxScanSize` setting (100 MiB and 400 MiB by default), and still answers "OK" for it. Ensign doesn't take that answer. It reads the limits from clamd's config and sends larger files to `clamscan` instead, with the limits switched off. `clamscan` comes with ClamAV. Each `clamscan` run loads its own copy of the signatures, which takes seconds and about as much memory as clamd uses. So Ensign scans large files in batches of up to 64, alongside the files clamd scans. Several batches run at once when there's memory for it, within two limits checked before each one starts:
+
+- **A fixed budget.** All of them together use at most `clamscan_memory_percent` of your RAM (default 25%, allowed 5–75), however much happens to be free. On 16 GB that's 4 GB, about two copies of the signatures.
+- **What's free right now.** Another copy must also fit in free memory with a reserve left over (the larger of 2 GiB or 10% of RAM), so starting a game mid-scan stops it adding more.
+
+One always runs, so large files are always scanned. `max_clamscans` caps how many run at once (0 = auto: up to half your CPU cores, at most 8).
 
 Faster still: raise `MaxFileSize` (up to `2000M`) and `MaxScanSize` (e.g. `4000M`) in clamd.conf and restart clamd. Ensign reads the new limits, and clamd, which already has the signatures loaded and scans with several threads, handles those files itself. Large files you scanned with Ensign 0.4.0 or older were never really checked, so they are rescanned once.
 

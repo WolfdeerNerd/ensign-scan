@@ -298,7 +298,7 @@ GiB = 2**30
 
 
 def run_pool(limit: int, per_copy: int, memory, batches: int = 6, work: float = 0.3,
-             fail: bool = False):
+             fail: bool = False, percent: int = 25):
     """Run `batches` fake batches through a pool with free memory reported as
     `memory` (a (MemAvailable, MemTotal) pair, or None). Returns the pool and
     the most batches seen waiting or running at any submit."""
@@ -310,7 +310,7 @@ def run_pool(limit: int, per_copy: int, memory, batches: int = 6, work: float = 
         if fail:
             raise RuntimeError("clamscan exploded")
 
-    pool = scanner_mod._ClamscanPool(limit, per_copy, run_batch)
+    pool = scanner_mod._ClamscanPool(limit, per_copy, run_batch, percent)
     most_pending = 0
     try:
         for _ in range(batches):
@@ -335,6 +335,23 @@ assert pool.peak == 1, "free memory unknown: one at a time"
 pool, _ = run_pool(4, 1 * GiB, (5 * GiB, 16 * GiB))
 assert pool.peak == 3, f"starting clamscans count against free memory, got {pool.peak}"
 print("clamscan memory gating test passed ✓")
+
+# The fixed budget: however much is free, all clamscans together stay within
+# clamscan_memory_percent of total RAM. 32 GiB machine, nearly all free,
+# 1.5 GiB each: 25% = 8 GiB = 5 copies (a 6th would be 9 GiB).
+copy = 3 * GiB // 2
+pool, _ = run_pool(8, copy, (30 * GiB, 32 * GiB), batches=10)
+assert pool.peak == 5, f"25% of 32 GiB fits 5 copies of 1.5 GiB, got {pool.peak}"
+pool, _ = run_pool(8, copy, (30 * GiB, 32 * GiB), batches=10, percent=50)
+assert pool.peak == 8, f"50% (16 GiB) fits 10, so the count limit of 8 decides, got {pool.peak}"
+pool, _ = run_pool(4, 3 * GiB, (7 * GiB, 8 * GiB))
+assert pool.peak == 1, "one copy is bigger than the whole 2 GiB budget: still one runs, never more"
+with contextlib.redirect_stdout(io.StringIO()) as buf:
+    assert Config._from_dict({"clamscan_memory_percent": 95}, "t").clamscan_memory_percent == 75
+    assert Config._from_dict({"clamscan_memory_percent": 1}, "t").clamscan_memory_percent == 5
+assert "outside 5-75" in buf.getvalue(), buf.getvalue()
+assert Config._from_dict({"clamscan_memory_percent": 40}, "t").clamscan_memory_percent == 40
+print("clamscan memory budget test passed ✓")
 
 # The workers never wait for clamscan itself -- only when batches pile up:
 # at most limit + 1 waiting or running, so queued open files stay bounded.

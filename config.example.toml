@@ -16,6 +16,9 @@ max_workers = 0
 # least one. Raising MaxFileSize in clamd.conf (up to 2000M) avoids
 # clamscan for most files, and is faster still.
 max_clamscans = 0
+# The most memory those clamscans may use together, as a percent of total
+# RAM, however much happens to be free (5-75; one always runs).
+clamscan_memory_percent = 25
 rescan_after_days = 90
 
 # Rescan an unchanged, previously-clean file once the virus-signature

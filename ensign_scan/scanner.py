@@ -105,8 +105,11 @@ _CLAMSCAN_BASE_TIMEOUT = 300.0
 _CLAMSCAN_BYTES_PER_SECOND = 5 * 2**20
 # Running clamscans side by side. Each loads its own copy of the
 # signatures, about what clamd holds; that figure (with this margin) is
-# what another clamscan must find free, after a reserve kept for
-# everything else on the machine -- the larger of 2 GiB and 10% of RAM.
+# what another clamscan needs. Two limits, both checked before each one
+# starts: together they may use at most clamscan_memory_percent of total
+# RAM (a fixed budget, however much is free), and another must fit in
+# what is free right now after a reserve kept for everything else on the
+# machine -- the larger of 2 GiB and 10% of RAM.
 _CLAMSCAN_MEMORY_MARGIN = 1.25
 _CLAMSCAN_FALLBACK_MEMORY = 1536 * 2**20  # if clamd's own use can't be read
 _MEMORY_RESERVE_MIN = 2 * 2**30
@@ -154,14 +157,17 @@ class _ClamscanPool:
     than `limit + 1` waiting or running): every queued file is an open
     descriptor, and this caps how many are open.
 
-    Before each clamscan starts, free memory (MemAvailable) is read again:
-    it starts only if another copy of the signatures fits with the reserve
-    left over. The first always starts, so large files always get scanned.
+    Before each clamscan starts, memory is read again. It starts only if
+    all of them together, it included, stay within `memory_percent` of
+    total RAM, and another copy of the signatures fits in what is free
+    (MemAvailable) with the reserve left over. The first always starts, so
+    large files always get scanned.
     """
 
-    def __init__(self, limit: int, per_copy: int, run_batch) -> None:
+    def __init__(self, limit: int, per_copy: int, run_batch, memory_percent: int = 25) -> None:
         self.limit = max(1, limit)
         self.per_copy = per_copy
+        self.memory_percent = memory_percent
         self._run_batch = run_batch
         self._cond = threading.Condition()
         self._pending = 0                  # submitted, not finished
@@ -188,6 +194,9 @@ class _ClamscanPool:
         if mem is None:
             return False  # can't tell: one at a time
         available, total = mem
+        budget = total * self.memory_percent // 100
+        if (len(self._started) + 1) * self.per_copy > budget:
+            return False  # the fixed budget: never more than this, however much is free
         reserve = max(_MEMORY_RESERVE_MIN, int(total * _MEMORY_RESERVE_FRACTION))
         now = time.monotonic()
         loading = sum(1 for t in self._started.values() if now - t < _CLAMSCAN_LOADING_SECONDS)
@@ -825,12 +834,14 @@ class Scanner:
                 else:
                     limit = max(1, min(_CLAMSCAN_AUTO_MAX, (os.cpu_count() or 2) // 2))
                     why = "auto: half the CPU cores, up to 8"
-                self._clamscans = _ClamscanPool(limit, per_copy, self._clamscan_batch)
+                percent = self.config.clamscan_memory_percent
+                self._clamscans = _ClamscanPool(limit, per_copy, self._clamscan_batch, percent)
                 mem = memory_available()
-                free = f", {human_size(mem[0])} free now" if mem else ""
+                budget = (f", {percent}% of RAM ({human_size(mem[1] * percent // 100)}) at most"
+                          if mem else "")
                 if self._clamscan_usable():
-                        print(f"[dim]clamscan: up to {limit} at once ({why}), each needing about "
-                          f"{human_size(per_copy)}{free}; more start only while memory allows[/dim]")
+                    print(f"[dim]clamscan: up to {limit} at once ({why}), each needing about "
+                          f"{human_size(per_copy)}{budget}; more start only while memory allows[/dim]")
             return self._clamscans
 
     def _clamscan_batch(self, batch: list[_Oversized], running: int = 1) -> None:
