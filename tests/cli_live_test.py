@@ -230,4 +230,24 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
     run("--config", str(config), str(odd_tree), expect=0, cwd=work)
     print("undecodable-filename test passed ✓")
 
+    # --- allowed by you: a false positive you mark stops counting as infected ---------------
+    fp_tree = tmp / "fp"
+    fp_tree.mkdir()
+    flagged = fp_tree / "game-asset.dat"
+    flagged.write_bytes(EICAR)
+    run("--config", str(config), str(fp_tree), expect=3, cwd=work)
+    out = run("--config", str(config), "--allow", str(flagged), cwd=work)  # no terminal, no --yes
+    assert "add --yes" in " ".join(out.split()) and rows(db)[str(flagged)][0] == "infected", out
+    run("--config", str(config), "--allow", str(flagged), "--yes", cwd=work)
+    assert rows(db)[str(flagged)][0] == "allowed"
+    out = run("--config", str(config), str(fp_tree), expect=0, cwd=work)
+    flat = " ".join(out.split())
+    assert "ALLOWED BY YOU (1 file)" in flat and "Allowed by you: 1" in flat, out
+    out = run("--config", str(config), "--list-allowed", cwd=work)
+    assert "game-asset.dat" in out and "Ensign.Test.EICAR" in out, out
+    run("--config", str(config), "--unallow", str(flagged), cwd=work)
+    run("--config", str(config), str(fp_tree), expect=3, cwd=work)
+    assert rows(db)[str(flagged)][0] == "infected"
+    print("allowed-by-you test passed ✓")
+
 print("\nAll installed-CLI tests passed ✓")
