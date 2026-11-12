@@ -510,7 +510,7 @@ def main():
     # --- explanations: structural decoder + curated precedence ----------
     from ensign_scan import explanations as _ex
     d = _ex.explain_threat("Win.Malware.Example-1234567-0")
-    assert d and d.decoded and "signature 1234567, revision 0" in d.description
+    assert d and d.decoded and "Signature number 1234567, revision 0" in d.description
     assert "can't run natively" in d.false_positive_note
     d = _ex.explain_threat("Win.Exploit.CVE_2020_1234-1")
     assert d and d.decoded and "CVE-2020-1234" in d.description
@@ -551,7 +551,7 @@ def main():
     assert len(_res) == 3, "one result dict per file, grouping must not drop any"
     assert "3 files, 2 threats" in _out
     assert _out.count("Threat: Win.Malware.Example-1-0") == 1 and "(2 files)" in _out
-    assert _out.count("A Windows malware signature") == 1, "explained once per threat, not per file"
+    assert _out.count("a pattern it uses for malware in general") == 1, "explained once per threat, not per file"
     assert "real[1].bin" in _out, "paths containing [ ] must print literally"
     assert "2.0 KiB" in _out and "no longer on disk" in _out
     print("list_infected grouping test passed ✓")

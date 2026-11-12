@@ -3,30 +3,41 @@ from __future__ import annotations
 
 import datetime
 import os
+import textwrap
 
-from rich import print
-from rich.padding import Padding
-from rich.table import Table
+from rich import get_console, print
+from rich.cells import cell_len
+from rich.markup import escape
 from sqlalchemy import func, or_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from . import explanations, pkgdb
 from .clamd import is_permission_error
-from .fsutil import human_size as _human_size, shown
+from .fsutil import human_size as _human_size, print_unwrapped, printable, shown
 from .models import is_open_failed
 from .models import FileRecord, ScanStatus, path_under
 
 
+# Indent of a flagged file's details, under its "  File:" line.
+_DETAIL = " " * 6
+
+
 def _note(icon: str, text: str, label: str | None = None, indent: int = 2) -> None:
     """Print a dim, indented note whose wrapped lines hang under the text
-    (not under the icon), so it can't visually run into the next entry."""
-    grid = Table.grid(padding=(0, 1))
-    grid.add_column(no_wrap=True)
-    grid.add_column()
-    body = f"{label}: {shown(text)}" if label else shown(text)
-    grid.add_row(f"[dim]{icon}[/dim]", f"[dim]{body}[/dim]")
-    print(Padding(grid, (0, 0, 0, indent)))
+    (not under the icon), so it can't visually run into the next entry.
+
+    Wrapped here, at spaces only, rather than by a Rich table: a table pads
+    every line with spaces out to its column width, and those come along
+    when the text is copied."""
+    body = f"{label}: {printable(text)}" if label else printable(text)
+    lead = " " * indent
+    hang = " " * (cell_len(icon) + 1)
+    width = max(20, get_console().width - indent - len(hang))
+    lines = textwrap.wrap(body, width, break_long_words=False, break_on_hyphens=False) or [""]
+    for i, line in enumerate(lines):
+        start = f"[dim]{escape(icon)}[/dim] " if i == 0 else hang
+        get_console().print(f"{lead}{start}[dim]{escape(line)}[/dim]", soft_wrap=True)
 
 
 def _file_facts(filepath: str) -> str:
@@ -136,9 +147,9 @@ def _print_hotspots(title: str, intro: list[str], hotspots: dict[str, list[str]]
         label = f"{count} file" + ("s" if count != 1 else "")
         if not present:
             stale_only += 1
-            print(f"  {shown(parent)}  ({label}, no longer on disk)")
+            print_unwrapped(f"  {shown(parent)}  ({label}, no longer on disk)")
         else:
-            print(f"  {shown(parent)}  ({label})")
+            print_unwrapped(f"  {shown(parent)}  ({label})")
     print()
     if stale_only:
         print("Records for files that no longer exist: clear them with --purge-missing.")
@@ -160,7 +171,7 @@ def integrity_report(changes) -> None:
     print(f"\n[bold yellow]=== SSH FILES CHANGED SINCE LAST RUN ({len(changes)}) ===[/bold yellow]")
     print("If you didn't make these changes, inspect them now.\n")
     for change in sorted(changes, key=lambda c: c.path):
-        print(f"  [yellow]![/yellow] {shown(change.path)}")
+        print_unwrapped(f"  [yellow]![/yellow] {shown(change.path)}")
         if change.old_hash:
             print(f"      was {change.old_hash[:16]}…  now {change.new_hash[:16]}…")
         else:
@@ -205,7 +216,7 @@ def error_summary(engine: Engine, top: int = 10, paths: list[str] | None = None)
         print(f"  {count:>6}  {shown(message[:90])}")
     print("Directory hotspots:")
     for parent, count in sorted(dirs.items(), key=lambda kv: -kv[1])[:top]:
-        print(f"  {count:>6}  {shown(parent)}")
+        print_unwrapped(f"  {count:>6}  {shown(parent)}")
 
 
 def incomplete_report(engine: Engine, top: int = 10, paths: list[str] | None = None) -> None:
@@ -239,7 +250,7 @@ def incomplete_report(engine: Engine, top: int = 10, paths: list[str] | None = N
         why = reason or result or "unknown"
         if (result or "").startswith("swept: "):
             why = f"{why} · swept, nothing found in the raw bytes"
-        print(f"  [yellow]~[/yellow] {shown(filepath)}")
+        print_unwrapped(f"  [yellow]~[/yellow] {shown(filepath)}")
         _note("↳", f"{_human_size(size or 0)} · {why}")
     if len(rows) > top:
         print(f"  … and {len(rows) - top} more")
@@ -268,7 +279,7 @@ def unreadable_report(unreadable: dict[str, str], top: int = 10) -> None:
     print(f"\n=== UNREADABLE DIRECTORIES ({len(listed)}) ===")
     print("Ensign could not look inside these, so nothing in them was scanned.")
     for path in listed[:top]:
-        print(f"  {shown(path)}")
+        print_unwrapped(f"  {shown(path)}")
         print(f"    {shown(unreadable[path])}")
     if len(listed) > top:
         print(f"  … and {len(listed) - top} more (all are in the error log)")
@@ -294,7 +305,7 @@ def _print_unverified(unverified, backend) -> None:
         print(f"  {shown(pkg)}: {len(items)} file{'s' if len(items) != 1 else ''} "
               f"({shown(', '.join(reasons))})")
         for m in items[:3]:
-            print(f"    {shown(m.filepath)}")
+            print_unwrapped(f"    {shown(m.filepath)}")
         if len(items) > 3:
             print(f"    … and {len(items) - 3} more")
     for reason in sorted({m.reason for m in unverified}):
@@ -316,7 +327,7 @@ def _print_excluded(excluded) -> None:
         top = "/".join(path.split("/")[:4]) or path  # e.g. /usr/share/doc
         by_dir[top] = by_dir.get(top, 0) + 1
     for top, count in sorted(by_dir.items(), key=lambda kv: -kv[1])[:5]:
-        print(f"  {shown(top)}/…  {count}")
+        print_unwrapped(f"  {shown(top)}/…  {count}")
 
 
 def package_report(engine: Engine, result, backend) -> None:
@@ -386,7 +397,7 @@ def package_report(engine: Engine, result, backend) -> None:
         for (package, filepath), reasons in by_file.items():
             status = known.get(filepath)
             tracked = f"Ensign last saw this file: {status}" if status else "not tracked by Ensign"
-            print(f"  {shown(package)}: {shown(filepath)}")
+            print_unwrapped(f"  {shown(package)}: {shown(filepath)}")
             for reason in reasons:
                 print(f"    {shown(reason)} — {tracked}")
                 reason_note = backend.explain_reason(reason)
@@ -409,7 +420,7 @@ def package_report(engine: Engine, result, backend) -> None:
         print(f"\n-- {n} {backend.config_word} file{'s' if n != 1 else ''} "
               f"locally modified (expected, not a concern) --")
         for path, reasons in by_path.items():
-            print(f"  {shown(path)}  ({shown(', '.join(reasons))})")
+            print_unwrapped(f"  {shown(path)}  ({shown(', '.join(reasons))})")
 
     if excluded:
         _print_excluded(excluded)
@@ -497,10 +508,12 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
                 _note("›", explanation.false_positive_note, label=label)
         for i, (filepath, _t, scanned, detail) in enumerate(group):
             if i < files_per_threat:
-                print(f"\n  File: {shown(filepath)}")
-                print(f"  Scanned: {scanned}")
-                print(f"  Details: {shown((detail or '')[:200])}")
-                _note("›", _file_facts(filepath), label="Context", indent=2)
+                # Each file is its own block: the path, then its details
+                # indented under it, so a long list reads down the paths.
+                print_unwrapped(f"\n  File: {shown(filepath)}")
+                print(f"{_DETAIL}Scanned: {scanned} UTC")
+                print_unwrapped(f"{_DETAIL}Details: {shown((detail or '')[:200])}")
+                _note("›", _file_facts(filepath), label="Context", indent=len(_DETAIL))
             elif i == files_per_threat:
                 print(f"\n  … and {len(group) - files_per_threat} more files with this "
                       f"threat (all are recorded in the database)")
@@ -533,11 +546,11 @@ def unsaved_report(unsaved) -> list[dict]:
     for u in items:
         if u.status == ScanStatus.INFECTED.value:
             print(f"\n  [bold red]! {shown(u.threat_name)}[/bold red]")
-            print(f"  File: {shown(u.path)}")
-            _note("›", _file_facts(u.path), label="Context", indent=2)
+            print_unwrapped(f"  File: {shown(u.path)}")
+            _note("›", _file_facts(u.path), label="Context", indent=len(_DETAIL))
             results.append({"filepath": u.path, "threat": u.threat_name, "scanned": None})
         else:
-            print(f"  {shown(u.status)}: {shown(u.path)}")
+            print_unwrapped(f"  {shown(u.status)}: {shown(u.path)}")
     print(f"  Reason: {shown(items[0].error)}")
     return results
 
@@ -548,10 +561,10 @@ def file_info(engine: Engine, filepath: str) -> None:
             FileRecord.filepath == filepath
         ).first()
         if record is None:
-            print(f"File not found in database: {shown(filepath)}")
+            print_unwrapped(f"File not found in database: {shown(filepath)}")
             return
         print("\n=== FILE INFO ===")
-        print(f"Path: {shown(record.filepath)}")
+        print_unwrapped(f"Path: {shown(record.filepath)}")
         print(f"Hash: {record.file_hash}")
         print(f"Size: {record.file_size} bytes")
         print(f"Scan Status: {record.scan_status}")
