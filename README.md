@@ -128,7 +128,7 @@ Worker count is either set explicitly (`max_workers` in config) or resolved auto
 
 `cpu_share` (default 50) is how much of your CPU a scan may use, in percent of its threads, so you can keep using the machine while it runs. The scan workers and any `clamscan` runs share it: a `clamscan` starts only if it fits alongside the workers busy at that moment, though one always runs so large files still get scanned. Set it to 100 to let a scan have the whole machine. When clamd's `MaxThreads` is what holds Ensign below that share, the start of a scan suggests the `MaxThreads` that would reach it. Ensign never changes clamd's settings itself.
 
-If clamd can't be reached to ask, Ensign falls back to a safe default of 5 workers rather than guessing wildly. And no matter how constrained the machine — single core, a very low `MaxThreads` on clamd — the worker count can never drop below 1. **Ensign will always run, even on modest hardware;** it just scans one file at a time in that case rather than failing or requiring a separate no-threading mode.
+If clamd can't be reached to ask, Ensign falls back to a safe default of 5 workers (fewer if `cpu_share` allows fewer) rather than guessing wildly. And no matter how constrained the machine — single core, a very low `MaxThreads` on clamd — the worker count can never drop below 1. **Ensign will always run, even on modest hardware;** it just scans one file at a time in that case rather than failing or requiring a separate no-threading mode.
 
 ## Usage
 
