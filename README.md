@@ -124,7 +124,7 @@ The first run of 0.3.0, after upgrading from 0.2.x or earlier, removes the hashe
 
 Ensign scans files concurrently using a thread pool, since the work per file (hashing, then a clamd socket round-trip) is I/O-bound, not CPU-bound — the Python GIL isn't a bottleneck here the way it would be for CPU-heavy parallel work.
 
-Worker count is either set explicitly (`max_workers` in config) or resolved automatically (`max_workers = 0`, the default): Ensign asks clamd for its own `MaxThreads` limit, subtracts a little headroom so the daemon stays responsive to other clients, and caps the result by your CPU count.
+Worker count is either set explicitly (`max_workers` in config) or resolved automatically (`max_workers = 0`, the default): Ensign asks clamd for its own `MaxThreads` limit, subtracts a little headroom so the daemon stays responsive to other clients, and caps the result by your CPU count (and at 12). The scan header says which limit decided it, for example `Workers: 10 (auto: clamd's MaxThreads 12, minus 2 left free)`.
 
 If clamd can't be reached to ask, Ensign falls back to a safe default of 5 workers rather than guessing wildly. And no matter how constrained the machine — single core, a very low `MaxThreads` on clamd — the worker count can never drop below 1. **Ensign will always run, even on modest hardware;** it just scans one file at a time in that case rather than failing or requiring a separate no-threading mode.
 
@@ -188,7 +188,9 @@ A scan's exit code says how it went, so a script or a scheduled run can act on i
 
 ### Large files
 
-clamd skips any file larger than its `MaxFileSize` or `MaxScanSize` setting (100 MiB and 400 MiB by default), and still answers "OK" for it. Ensign doesn't take that answer. It reads the limits from clamd's config and sends larger files to `clamscan` instead, with the limits switched off. `clamscan` comes with ClamAV. It is slower: each run loads its own copy of the signatures, which takes seconds and some extra memory, so Ensign scans large files in batches, one batch at a time, after the rest. Large files you scanned with Ensign 0.4.0 or older were never really checked, so they are rescanned once.
+clamd skips any file larger than its `MaxFileSize` or `MaxScanSize` setting (100 MiB and 400 MiB by default), and still answers "OK" for it. Ensign doesn't take that answer. It reads the limits from clamd's config and sends larger files to `clamscan` instead, with the limits switched off. `clamscan` comes with ClamAV. Each `clamscan` run loads its own copy of the signatures, which takes seconds and about as much memory as clamd uses. So Ensign scans large files in batches of up to 64, alongside the files clamd scans. Several batches run at once when there's memory for it. Before each one starts, Ensign checks free memory again and starts it only if another copy of the signatures fits, with a reserve left over (the larger of 2 GiB or 10% of RAM). Starting a game mid-scan stops it adding more. One always runs, so large files are always scanned. `max_clamscans` in the config caps how many run at once (0 = auto: up to half your CPU cores, at most 8).
+
+Faster still: raise `MaxFileSize` (up to `2000M`) and `MaxScanSize` (e.g. `4000M`) in clamd.conf and restart clamd. Ensign reads the new limits, and clamd, which already has the signatures loaded and scans with several threads, handles those files itself. Large files you scanned with Ensign 0.4.0 or older were never really checked, so they are rescanned once.
 
 ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This is a limit in ClamAV itself, and its developers have said so. Ensign marks those files **not fully scanned** and lists them at the end of each run, never as clean. They are hashed and tracked, so a changed one is looked at again.
 

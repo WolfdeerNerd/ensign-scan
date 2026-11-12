@@ -194,6 +194,38 @@ def read_clamd_limits(pids: list[int] | None = None) -> ClamdLimits:
                        "ClamAV defaults (no clamd config found)")
 
 
+# --- memory, for deciding how many clamscans can run at once ----------------
+
+def memory_available() -> tuple[int, int] | None:
+    """(MemAvailable, MemTotal) in bytes, from /proc/meminfo. MemAvailable is
+    the kernel's own estimate of what can be used without swapping. None if
+    it can't be read."""
+    values = {}
+    try:
+        with open("/proc/meminfo", encoding="ascii", errors="replace") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                if key in ("MemAvailable", "MemTotal"):
+                    values[key] = int(rest.split()[0]) * 1024  # reported in kB
+    except (OSError, ValueError, IndexError):
+        return None
+    if len(values) < 2:
+        return None
+    return values["MemAvailable"], values["MemTotal"]
+
+
+def process_memory(pid: int) -> int | None:
+    """A process's resident memory (VmRSS) in bytes, or None."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii", errors="replace") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 # --- clamscan, for what clamd won't scan --------------------------------------
 
 def clamscan_user() -> tuple[int, int] | None:
@@ -425,6 +457,12 @@ class ClamdClient:
         the config file the running clamd was started with. See
         read_clamd_limits(): never raises, falls back to ClamAV's defaults."""
         return read_clamd_limits(_pids_named("clamd"))
+
+    def memory_in_use(self) -> int | None:
+        """How much memory clamd holds, in bytes -- nearly all of it its loaded
+        signatures, so about what each clamscan run will need too."""
+        sizes = [m for m in (process_memory(pid) for pid in _pids_named("clamd")) if m]
+        return max(sizes) if sizes else None
 
     # -- scanning ------------------------------------------------------
 

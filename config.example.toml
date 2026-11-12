@@ -8,6 +8,14 @@
 
 # Worker threads. 0 = auto (sized from clamd's MaxThreads and CPU count).
 max_workers = 0
+
+# Files larger than clamd scans go to clamscan, which loads its own copy of
+# the signatures (about as much memory as clamd uses). How many may run at
+# once: 0 = auto -- as many as free memory allows, keeping a reserve, up to
+# half your CPU cores, checked again before each one starts. Always at
+# least one. Raising MaxFileSize in clamd.conf (up to 2000M) avoids
+# clamscan for most files, and is faster still.
+max_clamscans = 0
 rescan_after_days = 90
 
 # Rescan an unchanged, previously-clean file once the virus-signature

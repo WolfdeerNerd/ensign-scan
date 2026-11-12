@@ -82,6 +82,10 @@ class Config:
     clamd_socket: str = "/var/run/clamav/clamd.ctl"
     # 0 = auto: sized from clamd's MaxThreads and CPU count at startup.
     max_workers: int = 0
+    # clamscan runs at once for files too large for clamd. 0 = auto: as many
+    # as free memory allows (each loads its own copy of the signatures),
+    # up to half the CPU cores. Always at least one.
+    max_clamscans: int = 0
     rescan_after_days: int = 90
     # Rescan a clean file once the signature database has moved this many
     # versions past the one it was last scanned under. Usually about one
@@ -166,7 +170,7 @@ class Config:
     @classmethod
     def _from_dict(cls, raw: dict, source: str) -> "Config":
         known = {
-            "data_dir", "clamd_socket", "max_workers",
+            "data_dir", "clamd_socket", "max_workers", "max_clamscans",
             "rescan_after_days", "rescan_after_signature_updates",
             "infected_alert_seconds", "infected_alert_only_while_gaming",
             "log_keep_days", "log_max_total_mb",
@@ -183,7 +187,7 @@ class Config:
             "log_file": data_dir / "error_logs.txt",
             "source": source,
         }
-        for key in ("clamd_socket", "max_workers", "rescan_after_days",
+        for key in ("clamd_socket", "max_workers", "max_clamscans", "rescan_after_days",
                     "rescan_after_signature_updates", "infected_alert_seconds",
                     "infected_alert_only_while_gaming", "log_keep_days",
                     "log_max_total_mb", "signature_max_age_days"):
@@ -241,6 +245,14 @@ EXAMPLE_CONFIG = """\
 
 # Worker threads. 0 = auto (sized from clamd's MaxThreads and CPU count).
 max_workers = 0
+
+# Files larger than clamd scans go to clamscan, which loads its own copy of
+# the signatures (about as much memory as clamd uses). How many may run at
+# once: 0 = auto -- as many as free memory allows, keeping a reserve, up to
+# half your CPU cores, checked again before each one starts. Always at
+# least one. Raising MaxFileSize in clamd.conf (up to 2000M) avoids
+# clamscan for most files, and is faster still.
+max_clamscans = 0
 rescan_after_days = 90
 
 # Rescan an unchanged, previously-clean file once the virus-signature

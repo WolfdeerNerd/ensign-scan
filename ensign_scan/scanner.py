@@ -31,9 +31,11 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -53,6 +55,7 @@ from .clamd import (
     clamscan_cli_available,
     clamscan_user,
     is_size_limit_error,
+    memory_available,
     scan_fds_with_clamscan,
 )
 from .config import Config
@@ -100,6 +103,21 @@ _CLAMSCAN_BATCH = 64
 # clamscan time allowed per run: a fixed allowance plus 1 s per 5 MiB.
 _CLAMSCAN_BASE_TIMEOUT = 300.0
 _CLAMSCAN_BYTES_PER_SECOND = 5 * 2**20
+# Running clamscans side by side. Each loads its own copy of the
+# signatures, about what clamd holds; that figure (with this margin) is
+# what another clamscan must find free, after a reserve kept for
+# everything else on the machine -- the larger of 2 GiB and 10% of RAM.
+_CLAMSCAN_MEMORY_MARGIN = 1.25
+_CLAMSCAN_FALLBACK_MEMORY = 1536 * 2**20  # if clamd's own use can't be read
+_MEMORY_RESERVE_MIN = 2 * 2**30
+_MEMORY_RESERVE_FRACTION = 0.10
+# A clamscan takes a while to load its signatures, and until it has, free
+# memory doesn't show it. One started this recently counts as using its
+# share already.
+_CLAMSCAN_LOADING_SECONDS = 60.0
+# Auto: at most this many at once, and no more than half the CPU cores
+# (each clamscan scans on one core).
+_CLAMSCAN_AUTO_MAX = 8
 
 
 def _mib(n: int) -> str:
@@ -124,6 +142,93 @@ class _Oversized:
     st: os.stat_result
     fd: int
     digest: str
+
+
+class _ClamscanPool:
+    """Runs batches of large files through clamscan beside the scan workers,
+    as many at once as free memory allows.
+
+    The scan workers hand a full batch to submit() and carry on with the
+    files clamd can scan; they never wait for clamscan itself. They wait
+    only if batches pile up faster than clamscan gets through them (more
+    than `limit + 1` waiting or running): every queued file is an open
+    descriptor, and this caps how many are open.
+
+    Before each clamscan starts, free memory (MemAvailable) is read again:
+    it starts only if another copy of the signatures fits with the reserve
+    left over. The first always starts, so large files always get scanned.
+    """
+
+    def __init__(self, limit: int, per_copy: int, run_batch) -> None:
+        self.limit = max(1, limit)
+        self.per_copy = per_copy
+        self._run_batch = run_batch
+        self._cond = threading.Condition()
+        self._pending = 0                  # submitted, not finished
+        self._started: dict[int, float] = {}  # running: thread id -> start time
+        self.peak = 0                      # most running at once (for tests and the summary)
+        _raise_fd_limit((self.limit + 2) * _CLAMSCAN_BATCH + 256)
+
+    def submit(self, batch: list[_Oversized]) -> None:
+        with self._cond:
+            while self._pending >= self.limit + 1:
+                self._cond.wait()
+            self._pending += 1
+        threading.Thread(target=self._run, args=(batch,), daemon=True,
+                         name="ensign-clamscan").start()
+
+    def wait(self) -> None:
+        """Block until every submitted batch is done."""
+        with self._cond:
+            while self._pending:
+                self._cond.wait()
+
+    def _memory_allows_another(self) -> bool:
+        mem = memory_available()
+        if mem is None:
+            return False  # can't tell: one at a time
+        available, total = mem
+        reserve = max(_MEMORY_RESERVE_MIN, int(total * _MEMORY_RESERVE_FRACTION))
+        now = time.monotonic()
+        loading = sum(1 for t in self._started.values() if now - t < _CLAMSCAN_LOADING_SECONDS)
+        return available - loading * self.per_copy - reserve >= self.per_copy
+
+    def _run(self, batch: list[_Oversized]) -> None:
+        me = threading.get_ident()
+        with self._cond:
+            while self._started and not (len(self._started) < self.limit
+                                         and self._memory_allows_another()):
+                # woken when a clamscan finishes; checked again every few
+                # seconds anyway, since memory can free up elsewhere too
+                self._cond.wait(timeout=5)
+            self._started[me] = time.monotonic()
+            self.peak = max(self.peak, len(self._started))
+            running = len(self._started)
+        try:
+            self._run_batch(batch, running)
+        except Exception:  # a batch must never take the scan down with it
+            log.exception("clamscan batch failed")
+            for item in batch:
+                with contextlib.suppress(OSError):
+                    os.close(item.fd)
+        finally:
+            with self._cond:
+                del self._started[me]
+                self._pending -= 1
+                self._cond.notify_all()
+
+
+def _raise_fd_limit(wanted: int) -> None:
+    """Raise this process's open-file limit (the soft limit, up to the hard
+    one) if it is below `wanted`: queued large files are open descriptors."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft != resource.RLIM_INFINITY and soft < wanted:
+            target = wanted if hard == resource.RLIM_INFINITY else min(wanted, hard)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ImportError, OSError, ValueError):
+        pass
 
 
 class _Known(NamedTuple):
@@ -209,11 +314,12 @@ class Scanner:
         self._watched_new: set[str] = set()
         # clamd's size limits, read by prepare_clamd(); None until then.
         self.limits: ClamdLimits | None = None
-        # Large files waiting for clamscan, and one clamscan at a time.
+        # Large files waiting for clamscan, and the clamscans running them.
         self._oversized: list[_Oversized] = []
         self._oversized_lock = threading.Lock()
-        self._clamscan_lock = threading.Lock()
+        self._clamscans: _ClamscanPool | None = None
         self._warned_clamscan: set[str] = set()
+        self.workers_reason = ""
 
     def prepare_clamd(self) -> None:
         """Check clamd once, before the first file is sent to it.
@@ -293,12 +399,24 @@ class Scanner:
         path rather than needing a separate non-threaded code path.
         """
         if self.config.max_workers > 0:
+            self.workers_reason = "max_workers in config"
             return self.config.max_workers
         clamd_max = self.clamd.max_threads()
         if clamd_max is None:
+            self.workers_reason = "auto, but clamd didn't report its MaxThreads; using the fallback"
             return 5  # daemon unreachable or unparseable; safe default
         cpus = os.cpu_count() or 4
-        return max(1, min(clamd_max - 2, cpus, 12))
+        workers = max(1, min(clamd_max - 2, cpus, 12))
+        # Say which of the limits decided it, so a low number can be traced.
+        if workers == clamd_max - 2:
+            self.workers_reason = f"auto: clamd's MaxThreads {clamd_max}, minus 2 left free"
+        elif workers == cpus:
+            self.workers_reason = f"auto: {cpus} CPU threads"
+        elif workers == 12:
+            self.workers_reason = "auto: Ensign's maximum of 12"
+        else:
+            self.workers_reason = "auto"
+        return workers
 
     # ------------------------------------------------------------------
     # Tree scanning
@@ -676,28 +794,52 @@ class Scanner:
     def _queue_oversized(self, item: _Oversized) -> None:
         print(f"[dim]→ {shown(item.path.name)} ({human_size(item.st.st_size)}) is too large for clamd; "
               f"queued for clamscan[/dim]")
+        # The full list is swapped for a fresh one under the lock, so nothing
+        # is ever added to a batch already handed over.
         with self._oversized_lock:
             self._oversized.append(item)
             batch = self._oversized if len(self._oversized) >= _CLAMSCAN_BATCH else None
             if batch is not None:
                 self._oversized = []
         if batch is not None:
-            self._clamscan_batch(batch)
+            self._clamscan_pool().submit(batch)
 
     def scan_oversized(self) -> None:
-        """Scan every queued large file now. Safe to call with nothing queued."""
+        """Scan every queued large file and wait until all of them are done.
+        Safe to call with nothing queued."""
         with self._oversized_lock:
             batch, self._oversized = self._oversized, []
         if batch:
-            self._clamscan_batch(batch)
+            self._clamscan_pool().submit(batch)
+        if self._clamscans is not None:
+            self._clamscans.wait()
 
-    def _clamscan_batch(self, batch: list[_Oversized]) -> None:
+    def _clamscan_pool(self) -> _ClamscanPool:
+        with self._oversized_lock:
+            if self._clamscans is None:
+                measure = getattr(self.clamd, "memory_in_use", None)
+                in_use = measure() if measure is not None else None
+                per_copy = int((in_use or _CLAMSCAN_FALLBACK_MEMORY) * _CLAMSCAN_MEMORY_MARGIN)
+                if self.config.max_clamscans > 0:
+                    limit, why = self.config.max_clamscans, "max_clamscans in config"
+                else:
+                    limit = max(1, min(_CLAMSCAN_AUTO_MAX, (os.cpu_count() or 2) // 2))
+                    why = "auto: half the CPU cores, up to 8"
+                self._clamscans = _ClamscanPool(limit, per_copy, self._clamscan_batch)
+                mem = memory_available()
+                free = f", {human_size(mem[0])} free now" if mem else ""
+                if self._clamscan_usable():
+                        print(f"[dim]clamscan: up to {limit} at once ({why}), each needing about "
+                          f"{human_size(per_copy)}{free}; more start only while memory allows[/dim]")
+            return self._clamscans
+
+    def _clamscan_batch(self, batch: list[_Oversized], running: int = 1) -> None:
         total = sum(item.st.st_size for item in batch)
-        print(f"\n[bold]Scanning {len(batch)} large file(s) ({human_size(total)}) with clamscan[/bold] "
-              f"[dim]-- slower than clamd: it loads its own copy of the signatures[/dim]")
+        alongside = f", {running} clamscans running" if running > 1 else ""
+        print(f"\n[bold]Scanning {len(batch)} large file(s) ({human_size(total)}) with clamscan[/bold]"
+              f"[dim]{alongside}[/dim]")
         try:
-            with self._clamscan_lock:  # one clamscan (and one copy of the signatures) at a time
-                outcomes = self._clamscan_outcomes(batch, total)
+            outcomes = self._clamscan_outcomes(batch, total)
         finally:
             for item in batch:
                 os.close(item.fd)
@@ -706,8 +848,10 @@ class Scanner:
 
     def _clamscan_outcomes(self, batch: list[_Oversized], total: int) -> dict[int, ScanOutcome]:
         def not_scanned(why: str) -> dict[int, ScanOutcome]:
-            if why not in self._warned_clamscan:
+            with self._oversized_lock:
+                first = why not in self._warned_clamscan
                 self._warned_clamscan.add(why)
+            if first:
                 print(f"[yellow]! Large files can't be scanned: {why}. They are recorded as "
                       f"not fully scanned, never as clean.[/yellow]")
             return {item.fd: ScanOutcome(ScanStatus.INCOMPLETE, f"not scanned: {why}") for item in batch}

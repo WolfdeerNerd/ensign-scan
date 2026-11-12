@@ -40,6 +40,8 @@ import shutil  # noqa: E402
 import sqlite3  # noqa: E402
 import stat  # noqa: E402
 import tempfile  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from sqlalchemy.orm import Session  # noqa: E402
@@ -290,6 +292,105 @@ try:
 finally:
     (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
      scanner_mod.clamscan_user, scanner_mod._CLAMSCAN_BATCH) = real
+
+# --- clamscans side by side, as many as free memory allows ------------------------------------
+GiB = 2**30
+
+
+def run_pool(limit: int, per_copy: int, memory, batches: int = 6, work: float = 0.3,
+             fail: bool = False):
+    """Run `batches` fake batches through a pool with free memory reported as
+    `memory` (a (MemAvailable, MemTotal) pair, or None). Returns the pool and
+    the most batches seen waiting or running at any submit."""
+    real_memory = scanner_mod.memory_available
+    scanner_mod.memory_available = lambda: memory
+
+    def run_batch(batch, running):
+        time.sleep(work)
+        if fail:
+            raise RuntimeError("clamscan exploded")
+
+    pool = scanner_mod._ClamscanPool(limit, per_copy, run_batch)
+    most_pending = 0
+    try:
+        for _ in range(batches):
+            pool.submit([])
+            most_pending = max(most_pending, pool._pending)
+        pool.wait()
+    finally:
+        scanner_mod.memory_available = real_memory
+    return pool, most_pending
+
+
+pool, _ = run_pool(3, 1 * GiB, (20 * GiB, 32 * GiB))
+assert pool.peak == 3, f"plenty of memory: up to the limit at once, got {pool.peak}"
+pool, _ = run_pool(3, 1 * GiB, (int(2.5 * GiB), 8 * GiB))
+assert pool.peak == 1, "2.5 GiB free minus the 2 GiB reserve can't fit another 1 GiB copy: one at a time"
+pool, _ = run_pool(3, 1 * GiB, None)
+assert pool.peak == 1, "free memory unknown: one at a time"
+# A clamscan still loading its signatures hasn't used its memory yet, so
+# free memory doesn't show it: each counts as using its share already.
+# 5 GiB free, 2 GiB reserve, 1 GiB each: the 1st always starts, then 2nd
+# (5-1-2 = 2 left) and 3rd (5-2-2 = 1 left), but not a 4th (5-3-2 = 0).
+pool, _ = run_pool(4, 1 * GiB, (5 * GiB, 16 * GiB))
+assert pool.peak == 3, f"starting clamscans count against free memory, got {pool.peak}"
+print("clamscan memory gating test passed ✓")
+
+# The workers never wait for clamscan itself -- only when batches pile up:
+# at most limit + 1 waiting or running, so queued open files stay bounded.
+pool, most_pending = run_pool(1, 1 * GiB, None, batches=6, work=0.2)
+assert most_pending <= 2, f"batches waiting or running must stay at limit + 1, saw {most_pending}"
+pool, most_pending = run_pool(3, 1 * GiB, (20 * GiB, 32 * GiB), batches=10, work=0.2)
+assert most_pending <= 4, most_pending
+print("clamscan queue bound test passed ✓")
+
+# A batch that fails doesn't stop the others or hang the wait.
+with contextlib.redirect_stderr(io.StringIO()):  # the failure is logged; expected here
+    pool, _ = run_pool(2, 1 * GiB, (20 * GiB, 32 * GiB), batches=4, work=0.05, fail=True)
+assert pool._pending == 0 and not pool._started
+print("failing clamscan batch test passed ✓")
+
+# A scan worker isn't held up by a running clamscan: with one slow batch
+# running, a second submit returns at once.
+release = threading.Event()
+pool = scanner_mod._ClamscanPool(1, GiB, lambda batch, running: release.wait(5))
+pool.submit([])
+t0 = time.monotonic()
+pool.submit([])  # waits behind the first, but the caller doesn't
+assert time.monotonic() - t0 < 0.5, "submit must not wait for clamscan to finish"
+release.set()
+pool.wait()
+print("non-blocking workers test passed ✓")
+
+
+# --- the worker count says how it was chosen ----------------------------------------------------
+class ThreadsClamd(FakeClamd):
+    def __init__(self, max_threads):
+        super().__init__()
+        self._max = max_threads
+
+    def max_threads(self):
+        return self._max
+
+
+real_cpu_count = os.cpu_count
+try:
+    with tempfile.TemporaryDirectory() as d:
+        def resolve(clamd, cpus, **cfg):
+            os.cpu_count = lambda: cpus
+            config = Config(db_url=f"sqlite:///{d}/w.db", log_file=Path(d, "e.txt"), **cfg)
+            s = Scanner(config, clamd=clamd)
+            return s.workers, s.workers_reason
+        assert resolve(ThreadsClamd(12), 16) == (10, "auto: clamd's MaxThreads 12, minus 2 left free")
+        assert resolve(ThreadsClamd(12), 6) == (6, "auto: 6 CPU threads")
+        assert resolve(ThreadsClamd(40), 32) == (12, "auto: Ensign's maximum of 12")
+        workers, why = resolve(ThreadsClamd(None), 16)
+        assert workers == 5 and "didn't report its MaxThreads" in why, why
+        assert resolve(ThreadsClamd(12), 16, max_workers=3) == (3, "max_workers in config")
+finally:
+    os.cpu_count = real_cpu_count
+assert Config._from_dict({"max_clamscans": 3}, "t").max_clamscans == 3
+print("worker count reason test passed ✓")
 
 # --- real ClamAV (CI) --------------------------------------------------------------------------
 socket_path = os.environ.get("ENSIGN_TEST_CLAMD_SOCKET")
