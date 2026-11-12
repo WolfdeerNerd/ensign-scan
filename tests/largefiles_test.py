@@ -153,6 +153,56 @@ with tempfile.TemporaryDirectory() as d:
     assert by_name["fine"].status == ScanStatus.CLEAN and by_name["fine"].raw == "clamscan: OK"
 print("clamscan output parsing test passed ✓")
 
+# --- results are read as clamscan reports them, not when the run ends -------------------------
+def stand_in_clamscan(d: Path, body: str) -> None:
+    script = Path(d, "clamscan")
+    script.write_text("#!/bin/sh\n" + body)
+    script.chmod(0o755)
+
+
+with tempfile.TemporaryDirectory() as d:
+    # reports each file, then pauses 0.3 s: like clamscan working through big files
+    stand_in_clamscan(d, 'for a in "$@"; do case "$a" in /proc/self/fd/*) '
+                         'echo "$a: OK"; sleep 0.3 ;; esac; done\n')
+    fds = []
+    for i in range(4):
+        p = Path(d, f"f{i}.bin")
+        p.write_bytes(b"x")
+        fds.append(os.open(p, os.O_RDONLY))
+    seen: list[tuple[int, float]] = []
+    real_path = os.environ["PATH"]
+    os.environ["PATH"] = f"{d}:{real_path}"
+    try:
+        t0 = time.monotonic()
+        got = scan_fds_with_clamscan(fds, DEFAULT_LIMITS, timeout=30,
+                                     on_result=lambda fd, o: seen.append((fd, time.monotonic() - t0)))
+        total = time.monotonic() - t0
+
+        # a run that hangs after its first file: that one is kept, the rest time out.
+        # (exec: one process, like real clamscan, so killing it closes its output.)
+        stand_in_clamscan(d, 'for a in "$@"; do case "$a" in /proc/self/fd/*) '
+                             'echo "$a: OK"; exec sleep 30 ;; esac; done\n')
+        partial: list[int] = []
+        t1 = time.monotonic()
+        hung = scan_fds_with_clamscan(fds, DEFAULT_LIMITS, timeout=1,
+                                      on_result=lambda fd, o: partial.append(fd))
+        hung_took = time.monotonic() - t1
+    finally:
+        os.environ["PATH"] = real_path
+        for fd in fds:
+            os.close(fd)
+assert [fd for fd, _ in seen] == fds, f"each file reported once, in order: {seen}"
+assert seen[0][1] < total - 0.5, f"the first result arrives while clamscan is still running: {seen}"
+# and not one file late: "OK" is final, so it's passed on before clamscan's 0.3 s
+# pause and the next file's line
+assert seen[0][1] < 0.25, f"an OK is reported at once, not when the next file starts: {seen}"
+assert all(o.status == ScanStatus.CLEAN for o in got.values())
+assert hung_took < 10, f"the time limit stops a hung clamscan: took {hung_took:.1f}s"
+assert hung[fds[0]].status == ScanStatus.CLEAN, "a file reported before the hang keeps its result"
+assert all(hung[fd].status == ScanStatus.ERROR and "ran out of time" in hung[fd].raw for fd in fds[1:]), hung
+assert sorted(partial) == sorted(fds), "every file is still reported exactly once"
+print("streamed clamscan results test passed ✓")
+
 
 # --- the scanner: large files go to clamscan, in batches, and are never "clean" by default -------
 class FakeClamd:
@@ -187,7 +237,7 @@ class FakeClamd:
 batches: list[list[int]] = []
 
 
-def fake_clamscan(fds, limits, timeout, run_as=None):
+def fake_clamscan(fds, limits, timeout, run_as=None, on_result=None):
     """Reads each file through the descriptor it was given -- the one Ensign
     opened -- the way the real clamscan does through /proc/self/fd/N."""
     batches.append(list(fds))
@@ -316,7 +366,7 @@ try:
 
         batch_ends: list[float] = []
 
-        def slow_clamscan(fds, limits, timeout, run_as=None):
+        def slow_clamscan(fds, limits, timeout, run_as=None, on_result=None):
             time.sleep(0.4)
             out = fake_clamscan(fds, limits, timeout, run_as)
             batch_ends.append(time.monotonic())
@@ -345,6 +395,42 @@ try:
         assert sum(1 for e in advances if e[1] >= min(batch_ends)) >= 3, \
             "the big files are counted as their clamscan results come in"
         print("progress waits for clamscan test passed ✓")
+
+        # --- with a clamscan that reports as it goes, each big file is printed and counted
+        #     straight away, not when its whole batch ends
+        def streaming_clamscan(fds, limits, timeout, run_as=None, on_result=None):
+            out = {}
+            for fd in fds:
+                time.sleep(0.3)
+                out[fd] = ScanOutcome(ScanStatus.CLEAN, "clamscan: OK")
+                on_result(fd, out[fd])
+            batch_ends.append(time.monotonic())
+            return out
+
+        events.clear()
+        batch_ends.clear()
+        scanner_mod.RunProgress = RecordingProgress
+        scanner_mod.scan_fds_with_clamscan = streaming_clamscan
+        real_batch = scanner_mod._CLAMSCAN_BATCH
+        scanner_mod._CLAMSCAN_BATCH = 3
+        try:
+            tree3 = Path(d, "tree3")
+            tree3.mkdir()
+            for i in range(3):
+                (tree3 / f"big{i}.bin").write_bytes(b"C" * 4096)
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                scanner.scan_tree(tree3)
+        finally:
+            scanner_mod.RunProgress = real_progress
+            scanner_mod.scan_fds_with_clamscan = fake_clamscan
+            scanner_mod._CLAMSCAN_BATCH = real_batch
+        times = [e[1] for e in events if e[0] == "advance"]
+        assert len(times) == 3, events
+        assert times[0] < batch_ends[-1] - 0.4, \
+            f"the first big file is counted before its batch ends: {times} vs {batch_ends}"
+        printed = buf.getvalue()
+        assert all(f"big{i}.bin" in printed for i in range(3)), printed
+        print("big files reported one by one test passed ✓")
 finally:
     (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
      scanner_mod.clamscan_user, scanner_mod._CLAMSCAN_BATCH) = real
@@ -453,7 +539,7 @@ with tempfile.TemporaryDirectory() as d:
     class Recorder:
         _advance = None  # no progress line here
 
-        def _clamscan_outcomes(self, batch, total):
+        def _clamscan_outcomes(self, batch, total, on_result=None):
             return {i.fd: ScanOutcome(ScanStatus.CLEAN, "clamscan: OK") for i in batch}
 
         def _finish(self, path, st, digest, outcome):

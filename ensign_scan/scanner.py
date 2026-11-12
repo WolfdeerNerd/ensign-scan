@@ -918,25 +918,40 @@ class Scanner:
         alongside = f", {running} clamscans running" if running > 1 else ""
         print(f"\n[bold]Scanning {len(batch)} large file(s) ({human_size(total)}) with clamscan[/bold]"
               f"[dim]{alongside}[/dim]")
-        try:
-            outcomes = self._clamscan_outcomes(batch, total)
-        except Exception as exc:  # every file still gets a result, and is counted
-            log.exception("clamscan batch failed")
-            outcomes = {item.fd_was: ScanOutcome(ScanStatus.ERROR, f"clamscan: {exc}")
-                        for item in batch}
-        finally:
-            _close_queued(batch)
         advance = self._advance
-        for item in batch:
+        by_fd = {item.fd_was: item for item in batch}
+        recorded: set[int] = set()
+
+        def record(fd: int, outcome: ScanOutcome) -> None:
+            """Record, print and count one file -- as soon as clamscan is done
+            with it, not when the whole batch is."""
+            item = by_fd.get(fd)
+            if item is None or fd in recorded:
+                return
+            recorded.add(fd)
             status = ScanStatus.ERROR.value
             try:
-                status = self._finish(item.path, item.st, item.digest, outcomes[item.fd_was])[1]
+                status = self._finish(item.path, item.st, item.digest, outcome)[1]
             except Exception:  # one file failing to record must not drop the rest
                 log.exception("could not record the clamscan result for %s", item.path)
             if advance is not None:
                 advance(status)
 
-    def _clamscan_outcomes(self, batch: list[_Oversized], total: int) -> dict[int, ScanOutcome]:
+        try:
+            outcomes = self._clamscan_outcomes(batch, total, record)
+        except Exception as exc:  # every file still gets a result, and is counted
+            log.exception("clamscan batch failed")
+            outcomes = {}
+            failed = ScanOutcome(ScanStatus.ERROR, f"clamscan: {exc}")
+            for item in batch:
+                outcomes[item.fd_was] = failed
+        finally:
+            _close_queued(batch)
+        for item in batch:  # any not reported as it went (no clamscan to run, or it failed)
+            record(item.fd_was, outcomes.get(item.fd_was, ScanOutcome(ScanStatus.ERROR, "clamscan: no result")))
+
+    def _clamscan_outcomes(self, batch: list[_Oversized], total: int,
+                           on_result=None) -> dict[int, ScanOutcome]:
         def not_scanned(why: str) -> dict[int, ScanOutcome]:
             with self._oversized_lock:
                 first = why not in self._warned_clamscan
@@ -955,7 +970,7 @@ class Scanner:
             return not_scanned(f"Ensign won't run clamscan as root, and there is {exc}")
         timeout = _CLAMSCAN_BASE_TIMEOUT + total / _CLAMSCAN_BYTES_PER_SECOND
         return scan_fds_with_clamscan([item.fd for item in batch], self.limits or DEFAULT_LIMITS,
-                                      timeout, run_as)
+                                      timeout, run_as, on_result=on_result)
 
     def _remember_unsaved(self, path: Path, outcome: ScanOutcome | None, exc: Exception) -> None:
         """A result the database refused: say so now, keep it for the report."""

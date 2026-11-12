@@ -29,6 +29,8 @@ import shutil
 import socket
 import struct
 import subprocess
+import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -260,8 +262,25 @@ def clamscan_user() -> tuple[int, int] | None:
     return entry.pw_uid, entry.pw_gid
 
 
+def _clamscan_verdict(said: list[str], stderr: str) -> "ScanOutcome":
+    """One file's outcome from clamscan's line(s) for it."""
+    raw = "clamscan: " + (" / ".join(said) if said else "no result")
+    found = [s[: -len(" FOUND")].strip() for s in said if s.endswith(" FOUND")]
+    threats = [t for t in found if not t.startswith(LIMITS_EXCEEDED_PREFIX)]
+    if threats:
+        return ScanOutcome(ScanStatus.INFECTED, raw, threats[0])
+    if found:  # only a limits alert: ClamAV didn't (fully) scan it
+        return ScanOutcome(ScanStatus.INCOMPLETE, raw, found[0])
+    if said and said[-1] == "OK":
+        return ScanOutcome(ScanStatus.CLEAN, raw)
+    errors = stderr.strip().splitlines()
+    detail = said[-1] if said else (errors[-1] if errors else "no output")
+    return ScanOutcome(ScanStatus.ERROR, f"clamscan: {detail}")
+
+
 def scan_fds_with_clamscan(
-    fds: list[int], limits: ClamdLimits, timeout: float, run_as: tuple[int, int] | None = None
+    fds: list[int], limits: ClamdLimits, timeout: float, run_as: tuple[int, int] | None = None,
+    on_result=None,
 ) -> dict[int, "ScanOutcome"]:
     """Scan already-open files with one clamscan run, limits switched off.
 
@@ -275,6 +294,15 @@ def scan_fds_with_clamscan(
     database (seconds, and up to a GB or two of memory, on top of clamd's
     copy). `run_as` drops clamscan to that (uid, gid) -- see clamscan_user().
 
+    clamscan reports each file as soon as it is done with it, so results are
+    read as they come: `on_result(fd, outcome)`, if given, is called for each
+    file the moment its result is known, not when the whole run ends. "OK"
+    or a detection is the last word on a file, so it is passed on at once;
+    a limits alert or an error may be followed by another line about the
+    same file, so that waits until clamscan moves on (all of a file's lines
+    come together). Every fd gets exactly one call -- files clamscan never
+    reported (it died, or ran out of time) get an error.
+
     Returns an outcome per fd; "raw" is clamscan's line(s) for that file.
     """
     argv = ["clamscan", "--no-summary", "--stdout",
@@ -286,34 +314,69 @@ def scan_fds_with_clamscan(
     kwargs = {}
     if run_as is not None:
         kwargs = {"user": run_as[0], "group": run_as[1], "extra_groups": []}
-    try:
-        result = subprocess.run(argv, pass_fds=fds, capture_output=True, text=True,
-                                timeout=timeout, errors="replace", **kwargs)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {fd: ScanOutcome(ScanStatus.ERROR, f"clamscan: couldn't run: {exc}") for fd in fds}
 
+    outcomes: dict[int, ScanOutcome] = {}
     lines: dict[int, list[str]] = {fd: [] for fd in fds}
-    for line in result.stdout.splitlines():
-        match = _CLAMSCAN_LINE_RE.match(line)
-        if match and int(match.group(1)) in lines:
-            lines[int(match.group(1))].append(match.group(2).strip())
 
-    outcomes = {}
-    for fd in fds:
-        said = lines[fd]
-        raw = "clamscan: " + (" / ".join(said) if said else "no result")
-        found = [s[: -len(" FOUND")].strip() for s in said if s.endswith(" FOUND")]
-        threats = [t for t in found if not t.startswith(LIMITS_EXCEEDED_PREFIX)]
-        if threats:
-            outcomes[fd] = ScanOutcome(ScanStatus.INFECTED, raw, threats[0])
-        elif found:  # only a limits alert: ClamAV didn't (fully) scan it
-            outcomes[fd] = ScanOutcome(ScanStatus.INCOMPLETE, raw, found[0])
-        elif said and said[-1] == "OK":
-            outcomes[fd] = ScanOutcome(ScanStatus.CLEAN, raw)
-        else:
-            errors = result.stderr.strip().splitlines()
-            detail = said[-1] if said else (errors[-1] if errors else "no output")
-            outcomes[fd] = ScanOutcome(ScanStatus.ERROR, f"clamscan: {detail}")
+    def settle(fd: int, outcome: ScanOutcome) -> None:
+        outcomes[fd] = outcome
+        if on_result is not None:
+            on_result(fd, outcome)
+
+    stderr = ""
+    timed_out = threading.Event()
+    try:
+        with tempfile.TemporaryFile() as err:  # a file, not a pipe: can't fill up and stall clamscan
+            proc = subprocess.Popen(argv, pass_fds=fds, stdout=subprocess.PIPE, stderr=err,
+                                    text=True, errors="replace", **kwargs)
+
+            def expire() -> None:
+                timed_out.set()
+                proc.kill()
+
+            timer = threading.Timer(timeout, expire)
+            timer.daemon = True
+            timer.start()
+            current = None
+            try:
+                for line in proc.stdout:
+                    match = _CLAMSCAN_LINE_RE.match(line.rstrip("\n"))
+                    if not match or int(match.group(1)) not in lines:
+                        continue
+                    fd = int(match.group(1))
+                    if current is not None and fd != current and current not in outcomes:
+                        settle(current, _clamscan_verdict(lines[current], ""))
+                    current = fd
+                    said = match.group(2).strip()
+                    lines[fd].append(said)
+                    final = said == "OK" or (said.endswith(" FOUND")
+                                             and not said.startswith(LIMITS_EXCEEDED_PREFIX))
+                    if final and fd not in outcomes:
+                        settle(fd, _clamscan_verdict(lines[fd], ""))
+                proc.wait()
+            finally:
+                timer.cancel()
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+            err.seek(0)
+            stderr = err.read().decode("utf-8", "replace")
+            # clamscan prints a file's line only once it is done with it, so
+            # the last file it named has its verdict, even if the run was
+            # then cut short.
+            if current is not None and current not in outcomes:
+                settle(current, _clamscan_verdict(lines[current], stderr))
+    except (OSError, subprocess.SubprocessError) as exc:
+        stderr = f"couldn't run: {exc}"
+
+    for fd in fds:  # anything clamscan never got to
+        if fd not in outcomes:
+            if timed_out.is_set():
+                settle(fd, ScanOutcome(ScanStatus.ERROR, f"clamscan: ran out of time ({timeout:.0f} s)"))
+            elif stderr.startswith("couldn't run"):
+                settle(fd, ScanOutcome(ScanStatus.ERROR, f"clamscan: {stderr}"))
+            else:
+                settle(fd, _clamscan_verdict(lines[fd], stderr))
     return outcomes
 
 
