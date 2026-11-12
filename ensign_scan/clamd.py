@@ -436,6 +436,15 @@ class ClamdClient:
         match = re.search(r"THREADS:.*?\bmax\s+(\d+)", stats)
         return int(match.group(1)) if match else None
 
+    def version_string(self) -> str | None:
+        """clamd's VERSION reply as it stands, e.g. "ClamAV 1.5.4/27455/Wed
+        Nov 11 08:12:00 2026": engine, signature version, signature date.
+        None if clamd doesn't answer."""
+        try:
+            return self._command("VERSION").strip() or None
+        except OSError:
+            return None
+
     def signature_version(self) -> int | None:
         """The loaded signature database's version number, via VERSION.
 

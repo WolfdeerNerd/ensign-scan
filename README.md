@@ -140,7 +140,7 @@ The examples below are written as `python3 main.py` (running from a checkout). I
 
 1. Make sure ClamAV's daemon is running (Ensign tells you if it isn't): `sudo systemctl start clamav-daemon`
 2. Run Ensign on a small tree, as your own username: `python3 path/to/main.py ~/Downloads`
-3. If clamd couldn't read some files, the run ends with a "FILES CLAMD COULD NOT READ" section saying what usually causes it.
+3. If some files couldn't be scanned, the end of the run says which and what usually causes it: "FILES ENSIGN COULD NOT OPEN" for files your user can't read (often ones owned by root), and "FILES CLAMD COULD NOT READ" for files clamd was refused (often AppArmor or SELinux confining clamd).
 
 For a full scan, you only need to run:
 ```
@@ -178,6 +178,7 @@ These run one job and exit — no full scan.
 | `python3 main.py --allow PATH` | Mark a file ClamAV flagged as a false positive (see A note on infected results). Asks to confirm; `--yes` skips the question |
 | `python3 main.py --unallow PATH` | Undo `--allow`: the file counts as infected again |
 | `python3 main.py --list-allowed` | List every file you've allowed |
+| `python3 main.py --clamav-report PATH` | Prepare a false-positive report for ClamAV about a flagged file (see A note on infected results). Nothing is sent: you submit it |
 
 ### Only one run at a time
 
@@ -333,7 +334,14 @@ ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match 
 
 **If you're sure it's a false positive**, `--allow PATH` tells Ensign so, and you can do two more things besides:
 
-- **Report it to ClamAV,** so the signature gets fixed for everyone: <https://www.clamav.net/reports/fp>, or ClamAV's `clamsubmit` tool. Submitting sends them the file, so don't submit anything private. A signature whose name ends in `.UNOFFICIAL` doesn't come from ClamAV but from a third-party signature set, so report it to whoever provides that set.
+- **Report it to ClamAV,** so the signature gets fixed for everyone. `--clamav-report PATH` prepares the report for you:
+  - it hashes the file again, so the report is about the exact content that was flagged;
+  - it scans the file again with your current signatures. If ClamAV no longer flags it, the false positive has already been fixed and there's nothing to report;
+  - a signature whose name ends in `.UNOFFICIAL` doesn't come from ClamAV but from a third-party signature set, so Ensign tells you to report it to whoever provides that set instead;
+  - otherwise it writes a short report to `clamav-reports/` in your data directory: the signature name, SHA-256 and MD5, size, file type and ClamAV versions. It contains no file name, path, username or hostname;
+  - it then tells you how to submit it, through ClamAV's form at <https://www.clamav.net/reports/fp> or with ClamAV's `clamsubmit` tool. ClamAV needs the file itself, so the file to attach is named on screen. It's never copied anywhere, because if the detection were real, the copy would be a second piece of malware.
+
+  Ensign never submits anything itself. Submitting sends the whole file to Cisco (ClamAV's owner), so don't submit anything private; Ensign warns you if the file is in a personal folder like Documents or Downloads. A file the sweep flagged can't be reported this way: ClamAV can't scan a file that large, so it can't reproduce the detection.
 - **Allow it in Ensign** with `--allow PATH`. Ensign first hashes the file again, so you can only allow the exact content that was flagged, then asks you to confirm. An allowance is deliberately narrow:
   - it covers that exact content (its SHA-256), flagged by that exact signature. Identical copies elsewhere are covered too, since they're the same false positive. If the file changes, or a different signature flags it, it's flagged again;
   - allowed files don't count as infected for alerts or the exit code, but they're never hidden: every run lists them under "ALLOWED BY YOU", and `--list-allowed` shows them all;
