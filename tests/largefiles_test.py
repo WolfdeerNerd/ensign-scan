@@ -113,6 +113,7 @@ with tempfile.TemporaryDirectory() as d:
     fake = Path(d, "clamscan")
     fake.write_text(
         "#!/bin/sh\n"
+        'printf "%s\\n" "$@" > "$(dirname "$0")/argv"\n'
         'for a in "$@"; do\n'
         '  case "$a" in /proc/self/fd/*)\n'
         '    n=${a#/proc/self/fd/}\n'
@@ -142,6 +143,9 @@ with tempfile.TemporaryDirectory() as d:
         for fd in files.values():
             os.close(fd)
     by_name = {name: got[fd] for name, fd in files.items()}
+    argv = Path(d, "argv").read_text().splitlines()
+    assert "--tempdir=/var/tmp" in argv, f"archives unpack on disk, not in a RAM-backed /tmp: {argv}"
+    assert "--pcre-max-filesize=0" in argv and "--max-filesize=0" in argv, argv
     assert by_name["EVIL"].status == ScanStatus.INFECTED and by_name["EVIL"].threat_name == "Test.Evil"
     assert by_name["HUGE"].status == ScanStatus.INCOMPLETE, "a limits alert is 'not scanned', not infected"
     assert by_name["HUGE"].threat_name == "Heuristics.Limits.Exceeded.MaxFileSize"
@@ -369,6 +373,38 @@ with contextlib.redirect_stderr(io.StringIO()):  # the failure is logged; expect
     pool, _ = run_pool(2, 1 * GiB, (20 * GiB, 32 * GiB), batches=4, work=0.05, fail=True)
 assert pool._pending == 0 and not pool._started
 print("failing clamscan batch test passed ✓")
+
+# Descriptors are closed exactly once. If recording a result fails, a second
+# close would hit whatever the kernel handed that number to next -- here a
+# stand-in for the database file -- so it must still be open afterwards.
+with tempfile.TemporaryDirectory() as d:
+    held = {}
+
+    class Recorder:
+        def _clamscan_outcomes(self, batch, total):
+            return {i.fd: ScanOutcome(ScanStatus.CLEAN, "clamscan: OK") for i in batch}
+
+        def _finish(self, path, st, digest, outcome):
+            held.setdefault("db", os.open(Path(d, "database.db"), os.O_RDWR | os.O_CREAT))
+            held.setdefault("recorded", []).append(path.name)
+            if path.name == "a.bin":
+                raise RuntimeError("unexpected failure while recording")
+
+    items = []
+    for name in ("a.bin", "b.bin"):
+        p = Path(d, name)
+        p.write_bytes(b"x")
+        items.append(scanner_mod._Oversized(p, p.stat(), os.open(p, os.O_RDONLY), "digest"))
+    rec = Recorder()
+    pool = scanner_mod._ClamscanPool(1, GiB, lambda b, r: Scanner._clamscan_batch(rec, b, r))
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        pool.submit(items)
+        pool.wait()
+    os.fstat(held["db"])  # raises if the reused descriptor number was closed again
+    os.close(held["db"])
+    assert held["recorded"] == ["a.bin", "b.bin"], "one failure must not drop the rest of the batch"
+    assert all(item.fd == -1 for item in items)
+print("descriptors closed once test passed ✓")
 
 # A scan worker isn't held up by a running clamscan: with one slow batch
 # running, a second submit returns at once.
