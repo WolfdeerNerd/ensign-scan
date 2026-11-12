@@ -96,6 +96,10 @@ def clamscan_cli_available() -> bool:
 # clamd's config can't be found or read, and for any setting it leaves out.
 DEFAULT_MAX_FILE_SIZE = 100 * 2**20
 DEFAULT_MAX_SCAN_SIZE = 400 * 2**20
+# Signatures that use regular expressions (PCRE) are skipped for files
+# larger than PCREMaxFileSize -- the rest of the file is still scanned, and
+# clamd still says "OK". So it counts as one of clamd's limits too.
+DEFAULT_PCRE_MAX_FILE_SIZE = 100 * 2**20
 # The largest value ClamAV documents for MaxFileSize ("up to 2000MB").
 # Anything bigger always goes to clamscan, which gives the real answer --
 # so if a future ClamAV raises its ceiling, those files simply get scanned.
@@ -116,11 +120,13 @@ class ClamdLimits:
     database_dir: str | None     # clamd's DatabaseDirectory, so clamscan uses the same signatures
     alert_exceeds_max: bool
     source: str                  # the config file read, or why the defaults are in use
+    pcre_max_file_size: int = DEFAULT_PCRE_MAX_FILE_SIZE  # bytes; 0 = no limit
 
     @property
     def scan_limit(self) -> int:
         """Files of this size or larger go to clamscan instead of clamd."""
-        limits = [n for n in (self.max_file_size, self.max_scan_size) if n > 0]
+        limits = [n for n in (self.max_file_size, self.max_scan_size, self.pcre_max_file_size)
+                  if n > 0]
         return min(limits + [CLAMAV_MAX_SETTING])
 
 
@@ -152,6 +158,7 @@ def parse_clamd_config(text: str, source: str) -> ClamdLimits:
         database_dir=values.get("databasedirectory", "").strip('"') or None,
         alert_exceeds_max=values.get("alertexceedsmax", "").lower() in ("yes", "true", "1"),
         source=source,
+        pcre_max_file_size=size("PCREMaxFileSize", DEFAULT_PCRE_MAX_FILE_SIZE),
     )
 
 
@@ -194,6 +201,38 @@ def read_clamd_limits(pids: list[int] | None = None) -> ClamdLimits:
                        "ClamAV defaults (no clamd config found)")
 
 
+# --- memory, for deciding how many clamscans can run at once ----------------
+
+def memory_available() -> tuple[int, int] | None:
+    """(MemAvailable, MemTotal) in bytes, from /proc/meminfo. MemAvailable is
+    the kernel's own estimate of what can be used without swapping. None if
+    it can't be read."""
+    values = {}
+    try:
+        with open("/proc/meminfo", encoding="ascii", errors="replace") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                if key in ("MemAvailable", "MemTotal"):
+                    values[key] = int(rest.split()[0]) * 1024  # reported in kB
+    except (OSError, ValueError, IndexError):
+        return None
+    if len(values) < 2:
+        return None
+    return values["MemAvailable"], values["MemTotal"]
+
+
+def process_memory(pid: int) -> int | None:
+    """A process's resident memory (VmRSS) in bytes, or None."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii", errors="replace") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 # --- clamscan, for what clamd won't scan --------------------------------------
 
 def clamscan_user() -> tuple[int, int] | None:
@@ -229,7 +268,8 @@ def scan_fds_with_clamscan(
     Returns an outcome per fd; "raw" is clamscan's line(s) for that file.
     """
     argv = ["clamscan", "--no-summary", "--stdout",
-            "--max-filesize=0", "--max-scansize=0", "--alert-exceeds-max"]
+            "--max-filesize=0", "--max-scansize=0", "--pcre-max-filesize=0",
+            "--alert-exceeds-max"]
     if limits.database_dir:
         argv.append(f"--database={limits.database_dir}")
     argv += [f"/proc/self/fd/{fd}" for fd in fds]
@@ -425,6 +465,12 @@ class ClamdClient:
         the config file the running clamd was started with. See
         read_clamd_limits(): never raises, falls back to ClamAV's defaults."""
         return read_clamd_limits(_pids_named("clamd"))
+
+    def memory_in_use(self) -> int | None:
+        """How much memory clamd holds, in bytes -- nearly all of it its loaded
+        signatures, so about what each clamscan run will need too."""
+        sizes = [m for m in (process_memory(pid) for pid in _pids_named("clamd")) if m]
+        return max(sizes) if sizes else None
 
     # -- scanning ------------------------------------------------------
 

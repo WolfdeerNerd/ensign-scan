@@ -40,6 +40,8 @@ import shutil  # noqa: E402
 import sqlite3  # noqa: E402
 import stat  # noqa: E402
 import tempfile  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from sqlalchemy.orm import Session  # noqa: E402
@@ -81,6 +83,7 @@ conf = parse_clamd_config(
     "MaxFileSize 25M\n"
     "MaxScanSize   1G   # trailing comment\n"
     "MaxFileSize 300M\n"             # the last one wins, as in clamd
+    "PCREMaxFileSize 2000M\n"
     "DatabaseDirectory /var/lib/clamav\n"
     "AlertExceedsMax yes\n",
     "test",
@@ -89,7 +92,9 @@ assert conf.max_file_size == 300 * 2**20 and conf.max_scan_size == 2**30, conf
 assert conf.database_dir == "/var/lib/clamav" and conf.alert_exceeds_max
 assert conf.scan_limit == 300 * 2**20, "the smaller of the two limits"
 assert parse_clamd_config("MaxFileSize 512\nMaxScanSize 4k", "t").scan_limit == 512, "bytes and K"
-unlimited = parse_clamd_config("MaxFileSize 0\nMaxScanSize 0", "t")
+assert parse_clamd_config("MaxFileSize 2000M\nMaxScanSize 4000M", "t").scan_limit == 100 * 2**20, \
+    "PCREMaxFileSize (default 100M) counts too: regex signatures skip files past it"
+unlimited = parse_clamd_config("MaxFileSize 0\nMaxScanSize 0\nPCREMaxFileSize 0", "t")
 assert unlimited.scan_limit == 2000 * 2**20, "0 = no setting, but ClamAV's own ceiling still applies"
 assert parse_clamd_config("", "t").scan_limit == 100 * 2**20, "missing settings: ClamAV's defaults"
 assert parse_clamd_config("MaxFileSize lots", "t").max_file_size == 100 * 2**20, "unparsable: the default"
@@ -291,6 +296,97 @@ finally:
     (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
      scanner_mod.clamscan_user, scanner_mod._CLAMSCAN_BATCH) = real
 
+# --- clamscans side by side, as many as free memory allows ------------------------------------
+GiB = 2**30
+
+
+def run_pool(limit: int, per_copy: int, memory, batches: int = 6, work: float = 0.3,
+             fail: bool = False, percent: int = 25):
+    """Run `batches` fake batches through a pool with free memory reported as
+    `memory` (a (MemAvailable, MemTotal) pair, or None). Returns the pool and
+    the most batches seen waiting or running at any submit."""
+    real_memory = scanner_mod.memory_available
+    scanner_mod.memory_available = lambda: memory
+
+    def run_batch(batch, running):
+        time.sleep(work)
+        if fail:
+            raise RuntimeError("clamscan exploded")
+
+    pool = scanner_mod._ClamscanPool(limit, per_copy, run_batch, percent)
+    most_pending = 0
+    try:
+        for _ in range(batches):
+            pool.submit([])
+            most_pending = max(most_pending, pool._pending)
+        pool.wait()
+    finally:
+        scanner_mod.memory_available = real_memory
+    return pool, most_pending
+
+
+pool, _ = run_pool(3, 1 * GiB, (20 * GiB, 32 * GiB))
+assert pool.peak == 3, f"plenty of memory: up to the limit at once, got {pool.peak}"
+pool, _ = run_pool(3, 1 * GiB, (int(2.5 * GiB), 8 * GiB))
+assert pool.peak == 1, "2.5 GiB free minus the 2 GiB reserve can't fit another 1 GiB copy: one at a time"
+pool, _ = run_pool(3, 1 * GiB, None)
+assert pool.peak == 1, "free memory unknown: one at a time"
+# A clamscan still loading its signatures hasn't used its memory yet, so
+# free memory doesn't show it: each counts as using its share already.
+# 5 GiB free, 2 GiB reserve, 1 GiB each: the 1st always starts, then 2nd
+# (5-1-2 = 2 left) and 3rd (5-2-2 = 1 left), but not a 4th (5-3-2 = 0).
+pool, _ = run_pool(4, 1 * GiB, (5 * GiB, 16 * GiB))
+assert pool.peak == 3, f"starting clamscans count against free memory, got {pool.peak}"
+print("clamscan memory gating test passed ✓")
+
+# The fixed budget: however much is free, all clamscans together stay within
+# clamscan_memory_percent of total RAM. 32 GiB machine, nearly all free,
+# 1.5 GiB each: 25% = 8 GiB = 5 copies (a 6th would be 9 GiB).
+copy = 3 * GiB // 2
+pool, _ = run_pool(8, copy, (30 * GiB, 32 * GiB), batches=10)
+assert pool.peak == 5, f"25% of 32 GiB fits 5 copies of 1.5 GiB, got {pool.peak}"
+pool, _ = run_pool(8, copy, (30 * GiB, 32 * GiB), batches=10, percent=50)
+assert pool.peak == 8, f"50% (16 GiB) fits 10, so the count limit of 8 decides, got {pool.peak}"
+pool, _ = run_pool(4, 3 * GiB, (7 * GiB, 8 * GiB))
+assert pool.peak == 1, "one copy is bigger than the whole 2 GiB budget: still one runs, never more"
+with contextlib.redirect_stdout(io.StringIO()) as buf:
+    assert Config._from_dict({"clamscan_memory_percent": 95}, "t").clamscan_memory_percent == 75
+    assert Config._from_dict({"clamscan_memory_percent": 1}, "t").clamscan_memory_percent == 5
+assert "outside 5-75" in buf.getvalue(), buf.getvalue()
+assert Config._from_dict({"clamscan_memory_percent": 40}, "t").clamscan_memory_percent == 40
+print("clamscan memory budget test passed ✓")
+
+# The workers never wait for clamscan itself -- only when batches pile up:
+# at most limit + 1 waiting or running, so queued open files stay bounded.
+pool, most_pending = run_pool(1, 1 * GiB, None, batches=6, work=0.2)
+assert most_pending <= 2, f"batches waiting or running must stay at limit + 1, saw {most_pending}"
+pool, most_pending = run_pool(3, 1 * GiB, (20 * GiB, 32 * GiB), batches=10, work=0.2)
+assert most_pending <= 4, most_pending
+print("clamscan queue bound test passed ✓")
+
+# A batch that fails doesn't stop the others or hang the wait.
+with contextlib.redirect_stderr(io.StringIO()):  # the failure is logged; expected here
+    pool, _ = run_pool(2, 1 * GiB, (20 * GiB, 32 * GiB), batches=4, work=0.05, fail=True)
+assert pool._pending == 0 and not pool._started
+print("failing clamscan batch test passed ✓")
+
+# A scan worker isn't held up by a running clamscan: with one slow batch
+# running, a second submit returns at once.
+release = threading.Event()
+pool = scanner_mod._ClamscanPool(1, GiB, lambda batch, running: release.wait(5))
+pool.submit([])
+t0 = time.monotonic()
+pool.submit([])  # waits behind the first, but the caller doesn't
+assert time.monotonic() - t0 < 0.5, "submit must not wait for clamscan to finish"
+release.set()
+pool.wait()
+print("non-blocking workers test passed ✓")
+
+
+# --- the setting itself ---------------------------------------------------------------------
+assert Config._from_dict({"max_clamscans": 3}, "t").max_clamscans == 3
+print("max_clamscans setting test passed ✓")
+
 # --- real ClamAV (CI) --------------------------------------------------------------------------
 socket_path = os.environ.get("ENSIGN_TEST_CLAMD_SOCKET")
 if not socket_path or not shutil.which("clamscan"):
@@ -309,13 +405,19 @@ with tempfile.TemporaryDirectory() as d:
         fh.truncate(2049 * 2**20)
     clean = Path(d, "clean.bin")
     clean.write_bytes(b"nothing here " * 1000)
-    fds = [os.open(p, os.O_RDONLY) for p in (padded, huge, clean)]
+    regex = Path(d, "regex-past-100m.bin")      # only a regex (PCRE) signature matches this
+    with open(regex, "wb") as fh:
+        fh.write(b"ENSIGN-PCRE" + b"-TEST-MARKER")
+        fh.truncate(150 * 2**20)
+    fds = [os.open(p, os.O_RDONLY) for p in (padded, huge, clean, regex)]
     try:
         got = scan_fds_with_clamscan(fds, limits, timeout=600)
     finally:
         for fd in fds:
             os.close(fd)
-    padded_r, huge_r, clean_r = (got[fd] for fd in fds)
+    padded_r, huge_r, clean_r, regex_r = (got[fd] for fd in fds)
+    assert regex_r.status == ScanStatus.INFECTED and "PCRE" in regex_r.threat_name, \
+        f"regex signatures must apply past PCREMaxFileSize too: {regex_r}"
     assert padded_r.status == ScanStatus.INFECTED and "EICAR" in padded_r.threat_name.upper(), padded_r
     assert huge_r.status == ScanStatus.INCOMPLETE, f"ClamAV can't scan past ~2 GiB: {huge_r}"
     assert huge_r.threat_name == "Heuristics.Limits.Exceeded.MaxFileSize", huge_r
