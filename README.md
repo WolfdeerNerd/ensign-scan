@@ -160,6 +160,7 @@ While it runs, the bottom line of the terminal shows live progress: files done o
 | `python3 main.py ~/Downloads` | Scan just that one tree instead of everything in config |
 | `python3 main.py --no-scan` | Hash and record files, skip ClamAV entirely |
 | `python3 main.py --skip-rescans` | Skip the infected/error/stale rescan passes at the end |
+| `python3 main.py --sweep` | After the scan, sweep files too large for ClamAV in slices (see Large files) |
 | `python3 main.py --config PATH` | Use an alternate config file (default: `~/.config/ensign/config.toml`) |
 | `ENSIGN_CONFIG=PATH python3 main.py` | The same as `--config`, set through an environment variable. If both are given, `--config` wins |
 
@@ -212,6 +213,13 @@ PCREMaxFileSize 2000M
 
 ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This is a limit in ClamAV itself, and its developers have said so. Ensign marks those files **not fully scanned** and lists them at the end of each run, never as clean. They are hashed and tracked, so a changed one is looked at again.
 
+**The sweep.** For those files, Ensign can do the next best thing: read the file in overlapping slices and pass each one to clamd like an ordinary file. It's off by default; turn it on with `sweep_huge_files = true` in your config, or for a single run with `--sweep`.
+
+- **What it finds:** malware bytes sitting anywhere in the file. If a slice matches a signature, the whole file is flagged as infected, and the report says which bytes matched. Slices overlap, so a signature cut in two by a slice boundary is still found.
+- **What it can't find:** anything ClamAV only sees by unpacking or understanding the whole file. That means what's inside compressed archives, whole-file hash signatures, and file-structure checks. So a sweep that finds nothing leaves the file **not fully scanned**, never clean. Heuristic hits (`Heuristics.*`) on a slice are noted on the file but don't flag it: a slice isn't a real file, and those checks misfire on fragments.
+- **What it costs:** it reads each file once more, only when the file is new or has changed, or when the signatures have moved on by your `rescan_after_signature_updates` setting. Slices go to clamd through memory, never as a copy on disk, and are sized to fit clamd's limits (at most 256 MiB). Raising clamd's `MaxFileSize` to `2000M` means fewer, bigger slices.
+- **Sweep results are left alone by the normal rescans,** which can't see what the sweep saw and would wipe its verdict. A sweep result changes only when the file changes, or when the sweep runs again after a signature update.
+
 `clamscan` unpacks archives in `/var/tmp` rather than `/tmp`, which on many systems (Arch among them) is held in RAM. `clamscan` reads the files through descriptors Ensign has already opened, the same way clamd does, so it never reopens a file by name. Run under `sudo`, Ensign starts `clamscan` as the `clamav` user, not as root: like clamd, it parses untrusted files.
 
 `AlertExceedsMax yes` in clamd.conf is worth setting. Without it, clamd also says "OK" for an archive that unpacks to more than `MaxScanSize`, and Ensign can't tell from the file's size. With it, clamd flags these, and Ensign rescans them with `clamscan` (it doesn't count them as infected).
@@ -236,7 +244,7 @@ After the first full scan, Ensign sends a file to ClamAV again only when somethi
 
 - **Its size or modification time changed.**
 - **Its inode change time (ctime) changed.** A program can set a file's modification time back to what it was, but it can't do that to ctime. So a file that was edited and then given its old timestamp back is still caught. The side effect is that `chmod`, `chown` and renaming a file also change ctime, so they trigger a rescan too.
-- **It was last scanned clean under an out-of-date signature database.** A file ClamAV called clean yesterday can match a signature released today. `rescan_after_signature_updates` in your config sets how many signature updates behind a clean file can fall before it is scanned again. Updates arrive about once a day, so the number is roughly days: the default `7` re-checks everything about weekly, and `31` about monthly. The allowed range is 7 to 31 (a value outside it is clamped, with a warning), or `0` to turn this off. Each pass sends every out-of-date file through clamd again, which on a machine with millions of files takes a while, so pick the longest interval you are comfortable with.
+- **It was last scanned clean (or allowed by you) under an out-of-date signature database.** A file ClamAV called clean yesterday can match a signature released today. `rescan_after_signature_updates` in your config sets how many signature updates behind a clean file can fall before it is scanned again. Updates arrive about once a day, so the number is roughly days: the default `7` re-checks everything about weekly, and `31` about monthly. The allowed range is 7 to 31 (a value outside it is clamped, with a warning), or `0` to turn this off. Each pass sends every out-of-date file through clamd again, which on a machine with millions of files takes a while, so pick the longest interval you are comfortable with.
 
 The first run after upgrading from a version that didn't track ctime or signature versions scans every file once. After that it settles back to scanning only what changed.
 

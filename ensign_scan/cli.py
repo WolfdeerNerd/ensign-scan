@@ -80,6 +80,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--diagnostics", action="store_true",
                         help="Print versions, settings and counts for a bug report, then exit. "
                              "Contains no paths, usernames, hostnames or file names.")
+    parser.add_argument("--sweep", action="store_true",
+                        help="After this scan, sweep files too large for ClamAV (over ~2 GiB) in "
+                             "slices (as sweep_huge_files = true does for every scan)")
     parser.add_argument("--allow", metavar="PATH", action="append", default=[],
                         help="Mark a file ClamAV flagged as a false positive (this exact content and "
                              "signature only), then exit. Asks to confirm. Can be given more than once.")
@@ -264,6 +267,9 @@ def run(args: argparse.Namespace, config: Config) -> int:
         scanner.rescan_infected()
         scanner.rescan_errors()
         scanner.rescan_stale()
+    if scan and (args.sweep or config.sweep_huge_files):
+        print("\n=== Sweeping Files Too Large for ClamAV ===")
+        scanner.sweep_huge([str(t) for t in targets])
 
     summary = scan_summary(scanner.engine, paths=args.targets or None)
     if missing:

@@ -228,8 +228,17 @@ def incomplete_report(engine: Engine, top: int = 10, paths: list[str] | None = N
           "itself, not in Ensign or your settings. They are hashed and tracked, and one that "
           "changes is looked at again. Treat them as unverified, especially any you didn't "
           "create or download yourself.")
+    swept = sum(1 for r in rows if (r[3] or "").startswith("swept: "))
+    if swept:
+        print(f"{swept} of them were swept in slices and nothing was found in their raw bytes, "
+              f"which doesn't cover what's inside compressed archives.")
+    elif any((r[2] or "").endswith("MaxFileSize") for r in rows):
+        print("For files over 2 GiB, a sweep in slices can look for malware bytes in them: "
+              "ensign-scan --sweep, or sweep_huge_files = true in the config.")
     for filepath, size, reason, result in rows[:top]:
         why = reason or result or "unknown"
+        if (result or "").startswith("swept: "):
+            why = f"{why} · swept, nothing found in the raw bytes"
         print(f"  [yellow]~[/yellow] {shown(filepath)}")
         _note("↳", f"{_human_size(size or 0)} · {why}")
     if len(rows) > top:

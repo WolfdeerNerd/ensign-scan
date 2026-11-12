@@ -100,6 +100,11 @@ class Config:
     # runs, even if it alone is over this. Clamped to
     # CLAMSCAN_MEMORY_PERCENT_MIN..CLAMSCAN_MEMORY_PERCENT_MAX, with a warning.
     clamscan_memory_percent: int = 25
+    # Sweep files too large for ClamAV (over ~2 GiB) in overlapping slices
+    # after the scan: catches raw byte patterns, but not what's inside
+    # compressed archives, so it never marks a file clean. Off by default;
+    # --sweep runs it once.
+    sweep_huge_files: bool = False
     rescan_after_days: int = 90
     # Rescan a clean file once the signature database has moved this many
     # versions past the one it was last scanned under. Usually about one
@@ -185,7 +190,7 @@ class Config:
     def _from_dict(cls, raw: dict, source: str) -> "Config":
         known = {
             "data_dir", "clamd_socket", "max_workers", "cpu_share", "max_clamscans",
-            "clamscan_memory_percent",
+            "clamscan_memory_percent", "sweep_huge_files",
             "rescan_after_days", "rescan_after_signature_updates",
             "infected_alert_seconds", "infected_alert_only_while_gaming",
             "log_keep_days", "log_max_total_mb",
@@ -206,7 +211,7 @@ class Config:
                     "rescan_after_days",
                     "rescan_after_signature_updates", "infected_alert_seconds",
                     "infected_alert_only_while_gaming", "log_keep_days",
-                    "log_max_total_mb", "signature_max_age_days"):
+                    "log_max_total_mb", "signature_max_age_days", "sweep_huge_files"):
             if key in raw:
                 kwargs[key] = raw[key]
         if "scan_targets" in raw:
@@ -290,6 +295,13 @@ max_clamscans = 0
 # The most memory those clamscans may use together, as a percent of total
 # RAM, however much happens to be free (5-75; one always runs).
 clamscan_memory_percent = 25
+
+# ClamAV can't scan files over about 2 GiB at all. true = after each scan,
+# sweep such files in overlapping slices through clamd: it finds malware
+# bytes sitting in the raw file, but not inside compressed archives, so a
+# swept file is never called clean. Reads each one once more, only when it
+# is new or has changed. --sweep runs it for a single scan.
+sweep_huge_files = false
 rescan_after_days = 90
 
 # Rescan an unchanged, previously-clean file once the virus-signature
