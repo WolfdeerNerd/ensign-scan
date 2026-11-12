@@ -204,6 +204,12 @@ def run(args: argparse.Namespace, config: Config) -> int:
         allowlist.list_allowed(scanner.engine)
         return 0
     if args.clamav_report:
+        if not scanner.clamd.ping():
+            print("[red]✗ clamd is not answering on its socket.[/red] The file is scanned again "
+                  "before a report is written, so clamd has to be running.")
+            print(f"  Socket: {shown(config.clamd_socket)}")
+            print("  Start it with: sudo systemctl start clamav-daemon")
+            return 1
         if not clamd_is_safe(scanner):
             return 1
         fpreport.make_reports(scanner, config, args.clamav_report)

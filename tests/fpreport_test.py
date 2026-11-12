@@ -197,6 +197,23 @@ with tempfile.TemporaryDirectory() as d:
         fpreport.HOME = real_home
     print("personal folder warning test passed ✓")
 
+    # --- failures are explained, never a traceback --------------------------------------------
+    class Stops(FakeClamd):  # clamd went away after the scan
+        def scan_fd(self, fd, label=""):
+            raise ConnectionRefusedError(111, "Connection refused")
+    out, text = quiet(fpreport.make_report, Scanner(config, clamd=Stops()), config, str(flagged))
+    assert out is None and "couldn't be scanned again" in text and "Connection refused" in text, text
+    if os.geteuid() != 0:  # root can write anywhere
+        for old in reports_dir.iterdir():
+            old.unlink()
+        reports_dir.chmod(0o500)  # e.g. created by an earlier run under sudo
+        try:
+            out, text = quiet(fpreport.make_report, s, config, str(flagged))
+            assert out is None and "couldn't be saved" in text and "sudo" in text, text
+        finally:
+            reports_dir.chmod(0o700)
+    print("failures explained test passed ✓")
+
     # --- hostile names are shown escaped, like everywhere else ---------------------------------
     hostile = tree / "x\x1b]0;pwned\x07.dll"
     hostile.write_bytes(b"evil name, EVIL content")

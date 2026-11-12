@@ -136,7 +136,10 @@ def make_report(scanner, config, path_text: str) -> Path | None:
                             f"since it was scanned, so it isn't the content ClamAV flagged. Scan it "
                             f"again first.")
             return None
-        outcome, how = _rescan(scanner, fd, path, st.st_size)
+        try:
+            outcome, how = _rescan(scanner, fd, path, st.st_size)
+        except OSError as exc:  # clamd stopped answering, say
+            outcome, how = None, f"clamd didn't answer ({exc})"
         mime = _mime_type(fd)
     finally:
         os.close(fd)
@@ -191,11 +194,18 @@ def make_report(scanner, config, path_text: str) -> Path | None:
     text = _scrub("\n".join(lines)) + "\n"
 
     folder = Path(config.data_dir) / "clamav-reports"
-    folder.mkdir(parents=True, exist_ok=True)
     out = folder / f"false-positive-{sha256[:12]}.txt"
-    descriptor = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except OSError as exc:
+        print_unwrapped(f"[yellow]No report:[/yellow] {shown(path)}\n  The report couldn't be "
+                        f"saved to {shown(folder)}: {shown(exc.strerror or exc)}. If an earlier "
+                        f"run used sudo, that folder may belong to root: remove it with sudo, "
+                        f"then try again without sudo.")
+        return None
 
     print(f"\n[bold]ClamAV false positive report: {shown(current)}[/bold]")
     if changed_name:
