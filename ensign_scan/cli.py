@@ -187,7 +187,8 @@ def run(args: argparse.Namespace, config: Config) -> int:
     if args.suggest_fixes:
         suggest_fixes(scanner.engine, paths=args.targets or None)
         return 0
-    print(f" Workers:  {scanner.workers} ({scanner.workers_reason})")
+    auto = " (auto)" if config.max_workers <= 0 else ""
+    print(f" Workers:  {scanner.workers}{auto}")
     scan = not args.no_scan
 
     if scan and not scanner.clamd.ping():

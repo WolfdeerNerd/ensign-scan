@@ -328,7 +328,6 @@ class Scanner:
         self._oversized_lock = threading.Lock()
         self._clamscans: _ClamscanPool | None = None
         self._warned_clamscan: set[str] = set()
-        self.workers_reason = ""
 
     def prepare_clamd(self) -> None:
         """Check clamd once, before the first file is sent to it.
@@ -408,24 +407,12 @@ class Scanner:
         path rather than needing a separate non-threaded code path.
         """
         if self.config.max_workers > 0:
-            self.workers_reason = "max_workers in config"
             return self.config.max_workers
         clamd_max = self.clamd.max_threads()
         if clamd_max is None:
-            self.workers_reason = "auto, but clamd didn't report its MaxThreads; using the fallback"
             return 5  # daemon unreachable or unparseable; safe default
         cpus = os.cpu_count() or 4
-        workers = max(1, min(clamd_max - 2, cpus, 12))
-        # Say which of the limits decided it, so a low number can be traced.
-        if workers == clamd_max - 2:
-            self.workers_reason = f"auto: clamd's MaxThreads {clamd_max}, minus 2 left free"
-        elif workers == cpus:
-            self.workers_reason = f"auto: {cpus} CPU threads"
-        elif workers == 12:
-            self.workers_reason = "auto: Ensign's maximum of 12"
-        else:
-            self.workers_reason = "auto"
-        return workers
+        return max(1, min(clamd_max - 2, cpus, 12))
 
     # ------------------------------------------------------------------
     # Tree scanning

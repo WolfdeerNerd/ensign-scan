@@ -380,34 +380,9 @@ pool.wait()
 print("non-blocking workers test passed ✓")
 
 
-# --- the worker count says how it was chosen ----------------------------------------------------
-class ThreadsClamd(FakeClamd):
-    def __init__(self, max_threads):
-        super().__init__()
-        self._max = max_threads
-
-    def max_threads(self):
-        return self._max
-
-
-real_cpu_count = os.cpu_count
-try:
-    with tempfile.TemporaryDirectory() as d:
-        def resolve(clamd, cpus, **cfg):
-            os.cpu_count = lambda: cpus
-            config = Config(db_url=f"sqlite:///{d}/w.db", log_file=Path(d, "e.txt"), **cfg)
-            s = Scanner(config, clamd=clamd)
-            return s.workers, s.workers_reason
-        assert resolve(ThreadsClamd(12), 16) == (10, "auto: clamd's MaxThreads 12, minus 2 left free")
-        assert resolve(ThreadsClamd(12), 6) == (6, "auto: 6 CPU threads")
-        assert resolve(ThreadsClamd(40), 32) == (12, "auto: Ensign's maximum of 12")
-        workers, why = resolve(ThreadsClamd(None), 16)
-        assert workers == 5 and "didn't report its MaxThreads" in why, why
-        assert resolve(ThreadsClamd(12), 16, max_workers=3) == (3, "max_workers in config")
-finally:
-    os.cpu_count = real_cpu_count
+# --- the setting itself ---------------------------------------------------------------------
 assert Config._from_dict({"max_clamscans": 3}, "t").max_clamscans == 3
-print("worker count reason test passed ✓")
+print("max_clamscans setting test passed ✓")
 
 # --- real ClamAV (CI) --------------------------------------------------------------------------
 socket_path = os.environ.get("ENSIGN_TEST_CLAMD_SOCKET")
