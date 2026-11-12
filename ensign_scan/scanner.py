@@ -111,6 +111,18 @@ _CLAMD_HEADROOM = 2
 # follows size. And every queued file holds an open descriptor until its run.
 _CLAMSCAN_BATCH = 32
 _CLAMSCAN_BATCH_BYTES = 8 * 2**30
+# The most clamscan will read of any one file: ClamAV can't scan past about
+# 2 GiB and refuses larger files without reading them. So a bigger file
+# counts as this much towards a batch -- otherwise one 8 GiB file would
+# fill a batch on its own, and cost a whole signature load just to be told
+# "too big". clamscan still gives the answer, so if ClamAV ever lifts its
+# ceiling, those files simply get scanned.
+_CLAMSCAN_MAX_READ = 2**31
+
+
+def _scan_cost(size: int) -> int:
+    """How many bytes clamscan will actually read of a file this size."""
+    return min(size, _CLAMSCAN_MAX_READ)
 # clamscan time allowed per run: a fixed allowance plus 1 s per 5 MiB.
 _CLAMSCAN_BASE_TIMEOUT = 300.0
 _CLAMSCAN_BYTES_PER_SECOND = 5 * 2**20
@@ -903,7 +915,7 @@ class Scanner:
         # is ever added to a batch already handed over.
         with self._oversized_lock:
             self._oversized.append(item)
-            self._oversized_bytes += item.st.st_size
+            self._oversized_bytes += _scan_cost(item.st.st_size)
             full = (len(self._oversized) >= _CLAMSCAN_BATCH
                     or self._oversized_bytes >= _CLAMSCAN_BATCH_BYTES)
             batch = self._oversized if full else None
@@ -961,6 +973,7 @@ class Scanner:
 
     def _clamscan_batch(self, batch: list[_Oversized], running: int = 1) -> None:
         total = sum(item.st.st_size for item in batch)
+        to_read = sum(_scan_cost(item.st.st_size) for item in batch)  # sets the time limit
         alongside = f", {running} clamscans running" if running > 1 else ""
         print(f"\n[bold]Scanning {len(batch)} large file(s) ({human_size(total)}) with clamscan[/bold]"
               f"[dim]{alongside}[/dim]")
@@ -984,7 +997,7 @@ class Scanner:
                 advance(status)
 
         try:
-            outcomes = self._clamscan_outcomes(batch, total, record)
+            outcomes = self._clamscan_outcomes(batch, to_read, record)
         except Exception as exc:  # every file still gets a result, and is counted
             log.exception("clamscan batch failed")
             outcomes = {}

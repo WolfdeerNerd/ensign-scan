@@ -450,6 +450,34 @@ try:
         assert sorted(len(b) for b in batches) == [2, 3], f"closed at 12 KiB, then the rest: {batches}"
         assert scanner._oversized == [] and scanner._oversized_bytes == 0
         print("batch byte limit test passed ✓")
+
+        # --- a file past ClamAV's ~2 GiB ceiling counts as 2 GiB towards a batch: clamscan
+        #     refuses it without reading it. Five 8 GiB files: 4 x 2 GiB fills the 8 GiB batch,
+        #     then 1 -- not five batches of one, each a whole signature load for "too big".
+        batches.clear()
+        eight_gib = 8 * 2**30
+        items = []
+        for i in range(5):
+            p = Path(d, f"huge{i}.img")
+            p.write_bytes(b"H")
+            real_st = p.stat()
+            big_st = os.stat_result((real_st.st_mode, real_st.st_ino, real_st.st_dev, real_st.st_nlink,
+                                     real_st.st_uid, real_st.st_gid, eight_gib, real_st.st_atime,
+                                     real_st.st_mtime, real_st.st_ctime))
+            items.append(scanner_mod._Oversized(p, big_st, os.open(p, os.O_RDONLY), "digest"))
+        real_batch = scanner_mod._CLAMSCAN_BATCH
+        scanner_mod._CLAMSCAN_BATCH = 100  # so only bytes can close a batch here
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                for item in items:
+                    scanner._queue_oversized(item)
+                scanner.scan_oversized()
+        finally:
+            scanner_mod._CLAMSCAN_BATCH = real_batch
+        assert sorted(len(b) for b in batches) == [1, 4], \
+            f"huge files share batches, counted at what clamscan reads: {batches}"
+        assert scanner_mod._scan_cost(eight_gib) == 2**31 and scanner_mod._scan_cost(4096) == 4096
+        print("huge files share batches test passed ✓")
 finally:
     (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
      scanner_mod.clamscan_user, scanner_mod._CLAMSCAN_BATCH) = real
