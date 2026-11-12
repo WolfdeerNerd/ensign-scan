@@ -387,6 +387,43 @@ print("non-blocking workers test passed ✓")
 assert Config._from_dict({"max_clamscans": 3}, "t").max_clamscans == 3
 print("max_clamscans setting test passed ✓")
 
+
+# --- advice to raise clamd's MaxThreads, only when the CPU could take more ------------------------
+class ThreadsClamd(FakeClamd):
+    def __init__(self, max_threads):
+        super().__init__()
+        self._max = max_threads
+
+    def max_threads(self):
+        return self._max
+
+
+real_cpu_count = os.cpu_count
+try:
+    with tempfile.TemporaryDirectory() as d:
+        def hint(clamd_threads, cpus, **cfg):
+            os.cpu_count = lambda: cpus
+            config = Config(db_url=f"sqlite:///{d}/w.db", log_file=Path(d, "e.txt"), **cfg)
+            s = Scanner(config, clamd=ThreadsClamd(clamd_threads))
+            return s.workers, s.thread_hint()
+        # At most 3/4 of the CPU threads: 12 threads -> 9, 16 -> 12, 24 or more -> 14.
+        workers, tip = hint(7, 12)
+        assert workers == 5 and "MaxThreads 7 limits Ensign to 5" in tip and "MaxThreads 9" in tip \
+            and "would allow 7, leaving 5 CPU threads free" in tip, tip
+        workers, tip = hint(7, 16)
+        assert "MaxThreads 12" in tip and "would allow 10, leaving 6" in tip, tip
+        workers, tip = hint(7, 32)
+        assert "MaxThreads 14" in tip and "would allow 12" in tip, f"capped at 12 workers: {tip}"
+        assert hint(7, 8)[1] is None, "3/4 of 8 is 6, below the current 7: nothing to suggest"
+        assert hint(7, 6)[1] is None
+        assert hint(9, 12)[1] is None, "already at 3/4"
+        assert hint(14, 32)[1] is None, "already at Ensign's maximum"
+        assert hint(None, 32)[1] is None, "clamd didn't say: no advice"
+        assert hint(7, 32, max_workers=3)[1] is None, "workers set by hand: no advice"
+finally:
+    os.cpu_count = real_cpu_count
+print("MaxThreads advice test passed ✓")
+
 # --- real ClamAV (CI) --------------------------------------------------------------------------
 socket_path = os.environ.get("ENSIGN_TEST_CLAMD_SOCKET")
 if not socket_path or not shutil.which("clamscan"):
