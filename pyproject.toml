@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ensign-scan"
-version = "0.5.0"
+version = "0.6.0"
 description = "Local-first ClamAV file scanner for Linux: hashes files, tracks changes in a local database, and scans only what changed."
 readme = "README.md"
 requires-python = ">=3.11"
