@@ -174,6 +174,9 @@ These run one job and exit — no full scan.
 | `python3 main.py --verify-packages` | Cross-check installed files against the package manager's own checksums, flag mismatches (can be slow, and has no time limit: Ctrl+C stops it; `--verify-pacman` still works as the old name) |
 | `python3 main.py --suggest-fixes` | List files clamd could not read, grouped by directory, optionally scoped to given targets |
 | `python3 main.py --diagnostics` | Print versions, settings and counts for a bug report. Contains no paths, usernames, hostnames or file names, and writes nothing |
+| `python3 main.py --allow PATH` | Mark a file ClamAV flagged as a false positive (see A note on infected results). Asks to confirm; `--yes` skips the question |
+| `python3 main.py --unallow PATH` | Undo `--allow`: the file counts as infected again |
+| `python3 main.py --list-allowed` | List every file you've allowed |
 
 ### Only one run at a time
 
@@ -319,6 +322,17 @@ sqlite3 ~/.local/share/ensign/system.db "SELECT * FROM files WHERE filepath='/fu
 ### A note on infected results
 
 ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match on legitimate code patterns — for example, JS build tools that generate functions at runtime from template/markup content (Vue's `compiler-sfc`, Vite's dependency cache) can trigger a phishing-heuristic match despite being ordinary framework code. An `infected` status is worth investigating, not treating as an automatic threat. Check what the file actually is and, if it looks like legitimate tooling, search the threat name plus the library name before assuming compromise.
+
+**If you're sure it's a false positive**, `--allow PATH` tells Ensign so, and you can do two more things besides:
+
+- **Report it to ClamAV,** so the signature gets fixed for everyone: <https://www.clamav.net/reports/fp>, or ClamAV's `clamsubmit` tool. Submitting sends them the file, so don't submit anything private. A signature whose name ends in `.UNOFFICIAL` doesn't come from ClamAV but from a third-party signature set, so report it to whoever provides that set.
+- **Allow it in Ensign** with `--allow PATH`. Ensign first hashes the file again, so you can only allow the exact content that was flagged, then asks you to confirm. An allowance is deliberately narrow:
+  - it covers that exact content (its SHA-256), flagged by that exact signature. Identical copies elsewhere are covered too, since they're the same false positive. If the file changes, or a different signature flags it, it's flagged again;
+  - allowed files don't count as infected for alerts or the exit code, but they're never hidden: every run lists them under "ALLOWED BY YOU", and `--list-allowed` shows them all;
+  - they're still rescanned when the signatures update, so once ClamAV fixes the false positive the file simply turns clean;
+  - `--unallow PATH` undoes it.
+
+Allowances live in Ensign's own database. Ensign doesn't touch ClamAV or its signatures, so nothing else that uses clamd is affected. (ClamAV's own allow lists, `.sfp` and `.ign2` files in its database folder, work for every program using clamd. See ClamAV's documentation if that's what you want.)
 
 ### For Steam users,
 ### A note on Proton's 'Z:' drive

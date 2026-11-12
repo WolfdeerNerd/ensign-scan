@@ -433,6 +433,9 @@ def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, in
     print(f"✗ Errors:        {counts.get(ScanStatus.ERROR.value, 0)}")
     print(f"? Pending:       {counts.get(ScanStatus.PENDING.value, 0)}")
     print(f"• Classified:    {counts.get(ScanStatus.CLASSIFIED.value, 0)}")
+    allowed = counts.get(ScanStatus.ALLOWED.value, 0)
+    if allowed:
+        print(f"○ Allowed by you: {allowed}")
     incomplete = counts.get(ScanStatus.INCOMPLETE.value, 0)
     if incomplete:
         print(f"[yellow]~ Not fully scanned: {incomplete}[/yellow]")

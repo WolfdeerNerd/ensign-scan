@@ -45,7 +45,7 @@ from typing import NamedTuple
 from rich import print
 from sqlalchemy.orm import Session
 
-from . import secrets
+from . import allowlist, secrets
 from .clamd import (
     DEFAULT_LIMITS,
     LIMITS_EXCEEDED_PREFIX,
@@ -94,6 +94,7 @@ _STATUS_SYMBOLS = {
     ScanStatus.PENDING.value: "?",
     ScanStatus.CLASSIFIED.value: "[dim]•[/dim]",
     ScanStatus.INCOMPLETE.value: "[yellow]~[/yellow]",
+    ScanStatus.ALLOWED.value: "[cyan]○[/cyan]",
 }
 
 # Workers: never more than this, and always this many fewer than clamd's
@@ -356,6 +357,7 @@ class Scanner:
         self._oversized_bytes = 0  # total size of the files in self._oversized
         self._oversized_lock = threading.Lock()
         self._clamscans: _ClamscanPool | None = None
+        self._allowed_pairs: set[tuple[str, str]] | None = None  # see _allowed()
         self.clamd_max_threads: int | None = None  # set when the worker count is resolved
         # Scan workers busy on a file right now: they share the CPU budget
         # with the clamscans.
@@ -401,6 +403,14 @@ class Scanner:
         except LookupError:
             return False
         return True
+
+    def _allowed(self) -> set[tuple[str, str]]:
+        """Your allowances (allowlist.py), read once per run."""
+        if self._allowed_pairs is None:
+            with self._prepare_lock:
+                if self._allowed_pairs is None:
+                    self._allowed_pairs = allowlist.allowed_pairs(self.engine)
+        return self._allowed_pairs
 
     def _scan_limit(self) -> int:
         return (self.limits or DEFAULT_LIMITS).scan_limit
@@ -654,7 +664,10 @@ class Scanner:
         """
         threshold = self.config.rescan_after_signature_updates
         current = self._sig_version
-        if threshold <= 0 or current is None or prev.status != ScanStatus.CLEAN.value:
+        # Allowed files too: newer signatures may have fixed the false
+        # positive (it turns clean) or flag it with something else (infected).
+        if threshold <= 0 or current is None or prev.status not in (
+                ScanStatus.CLEAN.value, ScanStatus.ALLOWED.value):
             return False
         if prev.sig_version is None:
             return True  # clean under an unknown database: can't vouch for it
@@ -850,6 +863,11 @@ class Scanner:
     ) -> tuple[str | None, str]:
         """Record a hashed (and maybe scanned) file, note SSH-file changes,
         and print its line."""
+        if (outcome is not None and outcome.status == ScanStatus.INFECTED and digest
+                and (digest, outcome.threat_name or "Unknown") in self._allowed()):
+            # You marked this exact content, flagged by this exact signature,
+            # as a false positive (allowlist.py). Anything else stays infected.
+            outcome = ScanOutcome(ScanStatus.ALLOWED, outcome.raw, outcome.threat_name)
         try:
             previous_hash = self._upsert_file(path, st, digest, outcome)
         except Exception as exc:
@@ -869,6 +887,8 @@ class Scanner:
 
         status = outcome.status.value if outcome else ScanStatus.PENDING.value
         symbol = _STATUS_SYMBOLS.get(status, "?")
+        if outcome is not None and outcome.status == ScanStatus.ALLOWED:
+            symbol = f"{symbol} [dim](allowed by you)[/dim]"
         print(f"{symbol} {shown(path.name):.<50} {digest[:16]}… {status}")
         return digest, status
 
@@ -1086,7 +1106,7 @@ class Scanner:
                     record.scan_result = outcome.raw
                     record.threat_name = outcome.threat_name
                     record.last_scanned = utcnow()
-                    if outcome.status in (ScanStatus.CLEAN, ScanStatus.INFECTED):
+                    if outcome.status in (ScanStatus.CLEAN, ScanStatus.INFECTED, ScanStatus.ALLOWED):
                         record.sig_version = self._sig_version
                 session.commit()
             except Exception:

@@ -8,7 +8,19 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import Column, DateTime, Integer, LargeBinary, String, Text, TypeDecorator, and_, or_, type_coerce
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    TypeDecorator,
+    UniqueConstraint,
+    and_,
+    or_,
+    type_coerce,
+)
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -36,6 +48,13 @@ class ScanStatus(str, Enum):
     # were not checked, so it must never count as clean. threat_name holds
     # ClamAV's reason (Heuristics.Limits.Exceeded.MaxFileSize, ...).
     INCOMPLETE = "incomplete"
+    # ClamAV flagged this file, and you told Ensign it's a false positive
+    # (ensign-scan --allow). Only for this exact content (SHA-256) and this
+    # exact signature: if the file changes, or another signature hits it,
+    # it is flagged again. Listed in its own section every run, never
+    # hidden; doesn't count as infected for alerts or the exit code.
+    # threat_name keeps the signature. See allowlist.py.
+    ALLOWED = "allowed"
 
 
 # scan_result for a file Ensign itself couldn't open or read, so clamd never
@@ -170,6 +189,25 @@ class FileRecord(Base):
 
     def __repr__(self) -> str:
         return f"<FileRecord {self.filepath!r} {self.scan_status}>"
+
+
+class Allowance(Base):
+    """One "allowed by you": this exact content flagged by this exact
+    signature is a false positive, in your judgment. Keyed on content, not
+    path -- an identical copy elsewhere is the same false positive, and a
+    changed file is not covered."""
+    __tablename__ = "allowances"
+    __table_args__ = (UniqueConstraint("file_hash", "threat_name"),)
+
+    id = Column(Integer, primary_key=True)
+    file_hash = Column(String, nullable=False, index=True)   # SHA-256
+    threat_name = Column(SafeText, nullable=False)
+    # Where the file was when you allowed it: for the listing only.
+    filepath = Column(FsPath, nullable=False)
+    allowed_at = Column(DateTime, default=utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<Allowance {self.file_hash[:12]} {self.threat_name!r}>"
 
 
 class DirectoryRecord(Base):

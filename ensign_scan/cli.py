@@ -23,7 +23,7 @@ from importlib.metadata import PackageNotFoundError, version as dist_version
 from rich import print
 
 from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
-from ensign_scan import diagnostics, explanations, logsetup, notify, pkgdb, secrets
+from ensign_scan import allowlist, diagnostics, explanations, logsetup, notify, pkgdb, secrets
 from ensign_scan.fsutil import shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
 from ensign_scan.reports import (
@@ -80,6 +80,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--diagnostics", action="store_true",
                         help="Print versions, settings and counts for a bug report, then exit. "
                              "Contains no paths, usernames, hostnames or file names.")
+    parser.add_argument("--allow", metavar="PATH", action="append", default=[],
+                        help="Mark a file ClamAV flagged as a false positive (this exact content and "
+                             "signature only), then exit. Asks to confirm. Can be given more than once.")
+    parser.add_argument("--unallow", metavar="PATH", action="append", default=[],
+                        help="Undo --allow for a file, then exit")
+    parser.add_argument("--list-allowed", action="store_true",
+                        help="List the files you've allowed, then exit")
+    parser.add_argument("--yes", action="store_true",
+                        help="Don't ask to confirm --allow (for scripts)")
     parser.add_argument("--suggest-fixes", action="store_true",
                         help="List files clamd could not read, grouped by directory, then exit (no full scan). "
                              "Scoped to any targets given.")
@@ -108,6 +117,8 @@ def main() -> int:
     # must mean /home/you/Downloads -- not "Downloads", which would be
     # stored relative to wherever you stood and would slip past every exclude.
     args.targets = [os.path.abspath(t) for t in args.targets]
+    args.allow = [os.path.abspath(p) for p in args.allow]
+    args.unallow = [os.path.abspath(p) for p in args.unallow]
     # Before anything that writes (starter config, logs, database) or prints
     # personal details (the greeting): diagnostics must be read-only and clean.
     if args.diagnostics:
@@ -125,8 +136,8 @@ def main() -> int:
     # the lock and can run alongside a scan. run() handles --purge-missing
     # and --rescan-errors first, so with either one also given, the run
     # writes and must take the lock like any other.
-    writes = args.purge_missing or args.rescan_errors
-    if (args.verify_packages or args.suggest_fixes) and not writes:
+    writes = args.purge_missing or args.rescan_errors or args.allow or args.unallow
+    if (args.verify_packages or args.suggest_fixes or args.list_allowed) and not writes:
         return run(args, config)
 
     lock = RunLock(config.data_dir / "ensign.lock")
@@ -141,6 +152,22 @@ def main() -> int:
         return run(args, config)
     finally:
         lock.release()
+
+
+def _confirm(assume_yes: bool):
+    """How --allow asks to confirm: --yes skips it; without a terminal to
+    ask on (a script, a pipe), it refuses rather than guessing."""
+    def ask(prompt: str) -> bool:
+        if assume_yes:
+            return True
+        if not sys.stdin.isatty():
+            print("  No terminal to confirm on; add --yes to allow without asking.")
+            return False
+        try:
+            return input(prompt).strip().lower() in ("y", "yes")
+        except EOFError:
+            return False
+    return ask
 
 
 def clamd_is_safe(scanner: Scanner) -> bool:
@@ -158,6 +185,15 @@ def run(args: argparse.Namespace, config: Config) -> int:
     greet(config)
 
     scanner = Scanner(config)
+    if args.allow or args.unallow:
+        for path in args.unallow:
+            allowlist.unallow(scanner.engine, path)
+        for path in args.allow:
+            allowlist.allow(scanner.engine, path, _confirm(args.yes))
+        return 0
+    if args.list_allowed:
+        allowlist.list_allowed(scanner.engine)
+        return 0
     if args.purge_missing:
         scanner.purge_missing()
         return 0
@@ -239,6 +275,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
     unsaved_infected = [u for u in scanner.unsaved if u.status == "infected"]
     infected = list_infected(scanner.engine, paths=args.targets or None,
                              more_elsewhere=bool(unsaved_infected))
+    allowlist.allowed_report(scanner.engine, paths=args.targets or None)
     # Results the database refused are reported (and alerted on) from memory,
     # so a failed save can never turn a detection into "nothing found".
     infected += unsaved_report(scanner.unsaved)
