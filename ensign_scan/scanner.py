@@ -96,6 +96,11 @@ _STATUS_SYMBOLS = {
     ScanStatus.INCOMPLETE.value: "[yellow]~[/yellow]",
 }
 
+# Workers: never more than this, and always this many fewer than clamd's
+# MaxThreads, so clamd stays responsive to anything else using it.
+_MAX_WORKERS = 12
+_CLAMD_HEADROOM = 2
+
 # Large files queued for clamscan are scanned this many to a run: each run
 # loads the whole signature database, so fewer runs is faster, but every
 # queued file holds an open descriptor until its run.
@@ -327,6 +332,7 @@ class Scanner:
         self._oversized: list[_Oversized] = []
         self._oversized_lock = threading.Lock()
         self._clamscans: _ClamscanPool | None = None
+        self.clamd_max_threads: int | None = None  # set when the worker count is resolved
         self._warned_clamscan: set[str] = set()
 
     def prepare_clamd(self) -> None:
@@ -409,10 +415,33 @@ class Scanner:
         if self.config.max_workers > 0:
             return self.config.max_workers
         clamd_max = self.clamd.max_threads()
+        self.clamd_max_threads = clamd_max
         if clamd_max is None:
             return 5  # daemon unreachable or unparseable; safe default
         cpus = os.cpu_count() or 4
-        return max(1, min(clamd_max - 2, cpus, 12))
+        return max(1, min(clamd_max - _CLAMD_HEADROOM, cpus, _MAX_WORKERS))
+
+    def thread_hint(self) -> str | None:
+        """Advice to raise clamd's MaxThreads, or None.
+
+        Only when the worker count is automatic and clamd's MaxThreads is what
+        holds it back, though this machine's CPU could run more. The value
+        suggested never exceeds the CPU thread count, so Ensign's workers
+        (MaxThreads minus 2) still leave 2 CPU threads for everything else.
+        Advice only: Ensign never changes clamd's settings itself.
+        """
+        workers = self.workers  # resolves the count (and clamd_max_threads) if not yet done
+        clamd_max = self.clamd_max_threads
+        if self.config.max_workers > 0 or clamd_max is None:
+            return None
+        cpus = os.cpu_count() or 0
+        suggested = min(cpus, _MAX_WORKERS + _CLAMD_HEADROOM)
+        if suggested <= clamd_max:
+            return None
+        return (f"Tip: clamd's MaxThreads {clamd_max} limits Ensign to {workers} workers. "
+                f"This machine has {cpus} CPU threads: MaxThreads {suggested} in clamd.conf "
+                f"would allow {suggested - _CLAMD_HEADROOM}, still leaving {_CLAMD_HEADROOM} free. "
+                f"Restart clamd after changing it.")
 
     # ------------------------------------------------------------------
     # Tree scanning

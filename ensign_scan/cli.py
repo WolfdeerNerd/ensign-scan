@@ -189,6 +189,9 @@ def run(args: argparse.Namespace, config: Config) -> int:
         return 0
     auto = " (auto)" if config.max_workers <= 0 else ""
     print(f" Workers:  {scanner.workers}{auto}")
+    hint = scanner.thread_hint()
+    if hint:
+        print(f"[dim]{hint}[/dim]")
     scan = not args.no_scan
 
     if scan and not scanner.clamd.ping():
