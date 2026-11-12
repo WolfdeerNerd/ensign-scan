@@ -9,11 +9,15 @@
 # Worker threads. 0 = auto (sized from clamd's MaxThreads and CPU count).
 max_workers = 0
 
+# How much of your CPU a scan may use, in percent of its threads (10-100).
+# The workers and any clamscans together stay within it, so you can keep
+# using the machine. 100 = let a scan have the whole machine.
+cpu_share = 50
+
 # Files larger than clamd scans go to clamscan, which loads its own copy of
 # the signatures (about as much memory as clamd uses). How many may run at
-# once: 0 = auto -- as many as free memory allows, keeping a reserve, up to
-# half your CPU cores, checked again before each one starts. Always at
-# least one. Raising MaxFileSize in clamd.conf (up to 2000M) avoids
+# once: 0 = auto -- as many as free memory and cpu_share allow, checked
+# again before each one starts, up to 8. Always at least one. Raising MaxFileSize in clamd.conf (up to 2000M) avoids
 # clamscan for most files, and is faster still.
 max_clamscans = 0
 # The most memory those clamscans may use together, as a percent of total

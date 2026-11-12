@@ -124,7 +124,9 @@ The first run of 0.3.0, after upgrading from 0.2.x or earlier, removes the hashe
 
 Ensign scans files concurrently using a thread pool, since the work per file (hashing, then a clamd socket round-trip) is I/O-bound, not CPU-bound — the Python GIL isn't a bottleneck here the way it would be for CPU-heavy parallel work.
 
-Worker count is either set explicitly (`max_workers` in config) or resolved automatically (`max_workers = 0`, the default): Ensign asks clamd for its own `MaxThreads` limit, subtracts a little headroom so the daemon stays responsive to other clients, and caps the result by your CPU count and at 12. For example, clamd's default `MaxThreads 10` gives 8 workers on a machine with 8 or more CPU threads. To get more, raise `MaxThreads` in clamd.conf and restart clamd. When clamd's `MaxThreads` is what holds Ensign back and your CPU could take more, the start of a scan says so, with a value of at most ¾ of your CPU threads (12 on a 16-thread CPU), so a scan leaves room for whatever else you run alongside it. Ensign never changes clamd's settings itself.
+Worker count is either set explicitly (`max_workers` in config) or resolved automatically (`max_workers = 0`, the default): Ensign asks clamd for its own `MaxThreads` limit, subtracts a little headroom so the daemon stays responsive to other clients, and caps the result by your CPU count, at 12, and by `cpu_share`.
+
+`cpu_share` (default 50) is how much of your CPU a scan may use, in percent of its threads, so you can keep using the machine while it runs. The scan workers and any `clamscan` runs share it: a `clamscan` starts only if it fits alongside the workers busy at that moment, though one always runs so large files still get scanned. Set it to 100 to let a scan have the whole machine. When clamd's `MaxThreads` is what holds Ensign below that share, the start of a scan suggests the `MaxThreads` that would reach it. Ensign never changes clamd's settings itself.
 
 If clamd can't be reached to ask, Ensign falls back to a safe default of 5 workers rather than guessing wildly. And no matter how constrained the machine — single core, a very low `MaxThreads` on clamd — the worker count can never drop below 1. **Ensign will always run, even on modest hardware;** it just scans one file at a time in that case rather than failing or requiring a separate no-threading mode.
 
@@ -193,7 +195,7 @@ clamd skips any file larger than its `MaxFileSize` or `MaxScanSize` setting (100
 - **A fixed budget.** All of them together use at most `clamscan_memory_percent` of your RAM (default 25%, allowed 5–75), however much happens to be free. On 16 GB that's 4 GB, about two copies of the signatures.
 - **What's free right now.** Another copy must also fit in free memory with a reserve left over (the larger of 2 GiB or 10% of RAM), so starting a game mid-scan stops it adding more.
 
-One always runs, so large files are always scanned. `max_clamscans` caps how many run at once (0 = auto: up to half your CPU cores, at most 8).
+One always runs, so large files are always scanned. `max_clamscans` caps how many run at once (0 = auto: as many as `cpu_share` and memory allow, at most 8).
 
 Faster still: raise these together in clamd.conf and restart clamd. Ensign reads the new limits, and clamd, which already has the signatures loaded and scans with several threads, handles those files itself:
 

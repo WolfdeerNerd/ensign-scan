@@ -305,7 +305,7 @@ GiB = 2**30
 
 
 def run_pool(limit: int, per_copy: int, memory, batches: int = 6, work: float = 0.3,
-             fail: bool = False, percent: int = 25):
+             fail: bool = False, percent: int = 25, cpu_allows=None):
     """Run `batches` fake batches through a pool with free memory reported as
     `memory` (a (MemAvailable, MemTotal) pair, or None). Returns the pool and
     the most batches seen waiting or running at any submit."""
@@ -317,7 +317,7 @@ def run_pool(limit: int, per_copy: int, memory, batches: int = 6, work: float = 
         if fail:
             raise RuntimeError("clamscan exploded")
 
-    pool = scanner_mod._ClamscanPool(limit, per_copy, run_batch, percent)
+    pool = scanner_mod._ClamscanPool(limit, per_copy, run_batch, percent, cpu_allows)
     most_pending = 0
     try:
         for _ in range(batches):
@@ -359,6 +359,27 @@ with contextlib.redirect_stdout(io.StringIO()) as buf:
 assert "outside 5-75" in buf.getvalue(), buf.getvalue()
 assert Config._from_dict({"clamscan_memory_percent": 40}, "t").clamscan_memory_percent == 40
 print("clamscan memory budget test passed ✓")
+
+# The CPU budget is shared: a clamscan starts only if it, those running and
+# the scan workers busy right now fit within cpu_share. With 6 workers busy
+# and a budget of 8, at most 2 at once; with no workers busy, all 8.
+busy = {"workers": 6}
+pool, _ = run_pool(8, GiB, (60 * GiB, 64 * GiB), batches=10, work=0.2,
+                   cpu_allows=lambda running: running + busy["workers"] + 1 <= 8)
+assert pool.peak == 2, f"6 busy workers leave room for 2 in a budget of 8, got {pool.peak}"
+busy["workers"] = 0
+pool, _ = run_pool(8, GiB, (60 * GiB, 64 * GiB), batches=10, work=0.2,
+                   cpu_allows=lambda running: running + busy["workers"] + 1 <= 8)
+assert pool.peak == 8, pool.peak
+busy["workers"] = 8
+pool, _ = run_pool(8, GiB, (60 * GiB, 64 * GiB), batches=4, work=0.05,
+                   cpu_allows=lambda running: running + busy["workers"] + 1 <= 8)
+assert pool.peak == 1, "budget full of workers: still one clamscan, so large files get scanned"
+with contextlib.redirect_stdout(io.StringIO()) as buf:
+    assert Config._from_dict({"cpu_share": 150}, "t").cpu_share == 100
+    assert Config._from_dict({"cpu_share": 0}, "t").cpu_share == 10
+assert "outside 10-100" in buf.getvalue()
+print("CPU budget test passed ✓")
 
 # The workers never wait for clamscan itself -- only when batches pile up:
 # at most limit + 1 waiting or running, so queued open files stay bounded.
@@ -442,17 +463,32 @@ try:
             config = Config(db_url=f"sqlite:///{d}/w.db", log_file=Path(d, "e.txt"), **cfg)
             s = Scanner(config, clamd=ThreadsClamd(clamd_threads))
             return s.workers, s.thread_hint()
-        # At most 3/4 of the CPU threads: 12 threads -> 9, 16 -> 12, 24 or more -> 14.
+        # cpu_share 50 (the default): the workers may fill half the CPU threads.
         workers, tip = hint(7, 12)
-        assert workers == 5 and "MaxThreads 7 limits Ensign to 5" in tip and "MaxThreads 9" in tip \
-            and "would allow 7, leaving 5 CPU threads free" in tip, tip
+        assert workers == 5 and "MaxThreads 7 limits Ensign to 5" in tip and "MaxThreads 8" in tip \
+            and "would allow 6" in tip and "50% of 12 CPU threads" in tip, tip
         workers, tip = hint(7, 16)
-        assert "MaxThreads 12" in tip and "would allow 10, leaving 6" in tip, tip
+        assert "MaxThreads 10" in tip and "would allow 8" in tip, tip
         workers, tip = hint(7, 32)
         assert "MaxThreads 14" in tip and "would allow 12" in tip, f"capped at 12 workers: {tip}"
-        assert hint(7, 8)[1] is None, "3/4 of 8 is 6, below the current 7: nothing to suggest"
+        assert hint(7, 8)[1] is None, "half of 8 is 4, below the current 5 workers: nothing to suggest"
         assert hint(7, 6)[1] is None
-        assert hint(9, 12)[1] is None, "already at 3/4"
+        assert hint(10, 16)[1] is None, "already at half of 16"
+        # cpu_share 100: the whole machine
+        workers, tip = hint(7, 12, cpu_share=100)
+        assert "MaxThreads 14" in tip and "would allow 12" in tip, tip
+        # and the worker count itself follows cpu_share, not just the tip
+        assert hint(12, 16)[0] == 8, "MaxThreads 12 allows 10, but half of 16 threads is 8"
+        assert hint(12, 16, cpu_share=100)[0] == 10
+        assert hint(12, 2)[0] == 1, "never below 1"
+        # the scanner's own check: 16 threads at 50% = 8; 6 workers busy
+        os.cpu_count = lambda: 16
+        s = Scanner(Config(db_url=f"sqlite:///{d}/w.db", log_file=Path(d, "e.txt")),
+                    clamd=ThreadsClamd(12))
+        s._busy_workers = 6
+        assert s.cpu_budget() == 8
+        assert s._cpu_allows_clamscan(1) and not s._cpu_allows_clamscan(2), \
+            "1 running + 6 busy workers + 1 more = 8 fits; a 3rd would not"
         assert hint(14, 32)[1] is None, "already at Ensign's maximum"
         assert hint(None, 32)[1] is None, "clamd didn't say: no advice"
         assert hint(7, 32, max_workers=3)[1] is None, "workers set by hand: no advice"
