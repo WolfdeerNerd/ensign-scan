@@ -101,10 +101,15 @@ _STATUS_SYMBOLS = {
 _MAX_WORKERS = 12
 _CLAMD_HEADROOM = 2
 
-# Large files queued for clamscan are scanned this many to a run: each run
-# loads the whole signature database, so fewer runs is faster, but every
-# queued file holds an open descriptor until its run.
-_CLAMSCAN_BATCH = 64
+# Large files queued for clamscan are scanned up to this many to a run, or
+# until the batch holds this many bytes, whichever comes first. Each run
+# loads the whole signature database, so fewer runs is fewer loads; but a
+# run scans its files one after another on one core, so smaller batches
+# spread the work across the clamscans the budget allows, and no single
+# run turns into hours of work at the end. Bytes, not just files: scan time
+# follows size. And every queued file holds an open descriptor until its run.
+_CLAMSCAN_BATCH = 32
+_CLAMSCAN_BATCH_BYTES = 8 * 2**30
 # clamscan time allowed per run: a fixed allowance plus 1 s per 5 MiB.
 _CLAMSCAN_BASE_TIMEOUT = 300.0
 _CLAMSCAN_BYTES_PER_SECOND = 5 * 2**20
@@ -348,6 +353,7 @@ class Scanner:
         self.limits: ClamdLimits | None = None
         # Large files waiting for clamscan, and the clamscans running them.
         self._oversized: list[_Oversized] = []
+        self._oversized_bytes = 0  # total size of the files in self._oversized
         self._oversized_lock = threading.Lock()
         self._clamscans: _ClamscanPool | None = None
         self.clamd_max_threads: int | None = None  # set when the worker count is resolved
@@ -874,9 +880,12 @@ class Scanner:
         # is ever added to a batch already handed over.
         with self._oversized_lock:
             self._oversized.append(item)
-            batch = self._oversized if len(self._oversized) >= _CLAMSCAN_BATCH else None
+            self._oversized_bytes += item.st.st_size
+            full = (len(self._oversized) >= _CLAMSCAN_BATCH
+                    or self._oversized_bytes >= _CLAMSCAN_BATCH_BYTES)
+            batch = self._oversized if full else None
             if batch is not None:
-                self._oversized = []
+                self._oversized, self._oversized_bytes = [], 0
         if batch is not None:
             self._clamscan_pool().submit(batch)
 
@@ -885,6 +894,7 @@ class Scanner:
         Safe to call with nothing queued."""
         with self._oversized_lock:
             batch, self._oversized = self._oversized, []
+            self._oversized_bytes = 0
         if batch:
             self._clamscan_pool().submit(batch)
         if self._clamscans is not None:

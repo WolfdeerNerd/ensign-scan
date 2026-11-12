@@ -431,6 +431,25 @@ try:
         printed = buf.getvalue()
         assert all(f"big{i}.bin" in printed for i in range(3)), printed
         print("big files reported one by one test passed ✓")
+
+        # --- a batch also closes once it holds enough bytes, not just enough files:
+        #     scan time follows size. 10,000-byte limit, 4 KiB files: 3 then 2.
+        real_bytes = scanner_mod._CLAMSCAN_BATCH_BYTES
+        real_batch = scanner_mod._CLAMSCAN_BATCH
+        scanner_mod._CLAMSCAN_BATCH, scanner_mod._CLAMSCAN_BATCH_BYTES = 100, 10_000
+        batches.clear()
+        try:
+            tree4 = Path(d, "tree4")
+            tree4.mkdir()
+            for i in range(5):
+                (tree4 / f"big{i}.bin").write_bytes(b"D" * 4096)
+            with contextlib.redirect_stdout(io.StringIO()):
+                scanner.scan_tree(tree4)
+        finally:
+            scanner_mod._CLAMSCAN_BATCH, scanner_mod._CLAMSCAN_BATCH_BYTES = real_batch, real_bytes
+        assert sorted(len(b) for b in batches) == [2, 3], f"closed at 12 KiB, then the rest: {batches}"
+        assert scanner._oversized == [] and scanner._oversized_bytes == 0
+        print("batch byte limit test passed ✓")
 finally:
     (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
      scanner_mod.clamscan_user, scanner_mod._CLAMSCAN_BATCH) = real
