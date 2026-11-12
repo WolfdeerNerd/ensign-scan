@@ -29,7 +29,7 @@ from rich import print
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from .fsutil import open_for_scan, sha256_fd, shown
+from .fsutil import open_for_scan, print_unwrapped, sha256_fd, shown
 from .models import Allowance, FileRecord, ScanStatus, utcnow
 
 
@@ -79,9 +79,9 @@ def allow(engine: Engine, path: str, confirm) -> bool:
     Returns True if it was allowed."""
     found = _candidate(engine, path)
     if isinstance(found, str):
-        print(f"[yellow]Not allowed:[/yellow] {shown(path)}\n  {found}")
+        print_unwrapped(f"[yellow]Not allowed:[/yellow] {shown(path)}\n  {found}")
         return False
-    print(f"\n  File:      {shown(found.path)}")
+    print_unwrapped(f"\n  File:      {shown(found.path)}")
     print(f"  Signature: {shown(found.threat)}")
     print(f"  SHA-256:   {found.digest}")
     print("  Allowing tells Ensign this is a false positive: it stops counting this exact "
@@ -107,7 +107,7 @@ def allow(engine: Engine, path: str, confirm) -> bool:
         session.commit()
     others = len(copies) - 1
     also = f" (and {others} identical {'copy' if others == 1 else 'copies'} elsewhere)" if others > 0 else ""
-    print(f"[green]  Allowed{also}.[/green] Undo with: ensign-scan --unallow {shown(found.path)}")
+    print_unwrapped(f"[green]  Allowed{also}.[/green] Undo with: ensign-scan --unallow {shown(found.path)}")
     return True
 
 
@@ -122,7 +122,7 @@ def unallow(engine: Engine, path: str) -> bool:
         for row in session.query(Allowance).filter(Allowance.filepath == path):
             pairs.add((row.file_hash, row.threat_name))
         if not pairs:
-            print(f"[yellow]Nothing to undo:[/yellow] {shown(path)} isn't allowed.")
+            print_unwrapped(f"[yellow]Nothing to undo:[/yellow] {shown(path)} isn't allowed.")
             return False
         flagged = 0
         for digest, threat in pairs:
@@ -134,8 +134,8 @@ def unallow(engine: Engine, path: str) -> bool:
                 FileRecord.scan_status == ScanStatus.ALLOWED.value,
             ).update({FileRecord.scan_status: ScanStatus.INFECTED.value})
         session.commit()
-    print(f"[yellow]No longer allowed:[/yellow] {shown(path)} "
-          f"({flagged} file{'s' if flagged != 1 else ''} flagged as infected again).")
+    print_unwrapped(f"[yellow]No longer allowed:[/yellow] {shown(path)} "
+                    f"({flagged} file{'s' if flagged != 1 else ''} flagged as infected again).")
     return True
 
 
@@ -160,7 +160,7 @@ def allowed_report(engine: Engine, paths: list[str] | None = None, top: int = 10
     for filepath, threat, digest in rows[:top]:
         date = when.get((digest, threat))
         on = f", allowed {date:%Y-%m-%d}" if date else ""
-        print(f"  [cyan]○[/cyan] {shown(filepath)}  [dim]({shown(threat)}{on})[/dim]")
+        print_unwrapped(f"  [cyan]○[/cyan] {shown(filepath)}  [dim]({shown(threat)}{on})[/dim]")
     if len(rows) > top:
         print(f"  … and {len(rows) - top} more (ensign-scan --list-allowed)")
     return len(rows)
@@ -182,12 +182,12 @@ def list_allowed(engine: Engine) -> int:
     print(f"\n=== ALLOWED BY YOU ({len(rows)}) ===")
     for row_id, filepath, threat, digest, allowed_at in rows:
         print(f"\n  Signature: {shown(threat)}")
-        print(f"  Allowed:   {allowed_at:%Y-%m-%d %H:%M} UTC, from {shown(filepath)}")
+        print_unwrapped(f"  Allowed:   {allowed_at:%Y-%m-%d %H:%M} UTC, from {shown(filepath)}")
         print(f"  SHA-256:   {digest}")
         found = where[row_id]
         if found:
             for p in found:
-                print(f"  [cyan]○[/cyan] {shown(p)}")
+                print_unwrapped(f"  [cyan]○[/cyan] {shown(p)}")
         else:
             print("  [dim](no file with this content is tracked right now)[/dim]")
     return len(rows)

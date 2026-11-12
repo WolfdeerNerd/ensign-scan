@@ -144,34 +144,38 @@ _NAME_RE = re.compile(r"^(?P<body>.+?)(?:-(?P<sig>\d+)-(?P<rev>\d+)|-(?P<single>
 _CVE_RE = re.compile(r"CVE_(\d{4})_(\d{4,})")
 
 # Only prefixes I'm confident about; an unknown one is shown as-is.
+# What each signature is for, said as "This signature is for ...".
 _PLATFORMS = {
-    "Win": "Windows", "Dos": "DOS", "Unix": "Unix/Linux", "Osx": "macOS",
-    "Andr": "Android", "Ios": "iOS", "Js": "JavaScript", "Html": "HTML",
-    "Java": "Java", "Doc": "Word document", "Xls": "Excel document",
-    "Pdf": "PDF", "Email": "email", "Lnk": "Windows shortcut (.lnk)",
+    "Win": "Windows programs and files", "Dos": "DOS programs",
+    "Unix": "Unix/Linux programs", "Osx": "macOS programs", "Andr": "Android apps",
+    "Ios": "iOS apps", "Js": "JavaScript", "Html": "web pages (HTML)",
+    "Java": "Java programs", "Doc": "Word documents", "Xls": "Excel spreadsheets",
+    "Pdf": "PDF files", "Email": "email (messages and their attachments)",
+    "Lnk": "Windows shortcut (.lnk) files",
 }
 _NON_NATIVE_PLATFORMS = {"Win", "Dos"}  # cannot run natively on Linux
-
-# Phrase for each category, written to follow "<platform> " in a sentence.
+# What the signature looks for, said as "a pattern it uses for ...": the
+# thing, then what it does in plain words.
 _CATEGORIES = {
-    "Exploit": "exploit signature (it targets a software vulnerability)",
-    "Malware": "malware signature (a general category; ClamAV gives no more specific classification)",
-    "Trojan": "trojan signature (malware posing as something legitimate)",
-    "Backdoor": "backdoor signature (remote access)",
-    "Downloader": "downloader signature (fetches other payloads)",
-    "Dropper": "dropper signature (installs other payloads)",
-    "Ransomware": "ransomware signature",
-    "Infostealer": "information-stealer signature",
-    "Keylogger": "keylogger signature",
-    "Coinminer": "cryptocurrency-miner signature",
-    "Adware": "adware signature",
-    "Spyware": "spyware signature",
-    "Rootkit": "rootkit signature",
-    "Packed": "packed-executable signature (obfuscated code)",
-    "Packer": "packer signature (obfuscation tooling)",
-    "Phishing": "phishing signature",
-    "Macro": "malicious-macro signature",
-    "Test": "test signature (such as the harmless EICAR file)",
+    "Exploit": "an exploit: code that attacks a flaw in another program",
+    "Malware": "malware in general (ClamAV gives no more specific type)",
+    "Trojan": "a trojan: malware posing as something legitimate",
+    "Backdoor": "a backdoor: code that lets someone control the computer remotely",
+    "Downloader": "downloader code: code that fetches more malware from the internet once it runs",
+    "Dropper": "a dropper: code that installs other malware it carries inside it",
+    "Ransomware": "ransomware: malware that encrypts files and demands payment",
+    "Infostealer": "an information stealer: malware that collects passwords, cookies or files",
+    "Keylogger": "a keylogger: malware that records what you type",
+    "Coinminer": "a cryptocurrency miner: software that uses the computer to mine coins",
+    "Adware": "adware: software that pushes ads at you",
+    "Spyware": "spyware: software that watches what you do",
+    "Rootkit": "a rootkit: malware that hides itself or other malware from the system",
+    "Packed": ("a packed program: one compressed or scrambled to hide what it does. "
+               "Legitimate software does this too"),
+    "Packer": "a packer: a tool for compressing or scrambling programs",
+    "Phishing": "phishing: a message or page made to trick you into giving away logins or money",
+    "Macro": "a malicious macro: code hidden in an Office document",
+    "Test": "a test file, such as the harmless EICAR file",
 }
 
 
@@ -203,21 +207,25 @@ def decode_threat_name(threat_name: str | None) -> ThreatExplanation | None:
     if category not in _CATEGORIES and platform not in _PLATFORMS:
         return None  # nothing recognizable; stay silent rather than guess
 
-    platform_name = _PLATFORMS.get(platform, platform)
-    cat_phrase = _CATEGORIES.get(category, f"'{category}' signature")
-    article = "An" if platform_name[0] in "AEIOU" else "A"
+    looks_for = _CATEGORIES.get(category, f"'{category}' (a category Ensign has no description for)")
+    made_for = _PLATFORMS.get(platform, f"'{platform}' files")
     sentences = []
     if pua:
         sentences.append("Flagged as a Possibly Unwanted Application: not necessarily "
                          "malicious (bundled tools, adware, packers).")
-    sentences.append(f"{article} {platform_name} {cat_phrase}, named '{family}'.")
+    sentences.append(f"ClamAV matched a pattern it uses for {looks_for}.")
+    sentences.append(f"This signature is for {made_for}.")
+    if family == "Generic":
+        sentences.append("Family name: Generic, ClamAV's catch-all name rather than one specific strain.")
+    else:
+        sentences.append(f"Family name: {family}.")
     cve = _CVE_RE.search(family)
     if cve:
-        sentences.append(f"The name references CVE-{cve[1]}-{cve[2]}.")
+        sentences.append(f"It refers to CVE-{cve[1]}-{cve[2]}, a known vulnerability.")
     if sig is not None:
-        sentences.append(f"ClamAV signature {sig}, revision {rev}.")
+        sentences.append(f"Signature number {sig}, revision {rev}.")
     elif single is not None:
-        sentences.append(f"The trailing -{single} is a variant/revision counter.")
+        sentences.append(f"The -{single} at the end is the signature's revision.")
     hint = None
     if platform in _NON_NATIVE_PLATFORMS and category != "Test":
         hint = ("Windows/DOS-targeted signature. That payload can't run natively on "
@@ -225,6 +233,7 @@ def decode_threat_name(threat_name: str | None) -> ThreatExplanation | None:
                 "(installers, game assets, Wine prefixes). Still check where the "
                 "file came from.")
     return ThreatExplanation(" ".join(sentences), hint, decoded=True)
+
 
 
 def explain_threat(threat_name: str | None) -> ThreatExplanation | None:

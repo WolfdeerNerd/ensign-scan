@@ -116,6 +116,15 @@ def human_size(n: int) -> str:
     return f"{n} B"
 
 
+def print_unwrapped(markup: str) -> None:
+    """Print a line (Rich markup) without Rich breaking it at the window
+    width. For lines holding a path: a path broken across lines is broken
+    when copied, too (and --allow needs one you can paste). The terminal
+    still wraps it on screen; it just stays one line."""
+    from rich import get_console
+    get_console().print(markup, soft_wrap=True)
+
+
 def shown(text: object) -> str:
     """Make a string from the filesystem safe to print through rich.
 
