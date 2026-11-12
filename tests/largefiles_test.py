@@ -296,6 +296,55 @@ try:
             row = session.query(FileRecord).filter(FileRecord.filename == "big-new.bin").one()
             assert stats.big_recheck == 1 and row.scan_status == "clean", (stats, row.scan_status)
         print("missing-clamscan test passed ✓")
+
+        # --- the progress line: a queued file counts when clamscan finishes it, and the
+        #     line only closes after the last clamscan -- not when the files are queued.
+        events: list[tuple[str, float, str | None]] = []
+
+        class RecordingProgress:
+            def __init__(self, label, total, workers, **kw):
+                self.total = total
+
+            def __enter__(self):
+                return self
+
+            def advance(self, status):
+                events.append(("advance", time.monotonic(), status))
+
+            def __exit__(self, *exc):
+                events.append(("closed", time.monotonic(), None))
+
+        batch_ends: list[float] = []
+
+        def slow_clamscan(fds, limits, timeout, run_as=None):
+            time.sleep(0.4)
+            out = fake_clamscan(fds, limits, timeout, run_as)
+            batch_ends.append(time.monotonic())
+            return out
+
+        real_progress = scanner_mod.RunProgress
+        scanner_mod.RunProgress = RecordingProgress
+        scanner_mod.scan_fds_with_clamscan = slow_clamscan
+        try:
+            tree2 = Path(d, "tree2")
+            tree2.mkdir()
+            for i in range(3):
+                (tree2 / f"small{i}.txt").write_bytes(b"small")
+                (tree2 / f"big{i}.bin").write_bytes(b"B" * 4096)
+            with contextlib.redirect_stdout(io.StringIO()):
+                scanner.scan_tree(tree2)
+        finally:
+            scanner_mod.RunProgress = real_progress
+            scanner_mod.scan_fds_with_clamscan = fake_clamscan
+        advances = [e for e in events if e[0] == "advance"]
+        closed = [e[1] for e in events if e[0] == "closed"]
+        assert len(advances) == 6, f"every file counted exactly once: {advances}"
+        assert "queued" not in {e[2] for e in advances}, "queued is not finished"
+        assert closed and batch_ends and closed[-1] >= max(batch_ends), \
+            "the progress line closes only after the last clamscan"
+        assert sum(1 for e in advances if e[1] >= min(batch_ends)) >= 3, \
+            "the big files are counted as their clamscan results come in"
+        print("progress waits for clamscan test passed ✓")
 finally:
     (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
      scanner_mod.clamscan_user, scanner_mod._CLAMSCAN_BATCH) = real
@@ -402,6 +451,8 @@ with tempfile.TemporaryDirectory() as d:
     held = {}
 
     class Recorder:
+        _advance = None  # no progress line here
+
         def _clamscan_outcomes(self, batch, total):
             return {i.fd: ScanOutcome(ScanStatus.CLEAN, "clamscan: OK") for i in batch}
 
