@@ -23,7 +23,7 @@ from importlib.metadata import PackageNotFoundError, version as dist_version
 from rich import print
 
 from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
-from ensign_scan import allowlist, diagnostics, explanations, logsetup, notify, pkgdb, secrets
+from ensign_scan import allowlist, diagnostics, explanations, fpreport, logsetup, notify, pkgdb, secrets
 from ensign_scan.fsutil import shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
 from ensign_scan.reports import (
@@ -90,6 +90,10 @@ def parse_args() -> argparse.Namespace:
                         help="Undo --allow for a file, then exit")
     parser.add_argument("--list-allowed", action="store_true",
                         help="List the files you've allowed, then exit")
+    parser.add_argument("--clamav-report", metavar="PATH", action="append", default=[],
+                        help="Prepare a false-positive report for ClamAV about a file it flagged, "
+                             "then exit. Checks the file again first. Nothing is sent: you submit "
+                             "it. Can be given more than once.")
     parser.add_argument("--yes", action="store_true",
                         help="Don't ask to confirm --allow (for scripts)")
     parser.add_argument("--suggest-fixes", action="store_true",
@@ -122,6 +126,7 @@ def main() -> int:
     args.targets = [os.path.abspath(t) for t in args.targets]
     args.allow = [os.path.abspath(p) for p in args.allow]
     args.unallow = [os.path.abspath(p) for p in args.unallow]
+    args.clamav_report = [os.path.abspath(p) for p in args.clamav_report]
     # Before anything that writes (starter config, logs, database) or prints
     # personal details (the greeting): diagnostics must be read-only and clean.
     if args.diagnostics:
@@ -140,7 +145,8 @@ def main() -> int:
     # and --rescan-errors first, so with either one also given, the run
     # writes and must take the lock like any other.
     writes = args.purge_missing or args.rescan_errors or args.allow or args.unallow
-    if (args.verify_packages or args.suggest_fixes or args.list_allowed) and not writes:
+    readonly = args.verify_packages or args.suggest_fixes or args.list_allowed or args.clamav_report
+    if readonly and not writes:
         return run(args, config)
 
     lock = RunLock(config.data_dir / "ensign.lock")
@@ -196,6 +202,11 @@ def run(args: argparse.Namespace, config: Config) -> int:
         return 0
     if args.list_allowed:
         allowlist.list_allowed(scanner.engine)
+        return 0
+    if args.clamav_report:
+        if not clamd_is_safe(scanner):
+            return 1
+        fpreport.make_reports(scanner, config, args.clamav_report)
         return 0
     if args.purge_missing:
         scanner.purge_missing()

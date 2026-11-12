@@ -250,4 +250,20 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
     assert rows(db)[str(flagged)][0] == "infected"
     print("allowed-by-you test passed ✓")
 
+    # --- --clamav-report: rescanned with real clamd, nothing changed in the database ---------
+    # The test signatures are local, so clamd names them *.UNOFFICIAL: the
+    # report is sent to "whoever provides that set" instead of ClamAV.
+    before = rows(db)
+    out = " ".join(run("--config", str(config), "--clamav-report", str(flagged), cwd=work).split())
+    assert "Not a ClamAV signature" in out and ".UNOFFICIAL" in out, out
+    assert not (data / "clamav-reports").exists(), "nothing written for a third-party signature"
+    harmless = fp_tree / "readme.txt"
+    harmless.write_text("nothing to see here\n")
+    run("--config", str(config), str(fp_tree), expect=3, cwd=work)
+    before = rows(db)
+    out = " ".join(run("--config", str(config), "--clamav-report", str(harmless), cwd=work).split())
+    assert "Only a file ClamAV flagged" in out, out
+    assert rows(db) == before, "--clamav-report never writes to the database"
+    print("--clamav-report test passed ✓")
+
 print("\nAll installed-CLI tests passed ✓")
