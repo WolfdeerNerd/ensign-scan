@@ -100,8 +100,6 @@ _STATUS_SYMBOLS = {
 # MaxThreads, so clamd stays responsive to anything else using it.
 _MAX_WORKERS = 12
 _CLAMD_HEADROOM = 2
-# The MaxThreads Ensign suggests is at most this share of the CPU threads.
-_CPU_SHARE_NUM, _CPU_SHARE_DEN = 3, 4
 
 # Large files queued for clamscan are scanned this many to a run: each run
 # loads the whole signature database, so fewer runs is faster, but every
@@ -125,8 +123,8 @@ _MEMORY_RESERVE_FRACTION = 0.10
 # memory doesn't show it. One started this recently counts as using its
 # share already.
 _CLAMSCAN_LOADING_SECONDS = 60.0
-# Auto: at most this many at once, and no more than half the CPU cores
-# (each clamscan scans on one core).
+# Auto: at most this many at once. Each scans on one core, and counts
+# against cpu_share alongside the scan workers.
 _CLAMSCAN_AUTO_MAX = 8
 
 
@@ -187,10 +185,13 @@ class _ClamscanPool:
     large files always get scanned.
     """
 
-    def __init__(self, limit: int, per_copy: int, run_batch, memory_percent: int = 25) -> None:
+    def __init__(self, limit: int, per_copy: int, run_batch, memory_percent: int = 25,
+                 cpu_allows=None) -> None:
         self.limit = max(1, limit)
         self.per_copy = per_copy
         self.memory_percent = memory_percent
+        # cpu_allows(running) -> may another start, given `running` already?
+        self._cpu_allows = cpu_allows or (lambda running: True)
         self._run_batch = run_batch
         self._cond = threading.Condition()
         self._pending = 0                  # submitted, not finished
@@ -229,6 +230,7 @@ class _ClamscanPool:
         me = threading.get_ident()
         with self._cond:
             while self._started and not (len(self._started) < self.limit
+                                         and self._cpu_allows(len(self._started))
                                          and self._memory_allows_another()):
                 # woken when a clamscan finishes; checked again every few
                 # seconds anyway, since memory can free up elsewhere too
@@ -349,6 +351,10 @@ class Scanner:
         self._oversized_lock = threading.Lock()
         self._clamscans: _ClamscanPool | None = None
         self.clamd_max_threads: int | None = None  # set when the worker count is resolved
+        # Scan workers busy on a file right now: they share the CPU budget
+        # with the clamscans.
+        self._busy_workers = 0
+        self._busy_lock = threading.Lock()
         self._warned_clamscan: set[str] = set()
 
     def prepare_clamd(self) -> None:
@@ -433,32 +439,42 @@ class Scanner:
         clamd_max = self.clamd.max_threads()
         self.clamd_max_threads = clamd_max
         if clamd_max is None:
-            return 5  # daemon unreachable or unparseable; safe default
+            return min(5, self.cpu_budget())  # daemon unreachable or unparseable; safe default
         cpus = os.cpu_count() or 4
-        return max(1, min(clamd_max - _CLAMD_HEADROOM, cpus, _MAX_WORKERS))
+        return max(1, min(clamd_max - _CLAMD_HEADROOM, cpus, _MAX_WORKERS, self.cpu_budget()))
+
+    def cpu_budget(self) -> int:
+        """How many CPU threads a scan may keep busy: cpu_share percent of
+        them, at least 1. The scan workers and the clamscans share it."""
+        return max(1, (os.cpu_count() or 2) * self.config.cpu_share // 100)
+
+    def _cpu_allows_clamscan(self, running: int) -> bool:
+        """Another clamscan may start if it, those already running, and the
+        scan workers busy right now all fit in the CPU budget."""
+        with self._busy_lock:
+            busy = self._busy_workers
+        return running + busy + 1 <= self.cpu_budget()
 
     def thread_hint(self) -> str | None:
         """Advice to raise clamd's MaxThreads, or None.
 
         Only when the worker count is automatic and clamd's MaxThreads is what
-        holds it back, though this machine's CPU could run more. The value
-        suggested is at most 3/4 of the CPU threads (12 on a 16-thread CPU),
-        so a scan leaves room for whatever else runs alongside it -- a game
-        started mid-scan, say, which a check at the start couldn't foresee.
-        Advice only: Ensign never changes clamd's settings itself.
+        holds it back, though cpu_share allows more: the suggestion is what
+        would let the workers fill the CPU budget (MaxThreads = workers + 2),
+        never more. Advice only: Ensign never changes clamd's settings itself.
         """
         workers = self.workers  # resolves the count (and clamd_max_threads) if not yet done
         clamd_max = self.clamd_max_threads
         if self.config.max_workers > 0 or clamd_max is None:
             return None
         cpus = os.cpu_count() or 0
-        suggested = min(cpus * _CPU_SHARE_NUM // _CPU_SHARE_DEN, _MAX_WORKERS + _CLAMD_HEADROOM)
-        if suggested <= clamd_max:
+        allowed = min(self.cpu_budget(), cpus, _MAX_WORKERS)
+        if allowed <= workers:
             return None
-        allowed = suggested - _CLAMD_HEADROOM
+        suggested = allowed + _CLAMD_HEADROOM
         return (f"Tip: clamd's MaxThreads {clamd_max} limits Ensign to {workers} workers. "
-                f"This machine has {cpus} CPU threads: MaxThreads {suggested} in clamd.conf "
-                f"would allow {allowed}, leaving {cpus - allowed} CPU threads free. "
+                f"MaxThreads {suggested} in clamd.conf would allow {allowed}, the most "
+                f"cpu_share ({self.config.cpu_share}% of {cpus} CPU threads) permits. "
                 f"If you change it, restart clamd.")
 
     # ------------------------------------------------------------------
@@ -709,7 +725,13 @@ class Scanner:
         (None for failures) in input order."""
         with RunProgress(label, len(paths), self.workers) as bar:
             def work(path) -> str | None:
-                digest, status = self._process_file(path, scan)
+                with self._busy_lock:
+                    self._busy_workers += 1
+                try:
+                    digest, status = self._process_file(path, scan)
+                finally:
+                    with self._busy_lock:
+                        self._busy_workers -= 1
                 bar.advance(status)
                 return digest
 
@@ -866,16 +888,18 @@ class Scanner:
                 if self.config.max_clamscans > 0:
                     limit, why = self.config.max_clamscans, "max_clamscans in config"
                 else:
-                    limit = max(1, min(_CLAMSCAN_AUTO_MAX, (os.cpu_count() or 2) // 2))
-                    why = "auto: half the CPU cores, up to 8"
+                    limit = max(1, min(_CLAMSCAN_AUTO_MAX, self.cpu_budget()))
+                    why = f"auto: cpu_share {self.config.cpu_share}%, up to {_CLAMSCAN_AUTO_MAX}"
                 percent = self.config.clamscan_memory_percent
-                self._clamscans = _ClamscanPool(limit, per_copy, self._clamscan_batch, percent)
+                self._clamscans = _ClamscanPool(limit, per_copy, self._clamscan_batch, percent,
+                                                cpu_allows=self._cpu_allows_clamscan)
                 mem = memory_available()
                 budget = (f", {percent}% of RAM ({human_size(mem[1] * percent // 100)}) at most"
                           if mem else "")
                 if self._clamscan_usable():
                     print(f"[dim]clamscan: up to {limit} at once ({why}), each needing about "
-                          f"{human_size(per_copy)}{budget}; more start only while memory allows[/dim]")
+                          f"{human_size(per_copy)}{budget}; more start only while CPU and memory "
+                          f"allow[/dim]")
             return self._clamscans
 
     def _clamscan_batch(self, batch: list[_Oversized], running: int = 1) -> None:

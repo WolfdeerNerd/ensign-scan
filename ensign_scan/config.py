@@ -74,6 +74,8 @@ def _expand(value: str | Path) -> Path:
 SIGNATURE_RESCAN_MIN = 7
 SIGNATURE_RESCAN_MAX = 31
 CLAMSCAN_MEMORY_PERCENT_MIN = 5
+CPU_SHARE_MIN = 10
+CPU_SHARE_MAX = 100
 CLAMSCAN_MEMORY_PERCENT_MAX = 75
 
 
@@ -84,6 +86,11 @@ class Config:
     clamd_socket: str = "/var/run/clamav/clamd.ctl"
     # 0 = auto: sized from clamd's MaxThreads and CPU count at startup.
     max_workers: int = 0
+    # How much of the CPU a scan may use, in percent of its threads: the
+    # workers and the clamscans together stay within it (one clamscan always
+    # runs). 100 lets a scan have the whole machine. Clamped to
+    # CPU_SHARE_MIN..CPU_SHARE_MAX, with a warning.
+    cpu_share: int = 50
     # clamscan runs at once for files too large for clamd. 0 = auto: as many
     # as free memory allows (each loads its own copy of the signatures),
     # up to half the CPU cores. Always at least one.
@@ -177,7 +184,8 @@ class Config:
     @classmethod
     def _from_dict(cls, raw: dict, source: str) -> "Config":
         known = {
-            "data_dir", "clamd_socket", "max_workers", "max_clamscans", "clamscan_memory_percent",
+            "data_dir", "clamd_socket", "max_workers", "cpu_share", "max_clamscans",
+            "clamscan_memory_percent",
             "rescan_after_days", "rescan_after_signature_updates",
             "infected_alert_seconds", "infected_alert_only_while_gaming",
             "log_keep_days", "log_max_total_mb",
@@ -194,7 +202,7 @@ class Config:
             "log_file": data_dir / "error_logs.txt",
             "source": source,
         }
-        for key in ("clamd_socket", "max_workers", "max_clamscans", "clamscan_memory_percent",
+        for key in ("clamd_socket", "max_workers", "cpu_share", "max_clamscans", "clamscan_memory_percent",
                     "rescan_after_days",
                     "rescan_after_signature_updates", "infected_alert_seconds",
                     "infected_alert_only_while_gaming", "log_keep_days",
@@ -225,6 +233,13 @@ class Config:
                 print(f"[ensign] Warning: rescan_after_signature_updates = {n} is outside "
                       f"{SIGNATURE_RESCAN_MIN}-{SIGNATURE_RESCAN_MAX}; using {clamped}")
                 kwargs["rescan_after_signature_updates"] = clamped
+        if "cpu_share" in kwargs:
+            n = kwargs["cpu_share"]
+            clamped = min(max(n, CPU_SHARE_MIN), CPU_SHARE_MAX)
+            if clamped != n:
+                print(f"[ensign] Warning: cpu_share = {n} is outside "
+                      f"{CPU_SHARE_MIN}-{CPU_SHARE_MAX}; using {clamped}")
+                kwargs["cpu_share"] = clamped
         if "clamscan_memory_percent" in kwargs:
             n = kwargs["clamscan_memory_percent"]
             clamped = min(max(n, CLAMSCAN_MEMORY_PERCENT_MIN), CLAMSCAN_MEMORY_PERCENT_MAX)
@@ -261,11 +276,15 @@ EXAMPLE_CONFIG = """\
 # Worker threads. 0 = auto (sized from clamd's MaxThreads and CPU count).
 max_workers = 0
 
+# How much of your CPU a scan may use, in percent of its threads (10-100).
+# The workers and any clamscans together stay within it, so you can keep
+# using the machine. 100 = let a scan have the whole machine.
+cpu_share = 50
+
 # Files larger than clamd scans go to clamscan, which loads its own copy of
 # the signatures (about as much memory as clamd uses). How many may run at
-# once: 0 = auto -- as many as free memory allows, keeping a reserve, up to
-# half your CPU cores, checked again before each one starts. Always at
-# least one. Raising MaxFileSize in clamd.conf (up to 2000M) avoids
+# once: 0 = auto -- as many as free memory and cpu_share allow, checked
+# again before each one starts, up to 8. Always at least one. Raising MaxFileSize in clamd.conf (up to 2000M) avoids
 # clamscan for most files, and is faster still.
 max_clamscans = 0
 # The most memory those clamscans may use together, as a percent of total

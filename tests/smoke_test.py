@@ -165,7 +165,10 @@ def main():
         clamd_socket=sock_path,
         max_workers=0,
     ), clamd=scanner.clamd)
-    expected = max(1, min(10, os.cpu_count() or 4, 12))
+    # clamd's MaxThreads 12 minus 2, the CPU count, Ensign's 12, and cpu_share
+    # (default 50% of the CPU threads, at least 1)
+    cpus = os.cpu_count() or 4
+    expected = max(1, min(10, cpus, 12, max(1, cpus * 50 // 100)))
     assert auto_scanner.workers == expected, f"auto sizing: {auto_scanner.workers} != {expected}"
 
     print("--- First run (everything new) ---")
