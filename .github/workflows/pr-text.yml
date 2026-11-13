@@ -13,9 +13,11 @@ name: PR text
 # ruleset requires "No conversation links" next to "Tests passed".
 #
 # Safe for pull requests from forks: "pull_request" (never
-# "pull_request_target") gets a read-only token, and the title and
-# description reach the script as environment variables, never pasted
-# into a shell script, so nothing in them can run as a command.
+# "pull_request_target") gets a read-only token. The title and
+# description are fetched into a file by the script's own step, never put
+# in an environment variable or a shell command: text in them can't run
+# as a command, and isn't echoed into the public log (the runner prints
+# every step's environment there).
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
@@ -39,15 +41,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Fetch the PR's commit messages
+      - name: Fetch the pull request and its commit messages
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: >-
-          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits"
-          > "$RUNNER_TEMP/commits.json"
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" \
+            > "$RUNNER_TEMP/commits.json"
       - name: Check the title, description and commit messages
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: python3 .github/scripts/check_conversation_links.py "$RUNNER_TEMP/commits.json"
+        run: python3 .github/scripts/check_conversation_links.py "$RUNNER_TEMP/pr.json" "$RUNNER_TEMP/commits.json"

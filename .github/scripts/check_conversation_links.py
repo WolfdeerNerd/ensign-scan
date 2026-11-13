@@ -7,22 +7,26 @@ here stays in GitHub's history even after it is edited out. The check
 runs in .github/workflows/pr-text.yml, on every pull request and again
 whenever its title or description is edited.
 
-Input:
-  PR_TITLE, PR_BODY   environment variables (never pasted into a shell
-                      script, so nothing in them can run as a command)
-  argv[1]             GitHub's "list commits on a pull request" response,
-                      every page, as `gh api --paginate --slurp` writes it
+Input, both files written by the workflow with `gh api`:
+  argv[1]   the pull request itself (its "title" and "body")
+  argv[2]   GitHub's "list commits on a pull request" response, every
+            page, as `gh api --paginate --slurp` writes it
 
-Only WHERE a link was found is printed, never the link itself: the logs
-of a public repository's Actions runs are public too.
+The title and description are read from a file, not handed over in
+environment variables: the runner prints a step's environment in its
+log, so a link there would be published by the very check meant to
+catch it. For the same reason only WHERE a link was found is printed,
+never the link itself: the logs of a public repository's Actions runs
+are public too.
 
 Run by hand:
-  PR_TITLE="..." PR_BODY="..." python3 .github/scripts/check_conversation_links.py commits.json
+  gh api repos/OWNER/REPO/pulls/N > pr.json
+  gh api --paginate --slurp repos/OWNER/REPO/pulls/N/commits > commits.json
+  python3 .github/scripts/check_conversation_links.py pr.json commits.json
 """
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 
@@ -42,6 +46,14 @@ def lines_with_links(text: str | None) -> list[int]:
     if not text:
         return []
     return sorted({text.count("\n", 0, m.start()) + 1 for m in PATTERN.finditer(text)})
+
+
+def pull_from(path: str) -> tuple[str | None, str | None]:
+    """The pull request's (title, description). GitHub sends no description
+    at all (null) when it was left empty."""
+    with open(path, encoding="utf-8") as f:
+        pull = json.load(f)
+    return pull.get("title"), pull.get("body")
 
 
 def commits_from(path: str) -> list[dict]:
@@ -70,10 +82,11 @@ def findings(title: str | None, body: str | None, commits: list[dict]) -> list[s
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: check_conversation_links.py COMMITS_JSON", file=sys.stderr)
+    if len(argv) != 3:
+        print("usage: check_conversation_links.py PR_JSON COMMITS_JSON", file=sys.stderr)
         return 2
-    found = findings(os.environ.get("PR_TITLE"), os.environ.get("PR_BODY"), commits_from(argv[1]))
+    title, body = pull_from(argv[1])
+    found = findings(title, body, commits_from(argv[2]))
     if not found:
         print("No conversation links in the title, description or commit messages.")
         return 0

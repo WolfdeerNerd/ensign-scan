@@ -74,13 +74,17 @@ assert check.findings("Title", "Body", page1) == []
 
 
 # --- the script as CI runs it ------------------------------------------------
-def run(title: str, body: str, pages: list) -> subprocess.CompletedProcess:
+def run(title: str, body: str | None, pages: list) -> subprocess.CompletedProcess:
     with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "commits.json")
-        with open(path, "w", encoding="utf-8") as f:
+        pr, commits = os.path.join(d, "pr.json"), os.path.join(d, "commits.json")
+        with open(pr, "w", encoding="utf-8") as f:
+            json.dump({"number": 1, "title": title, "body": body}, f)
+        with open(commits, "w", encoding="utf-8") as f:
             json.dump(pages, f)  # pages of commits, as gh api --paginate --slurp writes them
-        env = {**os.environ, "PR_TITLE": title, "PR_BODY": body}
-        return subprocess.run([sys.executable, str(SCRIPT), path], env=env,
+        # A link in the environment would be printed in the public log by
+        # the runner itself: the script must not need one there.
+        env = {k: v for k, v in os.environ.items() if k not in ("PR_TITLE", "PR_BODY")}
+        return subprocess.run([sys.executable, str(SCRIPT), pr, commits], env=env,
                               capture_output=True, text=True, timeout=30, check=False)
 
 
@@ -93,7 +97,7 @@ assert "PR description, line 3" in dirty.stdout and "commit bbbbbbbbbbbb" in dir
 # The log names the place, never the link: Actions logs are public.
 assert SESSION_ID not in dirty.stdout + dirty.stderr, "the check printed the link"
 
-# A description someone left empty is fine (GitHub sends no body at all).
-assert run("Title", "", [[]]).returncode == 0
+# A description someone left empty is fine (GitHub sends null).
+assert run("Title", None, [[]]).returncode == 0
 
 print("conversation-link check tests passed")
