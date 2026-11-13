@@ -379,6 +379,9 @@ class TreeStats:
     # Unchanged large files clamd once called clean without scanning them
     # (Ensign 0.4.0 and older trusted that "OK"): rescanned once, by clamscan.
     big_recheck: int = 0
+    # Unchanged files that are recorded but have no verdict yet ("pending":
+    # hashed by a --no-scan run and never scanned since).
+    never_scanned: int = 0
 
 
 class Scanner:
@@ -569,7 +572,7 @@ class Scanner:
             self.prepare_clamd()
         self._sig_version = self.clamd.signature_version() if scan else None
         known = self._load_known_files(root)
-        candidates = self._collect_changed_files(root, known, stats)
+        candidates = self._collect_changed_files(root, known, stats, scan)
 
         print(
             f"  {stats.seen} files seen · "
@@ -579,6 +582,7 @@ class Scanner:
             f"[bold]{len(candidates)} to process[/bold]"
             + (f" ({stats.sig_rescan} because signatures updated)" if stats.sig_rescan else "")
             + (f" ({stats.big_recheck} large files not really scanned before)" if stats.big_recheck else "")
+            + (f" ({stats.never_scanned} recorded but never scanned)" if stats.never_scanned else "")
         )
         if candidates:
             results = self._process_all(candidates, scan, "Scan Progress")
@@ -600,9 +604,12 @@ class Scanner:
         )
 
     def _collect_changed_files(
-        self, root: Path, known: dict[str, _Known], stats: TreeStats
+        self, root: Path, known: dict[str, _Known], stats: TreeStats, scan: bool = True
     ) -> list[Path]:
-        """Walk once, top-down, returning files that need hashing/scanning."""
+        """Walk once, top-down, returning files that need hashing/scanning.
+
+        `scan` is False for a --no-scan run, which leaves files without a
+        verdict alone: it couldn't give them one."""
         candidates: list[Path] = []
         # os.walk silently skips any directory it can't list unless it is
         # given an onerror callback -- without one, a directory Ensign has
@@ -658,6 +665,12 @@ class Scanner:
                     # Includes rows saved before ctime tracking (NULL):
                     # their history can't be vouched for, so they are
                     # rescanned once and get a ctime recorded.
+                    candidates.append(path)
+                elif scan and prev.status in (None, ScanStatus.PENDING.value):
+                    # Hashed by a --no-scan run but never scanned: matching
+                    # size and times say the file is the one that was
+                    # hashed, not that anything has checked it.
+                    stats.never_scanned += 1
                     candidates.append(path)
                 elif self._signatures_moved_on(prev):
                     stats.sig_rescan += 1
@@ -1292,7 +1305,13 @@ class Scanner:
         before this update, or None if the file wasn't in the database.
 
         digest=None means "not known this time": a stored hash is kept,
-        and a new row gets "" (the column can't be NULL)."""
+        and a new row gets "" (the column can't be NULL).
+
+        outcome=None means "hashed, not scanned" (--no-scan). If the hash
+        differs from the stored one, the stored verdict was for other
+        content, so it is cleared and the file goes back to "pending":
+        otherwise the new size and times would sit beside the old "clean",
+        and every later scan would take the file for unchanged and checked."""
         with Session(self.engine) as session:
             try:
                 record = session.query(FileRecord).filter(
@@ -1314,6 +1333,12 @@ class Scanner:
                     record.last_scanned = utcnow()
                     if outcome.status in (ScanStatus.CLEAN, ScanStatus.INFECTED, ScanStatus.ALLOWED):
                         record.sig_version = self._sig_version
+                elif previous_hash is not None and digest is not None and digest != previous_hash:
+                    record.scan_status = ScanStatus.PENDING.value
+                    record.scan_result = None
+                    record.threat_name = None
+                    record.sig_version = None
+                    record.last_scanned = None
                 session.commit()
             except Exception:
                 session.rollback()
