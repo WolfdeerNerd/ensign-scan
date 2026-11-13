@@ -1,0 +1,53 @@
+name: PR text
+
+# Pull requests only. Fails if a PR's title, description or commit
+# messages hold a link to a private claude.ai page (a conversation, a
+# Claude Code session, a shared chat, a project or an artifact). This
+# repository is public, and a link published here stays in GitHub's
+# history even after it is edited out. See
+# .github/scripts/check_conversation_links.py for what counts.
+#
+# Its own workflow, not a job in tests.yml, because it has to run again
+# whenever a title or description is edited ("edited" below). In
+# tests.yml that would rerun the whole suite on every edit. The branch
+# ruleset requires "No conversation links" next to "Tests passed".
+#
+# Safe for pull requests from forks: "pull_request" (never
+# "pull_request_target") gets a read-only token, and the title and
+# description reach the script as environment variables, never pasted
+# into a shell script, so nothing in them can run as a command.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+# Two quick edits in a row start two runs; only the newest one matters.
+concurrency:
+  group: pr-text-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Least privilege: nothing here can write.
+permissions:
+  contents: read        # check out the script
+  pull-requests: read   # list the PR's commits, to read their messages
+
+jobs:
+  links:
+    name: No conversation links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch the PR's commit messages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: >-
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits"
+          > "$RUNNER_TEMP/commits.json"
+      - name: Check the title, description and commit messages
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 .github/scripts/check_conversation_links.py "$RUNNER_TEMP/commits.json"
