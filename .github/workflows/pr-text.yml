@@ -1,0 +1,53 @@
+name: PR text
+
+# Pull requests only. Fails if a PR's title, description or commit
+# messages hold a link to a private claude.ai page (a conversation, a
+# Claude Code session, a shared chat, a project or an artifact). This
+# repository is public, and a link published here stays in GitHub's
+# history even after it is edited out. See
+# .github/scripts/check_conversation_links.py for what counts.
+#
+# Its own workflow, not a job in tests.yml, because it has to run again
+# whenever a title or description is edited ("edited" below). In
+# tests.yml that would rerun the whole suite on every edit. The branch
+# ruleset requires "No conversation links" next to "Tests passed".
+#
+# Safe for pull requests from forks: "pull_request" (never
+# "pull_request_target") gets a read-only token. The title and
+# description are fetched into a file by the script's own step, never put
+# in an environment variable or a shell command: text in them can't run
+# as a command, and isn't echoed into the public log (the runner prints
+# every step's environment there).
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+# Two quick edits in a row start two runs; only the newest one matters.
+concurrency:
+  group: pr-text-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Least privilege: nothing here can write.
+permissions:
+  contents: read        # check out the script
+  pull-requests: read   # list the PR's commits, to read their messages
+
+jobs:
+  links:
+    name: No conversation links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch the pull request and its commit messages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" \
+            > "$RUNNER_TEMP/commits.json"
+      - name: Check the title, description and commit messages
+        run: python3 .github/scripts/check_conversation_links.py "$RUNNER_TEMP/pr.json" "$RUNNER_TEMP/commits.json"
