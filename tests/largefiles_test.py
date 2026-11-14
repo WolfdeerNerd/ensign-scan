@@ -203,6 +203,45 @@ assert all(hung[fd].status == ScanStatus.ERROR and "ran out of time" in hung[fd]
 assert sorted(partial) == sorted(fds), "every file is still reported exactly once"
 print("streamed clamscan results test passed ✓")
 
+# --- ClamAV's per-file time limit: left alone unless the caller sets it ------------------------
+with tempfile.TemporaryDirectory() as d:
+    # records its arguments; a file starting with SLOW "runs out of scan time"
+    stand_in_clamscan(d, 'printf "%s\\n" "$@" > "$(dirname "$0")/argv"\n'
+                         'for a in "$@"; do case "$a" in /proc/self/fd/*) '
+                         'case "$(head -c 4 "$a")" in '
+                         'SLOW) echo "$a: Heuristics.Limits.Exceeded.MaxScanTime FOUND" ;; '
+                         '*) echo "$a: OK" ;; esac ;; esac; done\n')
+    slow, quick = Path(d, "slow.bin"), Path(d, "quick.bin")
+    slow.write_bytes(b"SLOW data")
+    quick.write_bytes(b"fine")
+    fds = [os.open(slow, os.O_RDONLY), os.open(quick, os.O_RDONLY)]
+    real_path = os.environ["PATH"]
+    os.environ["PATH"] = f"{d}:{real_path}"
+    try:
+        got = scan_fds_with_clamscan(fds, DEFAULT_LIMITS, timeout=30)
+        default_argv = Path(d, "argv").read_text().splitlines()
+        scan_fds_with_clamscan(fds, DEFAULT_LIMITS, timeout=30, max_scantime_ms=0)
+        unlimited_argv = Path(d, "argv").read_text().splitlines()
+        scan_fds_with_clamscan(fds, DEFAULT_LIMITS, timeout=30, max_scantime_ms=600_000)
+        longer_argv = Path(d, "argv").read_text().splitlines()
+        try:
+            scan_fds_with_clamscan(fds, DEFAULT_LIMITS, timeout=30, max_scantime_ms=-1)
+            raise AssertionError("a negative time limit must be refused")
+        except ValueError:
+            pass
+    finally:
+        os.environ["PATH"] = real_path
+        for fd in fds:
+            os.close(fd)
+assert not any(a.startswith("--max-scantime") for a in default_argv), \
+    f"by default ClamAV's own time limit is left as it is: {default_argv}"
+assert "--max-scantime=0" in unlimited_argv, unlimited_argv
+assert "--max-scantime=600000" in longer_argv, longer_argv
+assert got[fds[0]].status == ScanStatus.INCOMPLETE, "running out of scan time is 'not fully scanned', never clean"
+assert got[fds[0]].threat_name == "Heuristics.Limits.Exceeded.MaxScanTime", got[fds[0]]
+assert got[fds[1]].status == ScanStatus.CLEAN
+print("clamscan time limit test passed ✓")
+
 
 # --- the scanner: large files go to clamscan, in batches, and are never "clean" by default -------
 class FakeClamd:

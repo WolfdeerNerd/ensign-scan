@@ -280,7 +280,7 @@ def _clamscan_verdict(said: list[str], stderr: str) -> "ScanOutcome":
 
 def scan_fds_with_clamscan(
     fds: list[int], limits: ClamdLimits, timeout: float, run_as: tuple[int, int] | None = None,
-    on_result=None,
+    on_result=None, max_scantime_ms: int | None = None,
 ) -> dict[int, "ScanOutcome"]:
     """Scan already-open files with one clamscan run, limits switched off.
 
@@ -303,11 +303,22 @@ def scan_fds_with_clamscan(
     come together). Every fd gets exactly one call -- files clamscan never
     reported (it died, or ran out of time) get an error.
 
+    The size limits are off, but ClamAV has a time limit too: it stops
+    scanning any one file after MaxScanTime (two minutes unless changed) and
+    reports Heuristics.Limits.Exceeded.MaxScanTime, which comes back here as
+    "not fully scanned". That default is left alone unless `max_scantime_ms`
+    is given: milliseconds allowed per file, or 0 for no per-file limit.
+    `timeout` still ends a run that hangs.
+
     Returns an outcome per fd; "raw" is clamscan's line(s) for that file.
     """
+    if max_scantime_ms is not None and max_scantime_ms < 0:
+        raise ValueError("max_scantime_ms must be 0 (no limit) or a positive number of milliseconds")
     argv = ["clamscan", "--no-summary", "--stdout",
             "--max-filesize=0", "--max-scansize=0", "--pcre-max-filesize=0",
             "--alert-exceeds-max", f"--tempdir={clamscan_temp_dir()}"]
+    if max_scantime_ms is not None:
+        argv.append(f"--max-scantime={int(max_scantime_ms)}")
     if limits.database_dir:
         argv.append(f"--database={limits.database_dir}")
     argv += [f"/proc/self/fd/{fd}" for fd in fds]
