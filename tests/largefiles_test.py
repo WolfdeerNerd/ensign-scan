@@ -274,12 +274,14 @@ class FakeClamd:
 
 
 batches: list[list[int]] = []
+scan_times: list[int | None] = []  # the per-file time limit each run was given
 
 
-def fake_clamscan(fds, limits, timeout, run_as=None, on_result=None):
+def fake_clamscan(fds, limits, timeout, run_as=None, on_result=None, max_scantime_ms=None):
     """Reads each file through the descriptor it was given -- the one Ensign
     opened -- the way the real clamscan does through /proc/self/fd/N."""
     batches.append(list(fds))
+    scan_times.append(max_scantime_ms)
     out = {}
     for fd in fds:
         os.fstat(fd)  # still open: raises if Ensign closed it too early
@@ -332,6 +334,8 @@ try:
         assert sum(len(b) for b in batches) == 4 and all(len(b) <= 2 for b in batches), batches
         assert fds_open_under(tree) == [], f"queued descriptors left open: {fds_open_under(tree)}"
         assert "queued for clamscan" in out and "Scanning 2 large file(s)" in out, out
+        assert scan_times and all(t == 0 for t in scan_times), \
+            f"every clamscan run is given no per-file time limit: {scan_times}"
         print("large-file routing test passed ✓")
 
         # --- reported as not fully scanned, with the disclaimer --------------------------------
@@ -364,6 +368,43 @@ try:
             stats = scanner.scan_tree(tree)
         assert stats.big_recheck == 0, "rescanned once, not every run"
         print("0.4.0 upgrade recheck test passed ✓")
+
+        # --- cut off by ClamAV's two-minute limit by an older Ensign: scanned again, once ---------
+        db = sqlite3.connect(f"{d}/data/system.db")
+        db.execute("UPDATE files SET scan_status = 'incomplete', threat_name = ?, scan_result = ? "
+                   "WHERE filename = 'big-clean.bin'",
+                   ("Heuristics.Limits.Exceeded.MaxScanTime",
+                    "clamscan: Heuristics.Limits.Exceeded.MaxScanTime FOUND"))
+        db.commit()
+        db.close()
+        batches.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            stats = scanner.scan_tree(tree)
+        with Session(scanner.engine) as session:
+            row = session.query(FileRecord).filter(FileRecord.filename == "big-clean.bin").one()
+            assert stats.big_recheck == 1 and sum(len(b) for b in batches) == 1, (stats, batches)
+            assert (row.scan_status, row.scan_result, row.threat_name) == ("clean", "clamscan: OK", None), \
+                (row.scan_status, row.scan_result, row.threat_name)
+        with contextlib.redirect_stdout(io.StringIO()):
+            stats = scanner.scan_tree(tree)
+        assert stats.big_recheck == 0, "scanned again once, not every run"
+        # ...and left alone while clamscan can't be run: there is nothing to retry it with
+        db = sqlite3.connect(f"{d}/data/system.db")
+        db.execute("UPDATE files SET scan_status = 'incomplete', threat_name = ?, scan_result = ? "
+                   "WHERE filename = 'big-clean.bin'",
+                   ("Heuristics.Limits.Exceeded.MaxScanTime",
+                    "clamscan: Heuristics.Limits.Exceeded.MaxScanTime FOUND"))
+        db.commit()
+        db.close()
+        scanner_mod.clamscan_cli_available = lambda: False
+        with contextlib.redirect_stdout(io.StringIO()):
+            stats = scanner.scan_tree(tree)
+        assert stats.big_recheck == 0, "not retried while clamscan is missing"
+        scanner_mod.clamscan_cli_available = lambda: True
+        with contextlib.redirect_stdout(io.StringIO()):
+            stats = scanner.scan_tree(tree)
+        assert stats.big_recheck == 1, stats
+        print("scan-time limit recheck test passed ✓")
 
         # --- no clamscan: not fully scanned (never clean), retried once clamscan is there -----------
         (tree / "big-new.bin").write_bytes(b"C" * 4096)
@@ -405,7 +446,7 @@ try:
 
         batch_ends: list[float] = []
 
-        def slow_clamscan(fds, limits, timeout, run_as=None, on_result=None):
+        def slow_clamscan(fds, limits, timeout, run_as=None, on_result=None, max_scantime_ms=None):
             time.sleep(0.4)
             out = fake_clamscan(fds, limits, timeout, run_as)
             batch_ends.append(time.monotonic())
@@ -437,7 +478,7 @@ try:
 
         # --- with a clamscan that reports as it goes, each big file is printed and counted
         #     straight away, not when its whole batch ends
-        def streaming_clamscan(fds, limits, timeout, run_as=None, on_result=None):
+        def streaming_clamscan(fds, limits, timeout, run_as=None, on_result=None, max_scantime_ms=None):
             out = {}
             for fd in fds:
                 time.sleep(0.3)
@@ -677,7 +718,7 @@ real = (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
 real_cpu_count = os.cpu_count
 
 
-def half_second_clamscan(fds, limits, timeout, run_as=None, on_result=None):
+def half_second_clamscan(fds, limits, timeout, run_as=None, on_result=None, max_scantime_ms=None):
     time.sleep(0.5)
     return {fd: ScanOutcome(ScanStatus.CLEAN, "clamscan: OK") for fd in fds}
 

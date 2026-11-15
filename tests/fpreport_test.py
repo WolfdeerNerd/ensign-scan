@@ -223,4 +223,28 @@ with tempfile.TemporaryDirectory() as d:
     assert "pwned" not in out.read_text()
     print("hostile names test passed ✓")
 
+    # --- a file larger than clamd scans is scanned again by clamscan, with no per-file time limit
+    from ensign_scan import clamd as clamd_mod  # noqa: E402
+    time_limits: list[int | None] = []
+
+    def recording_clamscan(fds, limits, timeout, run_as=None, on_result=None, max_scantime_ms=None):
+        time_limits.append(max_scantime_ms)
+        return {fd: ScanOutcome(ScanStatus.CLEAN, "clamscan: OK") for fd in fds}
+
+    real = (clamd_mod.scan_fds_with_clamscan, clamd_mod.clamscan_cli_available, clamd_mod.clamscan_user)
+    clamd_mod.scan_fds_with_clamscan = recording_clamscan
+    clamd_mod.clamscan_cli_available = lambda: True
+    clamd_mod.clamscan_user = lambda: None
+    s = scanner()
+    s._scan_limit = lambda: 1  # every file counts as larger than clamd scans
+    fd = os.open(flagged, os.O_RDONLY)
+    try:
+        outcome, how = fpreport._rescan(s, fd, flagged, flagged.stat().st_size)
+    finally:
+        os.close(fd)
+        clamd_mod.scan_fds_with_clamscan, clamd_mod.clamscan_cli_available, clamd_mod.clamscan_user = real
+    assert how == "clamscan, whole file" and outcome.status == ScanStatus.CLEAN, (how, outcome)
+    assert time_limits == [0], f"ClamAV's two-minute per-file limit is switched off: {time_limits}"
+    print("large-file rescan test passed ✓")
+
 print("\nAll ClamAV report tests passed ✓")

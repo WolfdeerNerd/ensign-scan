@@ -216,6 +216,8 @@ PCREMaxFileSize 2000M
 
 `PCREMaxFileSize` matters too: signatures that use regular expressions are skipped for files past it (100M by default), and clamd still answers "OK". Ensign counts it as one of clamd's limits, and switches it off for `clamscan`. Large files you scanned with Ensign 0.4.0 or older were never really checked, so they are rescanned once.
 
+ClamAV has a time limit as well: it stops scanning any single file after two minutes (`MaxScanTime`) and leaves the rest of it unscanned. Ensign switches that off for `clamscan` too, because a large file can need longer. A `clamscan` run that hangs is still ended, after a time allowance based on the size of its files, and whatever it didn't finish is recorded as an error, never as clean. Files that Ensign 0.6.0 or older cut off at two minutes are scanned again once.
+
 ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This is a limit in ClamAV itself, and its developers have said so. Ensign marks those files **not fully scanned** and lists them at the end of each run, never as clean. They are hashed and tracked, so a changed one is looked at again.
 
 **The sweep.** For those files, Ensign can do the next best thing: read the file in overlapping slices and pass each one to clamd like an ordinary file. It's off by default; turn it on with `sweep_huge_files = true` in your config, or for a single run with `--sweep`.
