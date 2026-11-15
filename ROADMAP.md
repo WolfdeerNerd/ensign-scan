@@ -41,6 +41,7 @@ Not decided. Discussion welcome:
 - **Hidden payloads.** Spotting data tucked inside ordinary files, such as an image with something appended.
 - **Folder-level secrets detection.** Treat a folder as a secrets store when most of its files look like credentials.
 - **The sweep on by default,** once it has proven itself.
+- **Looking inside archives over 2 GiB.** Open zip and tar archives ClamAV can't scan whole, and hand it each member. An experiment showed it works; see [`docs/Large_Files_Research.md`](docs/Large_Files_Research.md).
 - **A graphical interface,** if people want one, in a way that honors ClamTk.
   - **Scan from your file manager:** a small button in your file manager (Dolphin, Nautilus and the like) that scans the folder you have open.
 
