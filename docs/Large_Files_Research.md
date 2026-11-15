@@ -90,7 +90,7 @@ No member in any of the four was skipped. The `.ova` time is from an early versi
 
 ## Findings that affect Ensign today
 
-- **The two-minute limit applies to Ensign's own large-file scans.** They don't pass `max_scantime_ms`, so a large file that needs longer is recorded as not fully scanned. Whether to lift it there is undecided.
+- **The two-minute limit applied to Ensign's own large-file scans.** They did not pass `max_scantime_ms`, so a large file that needed longer was recorded as not fully scanned. Ensign now switches the limit off for its `clamscan` runs, and scans those files again once.
 - **clamd remembers results for content it has already scanned.** Repeating test data makes timings look far better than they are. Benchmarks need non-repeating data, or clamd's cache switched off.
 
 ## Still not covered

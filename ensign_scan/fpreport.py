@@ -79,7 +79,8 @@ def _rescan(scanner, fd: int, path: Path, size: int):
     """Scan the open file again with the current signatures, the way a scan
     would: clamd, or clamscan for files larger than clamd scans."""
     from . import clamd as clamd_mod
-    from .scanner import _CLAMSCAN_BASE_TIMEOUT, _CLAMSCAN_BYTES_PER_SECOND, _scan_cost
+    from .scanner import (_CLAMSCAN_BASE_TIMEOUT, _CLAMSCAN_BYTES_PER_SECOND,
+                          _CLAMSCAN_MAX_SCANTIME_MS, _scan_cost)
     scanner.prepare_clamd()
     if size >= scanner._scan_limit():
         if not clamd_mod.clamscan_cli_available():
@@ -90,7 +91,8 @@ def _rescan(scanner, fd: int, path: Path, size: int):
             return None, f"Ensign won't run clamscan as root, and there is {exc}"
         timeout = _CLAMSCAN_BASE_TIMEOUT + _scan_cost(size) / _CLAMSCAN_BYTES_PER_SECOND
         limits = scanner.limits or clamd_mod.DEFAULT_LIMITS
-        return clamd_mod.scan_fds_with_clamscan([fd], limits, timeout, run_as)[fd], "clamscan, whole file"
+        return clamd_mod.scan_fds_with_clamscan(
+            [fd], limits, timeout, run_as, max_scantime_ms=_CLAMSCAN_MAX_SCANTIME_MS)[fd], "clamscan, whole file"
     if scanner._transport == "path":
         return scanner.clamd.scan(path), "clamd, whole file"
     from .scanner import _clamd_skipped

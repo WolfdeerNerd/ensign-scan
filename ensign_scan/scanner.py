@@ -127,6 +127,13 @@ def _scan_cost(size: int) -> int:
 # clamscan time allowed per run: a fixed allowance plus 1 s per 5 MiB.
 _CLAMSCAN_BASE_TIMEOUT = 300.0
 _CLAMSCAN_BYTES_PER_SECOND = 5 * 2**20
+# ClamAV also stops scanning any one file after two minutes (MaxScanTime)
+# and reports the rest as not scanned. Large files are what clamscan is used
+# for here, and a large file can honestly need longer, so that per-file limit
+# is switched off (0). The allowance above still ends a run that hangs: its
+# unfinished files become errors, never clean.
+_CLAMSCAN_MAX_SCANTIME_MS = 0
+_SCAN_TIME_EXCEEDED = f"{LIMITS_EXCEEDED_PREFIX}.MaxScanTime"
 # Running clamscans side by side. Each loads its own copy of the
 # signatures, about what clamd holds; that figure (with this margin) is
 # what another clamscan needs. Two limits, both checked before each one
@@ -339,6 +346,9 @@ class _Known(NamedTuple):
     # A verdict from the sweep (scan_result "sweep: ..."): only the sweep
     # itself, or a change to the file, may replace it.
     by_sweep: bool = False
+    # Recorded as INCOMPLETE because ClamAV's two-minute per-file limit cut
+    # the scan short (older versions of Ensign left that limit on).
+    scan_time_exceeded: bool = False
 
 
 @dataclass(frozen=True)
@@ -682,6 +692,10 @@ class Scanner:
                 elif prev.clamscan_missing and self.limits is not None and self._clamscan_usable():
                     stats.big_recheck += 1  # clamscan can be run now; it couldn't before
                     candidates.append(path)
+                elif (prev.scan_time_exceeded and prev.status == ScanStatus.INCOMPLETE.value
+                      and self.limits is not None and self._clamscan_usable()):
+                    stats.big_recheck += 1  # cut off at two minutes before; no such limit now
+                    candidates.append(path)
                 else:
                     stats.unchanged += 1
         return candidates
@@ -753,8 +767,9 @@ class Scanner:
                 FileRecord.scan_result.like("clamscan:%"),
                 FileRecord.scan_result.like("not scanned:%"),
                 FileRecord.scan_result.like(f"{SWEEP_HIT_PREFIX}%"),
+                FileRecord.threat_name == _SCAN_TIME_EXCEEDED,
             ).filter(path_under(FileRecord.filepath, str(root))).all()
-        return {row[0]: _Known(*row[1:6], bool(row[6]), bool(row[7]), bool(row[8]))
+        return {row[0]: _Known(*row[1:6], bool(row[6]), bool(row[7]), bool(row[8]), bool(row[9]))
                 for row in rows if row[2] is not None}
 
     # ------------------------------------------------------------------
@@ -1088,7 +1103,8 @@ class Scanner:
             return not_scanned(f"Ensign won't run clamscan as root, and there is {exc}")
         timeout = _CLAMSCAN_BASE_TIMEOUT + total / _CLAMSCAN_BYTES_PER_SECOND
         return scan_fds_with_clamscan([item.fd for item in batch], self.limits or DEFAULT_LIMITS,
-                                      timeout, run_as, on_result=on_result)
+                                      timeout, run_as, on_result=on_result,
+                                      max_scantime_ms=_CLAMSCAN_MAX_SCANTIME_MS)
 
     # ------------------------------------------------------------------
     # The sweep: files too large for ClamAV, in slices

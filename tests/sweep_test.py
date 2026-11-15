@@ -94,7 +94,7 @@ class FakeClamd:
         return ScanOutcome(ScanStatus.CLEAN, f"{label}: OK")
 
 
-def refuses_everything(fds, limits, timeout, run_as=None, on_result=None):
+def refuses_everything(fds, limits, timeout, run_as=None, on_result=None, max_scantime_ms=None):
     """clamscan, for files this test treats as over ClamAV's ceiling."""
     return {fd: ScanOutcome(ScanStatus.INCOMPLETE, f"clamscan: {TOO_BIG} FOUND", TOO_BIG) for fd in fds}
 
