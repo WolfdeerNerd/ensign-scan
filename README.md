@@ -181,7 +181,9 @@ These run one job and exit — no full scan.
 | `python3 main.py --diagnostics` | Print versions, settings and counts for a bug report. Contains no paths, usernames, hostnames or file names, and writes nothing |
 | `python3 main.py --allow PATH` | Mark a file ClamAV flagged as a false positive (see A note on infected results). Asks to confirm; `--yes` skips the question |
 | `python3 main.py --unallow PATH` | Undo `--allow`: the file counts as infected again |
-| `python3 main.py --list-allowed` | List every file you've allowed |
+| `python3 main.py --allow-folder FOLDER --signature NAME` | Allow every file under a folder that one signature flags right now (see A note on infected results). Asks once to confirm; `--yes` skips the question |
+| `python3 main.py --unallow-folder FOLDER --signature NAME` | Undo `--allow-folder`: those files count as infected again |
+| `python3 main.py --list-allowed` | List every file you've allowed, and the folders you ran `--allow-folder` on |
 | `python3 main.py --clamav-report PATH` | Prepare a false-positive report for ClamAV about a flagged file (see A note on infected results). Nothing is sent: you submit it |
 
 ### Only one run at a time
@@ -353,6 +355,12 @@ ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match 
   - allowed files don't count as infected for alerts or the exit code, but they're never hidden: every run lists them under "ALLOWED BY YOU", and `--list-allowed` shows them all;
   - they're still rescanned when the signatures update, so once ClamAV fixes the false positive the file simply turns clean;
   - `--unallow PATH` undoes it.
+- **Allow a whole folder's worth** with `--allow-folder FOLDER --signature NAME`, when one signature flags many files in one place (a large text dataset, say, where the pieces of a signature turn up by chance across gigabytes of text). It allows every file under the folder, subfolders included, that this signature flags right now, with one confirmation. Leave out `--signature` to see which signatures are flagged there.
+  - **It's a snapshot.** Each file gets the same allowance `--allow` gives, tied to its own content. Nothing is allowed for being in the folder, so a file that appears there later, or an allowed file that changes, is flagged as infected again;
+  - **Ensign tells you what to do next.** When that happens, the run lists those files under "NEW IN FOLDERS YOU ALLOWED" with the two commands for allowing them: the folder command again, or `--allow` for one file. Ensign runs neither. Check the files first;
+  - **Files that can run code are left out.** A file in a format that can run code the moment a program loads it (`.pkl`, `.pickle`, `.pt`, `.pth`, `.ckpt`, `.bin`, `.joblib`) is never part of a folder allow, and neither is a file with the very same content as one. Each needs its own `--allow PATH`;
+  - **A file that changed since its last scan is left out** until it has been scanned again;
+  - `--unallow-folder FOLDER --signature NAME` undoes it for everything allowed under that folder, or allowed from it, for that signature.
 
 Allowances live in Ensign's own database. Ensign doesn't touch ClamAV or its signatures, so nothing else that uses clamd is affected. (ClamAV's own allow lists, `.sfp` and `.ign2` files in its database folder, work for every program using clamd. See ClamAV's documentation if that's what you want.)
 

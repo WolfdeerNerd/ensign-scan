@@ -35,7 +35,6 @@ Decided, no order yet:
 
 Not decided. Discussion welcome:
 
-- **Allow by signature in a folder.** Allow many false positives at once, instead of one file at a time.
 - **Name the provider of `.UNOFFICIAL` signatures** in `--clamav-report`, by finding which signature file the name comes from.
 - **NSRL hashes.** NIST's National Software Reference Library, as a local second opinion on flagged files.
 - **Hidden payloads.** Spotting data tucked inside ordinary files, such as an image with something appended.
