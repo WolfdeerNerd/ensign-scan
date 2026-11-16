@@ -7,6 +7,12 @@ name: PR text
 # history even after it is edited out. See
 # .github/scripts/check_conversation_links.py for what counts.
 #
+# A second job does the same for home-directory paths that name a real
+# account (/home/NAME, ...), which usually arrive in pasted terminal
+# output. See .github/scripts/check_personal_info.py. The files in the
+# repository are checked for the same thing by the "lint" job in
+# tests.yml.
+#
 # Its own workflow, not a job in tests.yml, because it has to run again
 # whenever a title or description is edited ("edited" below). In
 # tests.yml that would rerun the whole suite on every edit. The branch
@@ -51,3 +57,22 @@ jobs:
             > "$RUNNER_TEMP/commits.json"
       - name: Check the title, description and commit messages
         run: python3 .github/scripts/check_conversation_links.py "$RUNNER_TEMP/pr.json" "$RUNNER_TEMP/commits.json"
+
+  personal-info:
+    name: No personal paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch the pull request and its commit messages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" \
+            > "$RUNNER_TEMP/commits.json"
+      - name: Check the title, description and commit messages
+        run: python3 .github/scripts/check_personal_info.py "$RUNNER_TEMP/pr.json" "$RUNNER_TEMP/commits.json"
