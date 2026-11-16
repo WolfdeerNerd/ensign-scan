@@ -12,7 +12,10 @@ folder. Checked here:
   * a new file, or a changed one, is flagged again on the next run, and the
     run prints the commands to allow it;
   * --list-allowed shows the folder; --unallow-folder undoes it;
-  * the command line refuses a --signature with nothing to apply it to.
+  * the command line refuses a --signature with nothing to apply it to;
+  * a file given as the folder is pointed to --allow;
+  * undoing a folder also forgets the folders inside it;
+  * a folder with tens of thousands of left-out files doesn't crash.
 
 Runs anywhere: clamd is a stand-in that flags content containing "PHISH"
 as Test.Phish and "EVIL" as Test.Evil.
@@ -241,6 +244,50 @@ with tempfile.TemporaryDirectory() as d:
     assert n == 1 and all("\x1b" not in t for t in (out, hint, listed)), repr(out + hint + listed)
     assert "\\x1b" in hint and "[red]" in hint, repr(hint)
     print("hostile names test passed ✓")
+
+    # --- a file given as the folder: pointed to --allow, not told to scan ------------------------
+    n, out = quiet(allowlist.allow_folder, engine, str(data / "batch" / "b.jsonl"), "Test.Phish", yes)
+    assert n == 0 and "is a file" in out and "--allow " in out and "Scan it first" not in out, out
+    print("file-as-folder test passed ✓")
+
+    # --- undoing a folder forgets the folders inside it, for that signature ---------------------
+    nest = tree / "nest"
+    (nest / "inner").mkdir(parents=True)
+    (nest / "top.txt").write_bytes(b"nest top PHISH")
+    (nest / "inner" / "deep.txt").write_bytes(b"nest deep PHISH")
+    (nest / "inner" / "evil.txt").write_bytes(b"nest deep EVIL")
+    scan()
+    assert quiet(allowlist.allow_folder, engine, str(nest / "inner"), "Test.Phish", yes)[0] == 1
+    assert quiet(allowlist.allow_folder, engine, str(nest / "inner"), "Test.Evil", yes)[0] == 1
+    assert quiet(allowlist.allow_folder, engine, str(nest), "Test.Phish", yes)[0] == 1
+    ok, _ = quiet(allowlist.unallow_folder, engine, str(nest), "Test.Phish")
+    st = statuses(engine)
+    assert ok and st["top.txt"] == st["deep.txt"] == "infected"
+    with Session(engine) as session:
+        left = {(Path(f.folder).name, f.threat_name) for f in session.query(AllowedFolder)
+                if f.folder.startswith(str(nest))}
+    assert left == {("inner", "Test.Evil")}, f"only the other signature's folder is still remembered: {left}"
+    assert st["evil.txt"] == "allowed", "another signature's allowance is untouched"
+    _, hint = quiet(allowlist.new_in_allowed_folders, engine, paths=[str(nest)])
+    assert "deep.txt" not in hint, "files you un-allowed are not reported as new"
+    print("nested undo test passed ✓")
+
+    # --- a folder with more left-out files than SQLite takes in one query ------------------------
+    many = tree / "many"
+    many.mkdir()
+    (many / "text.jsonl").write_bytes(b"many PHISH")
+    scan()
+    with Session(engine) as session:
+        session.add_all([FileRecord(filepath=f"{many}/m{i}.pt", filename=f"m{i}.pt",
+                                    file_hash=f"{i:064d}", scan_status="infected",
+                                    threat_name="Test.Phish") for i in range(40000)])
+        session.commit()
+    n, out = quiet(allowlist.allow_folder, engine, str(many), "Test.Phish", yes)
+    assert n == 1 and "40000 files in a format that can run code" in out, out[-300:]
+    with Session(engine) as session:
+        session.query(FileRecord).filter(FileRecord.filename.like("m%.pt")).delete(synchronize_session=False)
+        session.commit()
+    print("many left-out files test passed ✓")
 
     # --- the command line -------------------------------------------------------------------------
     def parse(*argv):

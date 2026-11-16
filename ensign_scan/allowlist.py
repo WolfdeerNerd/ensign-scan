@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rich import print
+from sqlalchemy import or_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -182,12 +183,12 @@ def _command(*words: str) -> str:
     return shown("ensign-scan " + " ".join(shlex.quote(w) for w in words))
 
 
-def _flagged_under(session: Session, folder: str) -> list[tuple[str, str]]:
-    """(path, signature) of every infected file inside `folder`."""
-    rows = session.query(FileRecord.filepath, FileRecord.threat_name).filter(
+def _flagged_under(session: Session, folder: str) -> list[tuple[str, str, str]]:
+    """(path, signature, stored SHA-256) of every infected file inside `folder`."""
+    rows = session.query(FileRecord.filepath, FileRecord.threat_name, FileRecord.file_hash).filter(
         FileRecord.scan_status == ScanStatus.INFECTED.value,
         path_under(FileRecord.filepath, folder)).all()
-    return sorted((path, threat or "Unknown") for path, threat in rows)
+    return sorted((path, threat or "Unknown", digest) for path, threat, digest in rows)
 
 
 def _print_some(paths: list[str], top: int, icon: str = "○") -> None:
@@ -202,6 +203,10 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
     Asks once, after showing what would be allowed and what is left out.
     Returns how many files under the folder were allowed."""
     folder = _folder_text(folder)
+    if os.path.lexists(folder) and not os.path.isdir(folder):
+        print_unwrapped(f"[yellow]Not allowed:[/yellow] {shown(folder)} is a file, and --allow-folder "
+                        f"takes a folder. To allow one file: {_command('--allow', folder)}")
+        return 0
     with Session(engine) as session:
         flagged = _flagged_under(session, folder)
     if not flagged:
@@ -209,8 +214,10 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
                         f"recorded as infected. Scan it first.")
         return 0
     by_signature: dict[str, list[str]] = {}
-    for path, threat in flagged:
+    stored_hash: dict[str, str] = {}
+    for path, threat, digest in flagged:
         by_signature.setdefault(threat, []).append(path)
+        stored_hash[path] = digest
     if signature not in by_signature:
         if signature is None:
             print_unwrapped(f"[yellow]Not allowed:[/yellow] say which signature to allow under "
@@ -231,10 +238,10 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
               f"(each one is hashed, so large files take a while)…")
     # An allowance goes by content, so allowing a file would also cover a
     # left-out file holding the very same bytes. Such a file is held back
-    # with it, so "left out" always means "still infected".
-    with Session(engine) as session:
-        code_hashes = {h for (h,) in session.query(FileRecord.file_hash).filter(
-            FileRecord.filepath.in_(code))} if code else set()
+    # with it, so "left out" always means "still infected". The hashes come
+    # from the query above: asking for them again with one "IN (...)" over
+    # every left-out path would exceed SQLite's limit on a large folder.
+    code_hashes = {stored_hash[p] for p in code}
     ready: list[_Candidate] = []
     not_ready: list[tuple[str, str]] = []
     for path in rest:
@@ -302,8 +309,13 @@ def unallow_folder(engine: Engine, folder: str, signature: str) -> bool:
     as infected again, and the folder is forgotten."""
     folder = _folder_text(folder)
     with Session(engine) as session:
+        # The folder itself, and any folder inside it you allowed for the
+        # same signature: its files are flagged again below, so it must not
+        # stay listed, or report them later as "new".
         remembered = session.query(AllowedFolder).filter(
-            AllowedFolder.folder == folder, AllowedFolder.threat_name == signature).delete()
+            AllowedFolder.threat_name == signature,
+            or_(AllowedFolder.folder == folder, path_under(AllowedFolder.folder, folder)),
+        ).delete(synchronize_session=False)
         digests = {h for (h,) in session.query(FileRecord.file_hash).filter(
             FileRecord.scan_status == ScanStatus.ALLOWED.value,
             FileRecord.threat_name == signature,
