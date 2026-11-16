@@ -210,6 +210,25 @@ class Allowance(Base):
         return f"<Allowance {self.file_hash[:12]} {self.threat_name!r}>"
 
 
+class AllowedFolder(Base):
+    """A folder you ran --allow-folder on, for one signature. It allows
+    nothing by itself: every allowed file has its own Allowance, tied to
+    its content. This row only remembers that you did it, so a later run
+    can tell you when a new or changed file there is flagged by the same
+    signature, and --list-allowed can show the folder."""
+    __tablename__ = "allowed_folders"
+    __table_args__ = (UniqueConstraint("folder", "threat_name"),)
+
+    id = Column(Integer, primary_key=True)
+    folder = Column(FsPath, nullable=False)
+    threat_name = Column(SafeText, nullable=False)
+    allowed_at = Column(DateTime, default=utcnow, nullable=False)       # the first time
+    last_allowed_at = Column(DateTime, default=utcnow, nullable=False)  # the latest time
+
+    def __repr__(self) -> str:
+        return f"<AllowedFolder {self.folder!r} {self.threat_name!r}>"
+
+
 class DirectoryRecord(Base):
     """Tracked only for snapshot roots, to allow whole-subtree pruning."""
 

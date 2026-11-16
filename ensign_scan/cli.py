@@ -88,6 +88,15 @@ def parse_args() -> argparse.Namespace:
                              "signature only), then exit. Asks to confirm. Can be given more than once.")
     parser.add_argument("--unallow", metavar="PATH", action="append", default=[],
                         help="Undo --allow for a file, then exit")
+    parser.add_argument("--allow-folder", metavar="FOLDER",
+                        help="Allow every file under FOLDER that one signature flags right now "
+                             "(name it with --signature), then exit. Asks once to confirm. Files "
+                             "that appear or change later are flagged again.")
+    parser.add_argument("--unallow-folder", metavar="FOLDER",
+                        help="Undo --allow-folder for FOLDER and --signature, then exit")
+    parser.add_argument("--signature", metavar="NAME",
+                        help="The signature name for --allow-folder / --unallow-folder, as shown "
+                             "in the infected list")
     parser.add_argument("--list-allowed", action="store_true",
                         help="List the files you've allowed, then exit")
     parser.add_argument("--clamav-report", metavar="PATH", action="append", default=[],
@@ -95,11 +104,18 @@ def parse_args() -> argparse.Namespace:
                              "then exit. Checks the file again first. Nothing is sent: you submit "
                              "it. Can be given more than once.")
     parser.add_argument("--yes", action="store_true",
-                        help="Don't ask to confirm --allow (for scripts)")
+                        help="Don't ask to confirm --allow or --allow-folder (for scripts)")
     parser.add_argument("--suggest-fixes", action="store_true",
                         help="List files clamd could not read, grouped by directory, then exit (no full scan). "
                              "Scoped to any targets given.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.signature and not (args.allow_folder or args.unallow_folder):
+        parser.error("--signature goes with --allow-folder or --unallow-folder")
+    if args.unallow_folder and not args.signature:
+        parser.error("--unallow-folder needs --signature NAME")
+    if args.allow_folder and args.unallow_folder:
+        parser.error("--allow-folder and --unallow-folder can't be used together")
+    return args
 
 
 def setup_logging(config: Config) -> None:
@@ -127,6 +143,8 @@ def main() -> int:
     args.allow = [os.path.abspath(p) for p in args.allow]
     args.unallow = [os.path.abspath(p) for p in args.unallow]
     args.clamav_report = [os.path.abspath(p) for p in args.clamav_report]
+    args.allow_folder = os.path.abspath(args.allow_folder) if args.allow_folder else None
+    args.unallow_folder = os.path.abspath(args.unallow_folder) if args.unallow_folder else None
     # Before anything that writes (starter config, logs, database) or prints
     # personal details (the greeting): diagnostics must be read-only and clean.
     if args.diagnostics:
@@ -144,7 +162,8 @@ def main() -> int:
     # the lock and can run alongside a scan. run() handles --purge-missing
     # and --rescan-errors first, so with either one also given, the run
     # writes and must take the lock like any other.
-    writes = args.purge_missing or args.rescan_errors or args.allow or args.unallow
+    writes = (args.purge_missing or args.rescan_errors or args.allow or args.unallow
+              or args.allow_folder or args.unallow_folder)
     readonly = args.verify_packages or args.suggest_fixes or args.list_allowed or args.clamav_report
     if readonly and not writes:
         return run(args, config)
@@ -164,7 +183,7 @@ def main() -> int:
 
 
 def _confirm(assume_yes: bool):
-    """How --allow asks to confirm: --yes skips it; without a terminal to
+    """How --allow and --allow-folder ask to confirm: --yes skips it; without a terminal to
     ask on (a script, a pipe), it refuses rather than guessing."""
     def ask(prompt: str) -> bool:
         if assume_yes:
@@ -194,11 +213,15 @@ def run(args: argparse.Namespace, config: Config) -> int:
     greet(config)
 
     scanner = Scanner(config)
-    if args.allow or args.unallow:
+    if args.allow or args.unallow or args.allow_folder or args.unallow_folder:
         for path in args.unallow:
             allowlist.unallow(scanner.engine, path)
+        if args.unallow_folder:
+            allowlist.unallow_folder(scanner.engine, args.unallow_folder, args.signature)
         for path in args.allow:
             allowlist.allow(scanner.engine, path, _confirm(args.yes))
+        if args.allow_folder:
+            allowlist.allow_folder(scanner.engine, args.allow_folder, args.signature, _confirm(args.yes))
         return 0
     if args.list_allowed:
         allowlist.list_allowed(scanner.engine)
@@ -298,6 +321,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
     unsaved_infected = [u for u in scanner.unsaved if u.status == "infected"]
     infected = list_infected(scanner.engine, paths=args.targets or None,
                              more_elsewhere=bool(unsaved_infected))
+    allowlist.new_in_allowed_folders(scanner.engine, paths=args.targets or None)
     allowlist.allowed_report(scanner.engine, paths=args.targets or None)
     # Results the database refused are reported (and alerted on) from memory,
     # so a failed save can never turn a detection into "nothing found".
