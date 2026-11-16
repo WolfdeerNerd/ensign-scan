@@ -27,6 +27,7 @@ import os
 import pwd
 import re
 import socket
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -251,6 +252,47 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
     run("--config", str(config), str(fp_tree), expect=3, cwd=work)
     assert rows(db)[str(flagged)][0] == "infected"
     print("allowed-by-you test passed ✓")
+
+    # --- --allow-folder: a folder's false positives in one go, as a snapshot -----------------
+    batch = tmp / "training data"       # a space: the printed commands must quote it
+    (batch / "sub").mkdir(parents=True)
+    texts = [batch / "a.jsonl", batch / "sub" / "b.jsonl"]
+    for i, path in enumerate(texts):
+        path.write_bytes(EICAR + b" batch %d" % i)      # different content, same signature
+    pickle = batch / "model.pkl"                         # a format that can run code when loaded
+    pickle.write_bytes(EICAR + b" pickle")
+    run("--config", str(config), str(batch), expect=3, cwd=work)
+    signature = rows(db)[str(texts[0])][1]
+    assert signature and all(rows(db)[str(p)][:2] == ("infected", signature) for p in [*texts, pickle])
+    # no --signature: lists what is flagged there, allows nothing
+    flat = " ".join(run("--config", str(config), "--allow-folder", str(batch), cwd=work).split())
+    assert "--signature NAME" in flat and f"{signature} (3 files)" in flat, flat
+    # no terminal and no --yes: refuses
+    flat = " ".join(run("--config", str(config), "--allow-folder", str(batch),
+                        "--signature", signature, cwd=work).split())
+    assert "add --yes" in flat and rows(db)[str(texts[0])][0] == "infected", flat
+    flat = " ".join(run("--config", str(config), "--allow-folder", str(batch),
+                        "--signature", signature, "--yes", cwd=work).split())
+    assert "Allowed 2 files" in flat and "can run code" in flat, flat
+    assert all(rows(db)[str(p)][0] == "allowed" for p in texts)
+    assert rows(db)[str(pickle)][0] == "infected", "never part of a folder allow"
+    # a file that appears later is flagged, and the run prints what to do about it
+    newer = batch / "c.jsonl"
+    newer.write_bytes(EICAR + b" a new batch")
+    flat = " ".join(run("--config", str(config), str(batch), expect=3, cwd=work).split())
+    assert rows(db)[str(newer)][0] == "infected" and rows(db)[str(texts[0])][0] == "allowed"
+    assert "NEW IN FOLDERS YOU ALLOWED (2 files)" in flat, flat     # c.jsonl and model.pkl
+    assert (f"--allow-folder {shlex.quote(str(batch))} --signature {shlex.quote(signature)}"
+            in flat), flat
+    assert "ALLOWED BY YOU (2 files)" in flat, flat
+    flat = " ".join(run("--config", str(config), "--list-allowed", cwd=work).split())
+    assert "FOLDERS YOU RAN --allow-folder ON (1)" in flat and "training data" in flat, flat
+    # undo: everything there is infected again, and the folder is forgotten
+    run("--config", str(config), "--unallow-folder", str(batch), "--signature", signature, cwd=work)
+    assert all(rows(db)[str(p)][0] == "infected" for p in [*texts, pickle, newer])
+    flat = " ".join(run("--config", str(config), str(batch), expect=3, cwd=work).split())
+    assert "NEW IN FOLDERS YOU ALLOWED" not in flat and "ALLOWED BY YOU" not in flat, flat
+    print("allow-folder test passed ✓")
 
     # --- --clamav-report: rescanned with real clamd, nothing changed in the database ---------
     # The test signatures are local, so clamd names them *.UNOFFICIAL: the

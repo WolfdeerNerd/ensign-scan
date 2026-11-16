@@ -35,3 +35,8 @@ ensign-scan = "ensign_scan.cli:main"
 
 [tool.setuptools]
 packages = ["ensign_scan", "ensign_scan.pkgdb"]
+
+# Lint rules, checked in CI (the "lint" job) and by running `ruff check .`
+# F: unused or undefined names; E9: syntax errors; B: likely bugs.
+[tool.ruff.lint]
+select = ["F", "E9", "B"]
