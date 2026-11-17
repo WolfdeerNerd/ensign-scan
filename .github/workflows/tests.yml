@@ -232,6 +232,10 @@ jobs:
       # run must still hand clamd open files rather than run clamd as root.
       - name: Run the installed command under sudo
         run: sudo --preserve-env=ENSIGN_CLI,ENSIGN_TEST_CLAMD_SOCKET "$(command -v python)" tests/cli_live_test.py
+      # clamscan as the clamav user, on files that user can't read (mode 600):
+      # they must come back scanned, through stdin, never "Access denied".
+      - name: Scan files the clamav user can't read, under sudo
+        run: sudo "$(command -v python)" tests/clamscan_sudo_test.py
       - name: Show the clamd log and any AppArmor denials
         if: failure()
         run: |

@@ -45,6 +45,9 @@ from ensign_scan.scanner import ClamdRunsAsRoot, Scanner
 EXIT_BUSY = 75  # sysexits EX_TEMPFAIL: another Ensign holds the lock; try again later
 EXIT_UNSAVED = 1  # the run finished, but some results couldn't be saved (see unsaved_report)
 EXIT_INFECTED = 3  # the run finished and infected files are present (outranks EXIT_UNSAVED)
+# --persistence: startup entries are new, changed or gone since you last
+# acknowledged them. Entries it couldn't read (no root) don't count.
+EXIT_PERSISTENCE_PENDING = 4
 
 
 def ensign_version() -> str:
@@ -290,10 +293,11 @@ def run_persistence(args: argparse.Namespace, config: Config, scanner: Scanner) 
         print()
         if not confirm(f"Acknowledge all {audit.pending} listed above as they are now? [y/N] "):
             print("Nothing acknowledged.")
-            return 0
+            return EXIT_PERSISTENCE_PENDING
         count = persistence.acknowledge_all(scanner.engine, audit, log_path)
         print(f"[green]✓ Acknowledged {count}.[/green] Log: {shown(log_path)}")
-    return 0
+        return 0
+    return EXIT_PERSISTENCE_PENDING if audit.pending else 0
 
 
 def run(args: argparse.Namespace, config: Config) -> int:

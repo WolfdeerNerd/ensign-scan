@@ -120,6 +120,7 @@ max_workers = 2
     assert "clamd_socket: custom" in flat and "data_dir: custom" in flat
     assert "scan_targets: 1 entries" in flat and "custom_secrets: 1 entries" in flat
     assert "ClamAV 1.5.0/27800/" in flat, "clamd version missing"
+    assert "yara-x:" in flat and "rules:" in flat, "YARA section missing"
     print("useful facts still reported ✓")
 
     # 3. Read-only: the database file itself is byte-for-byte unchanged.

@@ -285,10 +285,23 @@ def scan_fds_with_clamscan(
     """Scan already-open files with one clamscan run, limits switched off.
 
     The descriptors are inherited by clamscan and named to it as
-    /proc/self/fd/N -- inside clamscan, that is the very file Ensign opened.
-    So, like FILDES: no file is reopened by path (it can't be swapped in
-    between, and clamscan needs no permission on it), and clamscan's output
-    names each file by its fd number, never by a filename someone chose.
+    /proc/self/fd/N, so clamscan's output names each file by its fd number,
+    never by a filename someone chose. clamscan doesn't read the descriptor
+    itself, though: it resolves the link to the file's current path, checks
+    it with access() and opens it again. So clamscan needs read permission
+    on the file. (The path it resolves is always where that very file is
+    now, so a renamed file is still the same file and a deleted one fails;
+    only a swap in the microseconds between its lookup and its open could
+    slip another file in.)
+
+    Under sudo, clamscan runs as the clamav user (`run_as`), which can't
+    read your private files (mode 600, say), and access() ignores any
+    capability that could allow it. Those files come back "Access denied";
+    each is then scanned again on its own, fed to clamscan on stdin from
+    Ensign's own descriptor, still as clamav. clamscan copies stdin to a
+    temporary file in its tempdir first; it is created readable by clamav
+    only (umask 077) and deleted after the scan. It costs one clamscan run
+    per such file, so only those files take this path.
 
     One run for many files, because each run loads the whole signature
     database (seconds, and up to a GB or two of memory, on top of clamd's
@@ -321,6 +334,7 @@ def scan_fds_with_clamscan(
         argv.append(f"--max-scantime={int(max_scantime_ms)}")
     if limits.database_dir:
         argv.append(f"--database={limits.database_dir}")
+    base = list(argv)
     argv += [f"/proc/self/fd/{fd}" for fd in fds]
     kwargs = {}
     if run_as is not None:
@@ -328,9 +342,14 @@ def scan_fds_with_clamscan(
 
     outcomes: dict[int, ScanOutcome] = {}
     lines: dict[int, list[str]] = {fd: [] for fd in fds}
+    denied: list[int] = []   # clamav couldn't read these: scanned again through stdin
 
     def settle(fd: int, outcome: ScanOutcome) -> None:
         outcomes[fd] = outcome
+        if (run_as is not None and outcome.status is ScanStatus.ERROR
+                and outcome.raw.endswith(_ACCESS_DENIED)):
+            denied.append(fd)
+            return  # reported once the stdin scan has the real answer
         if on_result is not None:
             on_result(fd, outcome)
 
@@ -388,7 +407,40 @@ def scan_fds_with_clamscan(
                 settle(fd, ScanOutcome(ScanStatus.ERROR, f"clamscan: {stderr}"))
             else:
                 settle(fd, _clamscan_verdict(lines[fd], stderr))
+    for fd in denied:
+        outcome = _scan_one_via_stdin(fd, base, timeout, run_as)
+        outcomes[fd] = outcome
+        if on_result is not None:
+            on_result(fd, outcome)
     return outcomes
+
+
+_ACCESS_DENIED = "Access denied"
+
+
+def _scan_one_via_stdin(fd: int, base: list[str], timeout: float,
+                        run_as: tuple[int, int]) -> "ScanOutcome":
+    """One file clamav can't open, given to clamscan on stdin (see
+    scan_fds_with_clamscan). Ensign runs as root here, so it can reopen its
+    own descriptor through /proc: same file, but a fresh read position at
+    the start, independent of anything else reading `fd`."""
+    try:
+        reader = os.open(f"/proc/self/fd/{fd}", os.O_RDONLY | os.O_CLOEXEC)
+    except OSError as exc:
+        return ScanOutcome(ScanStatus.ERROR, f"clamscan: couldn't hand the file over ({exc.strerror})")
+    try:
+        result = subprocess.run(base + ["-"], stdin=reader, capture_output=True, text=True,
+                                errors="replace", timeout=timeout, umask=0o077,
+                                user=run_as[0], group=run_as[1], extra_groups=[])
+    except subprocess.TimeoutExpired:
+        return ScanOutcome(ScanStatus.ERROR, f"clamscan: ran out of time ({timeout:.0f} s)")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ScanOutcome(ScanStatus.ERROR, f"clamscan: couldn't run: {exc}")
+    finally:
+        os.close(reader)
+    said = [line[len("stdin: "):].strip() for line in result.stdout.splitlines()
+            if line.startswith("stdin: ")]
+    return _clamscan_verdict(said, result.stderr)
 
 
 @dataclass(frozen=True)

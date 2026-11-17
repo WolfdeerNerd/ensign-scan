@@ -34,10 +34,12 @@ pipx install ensign-scan
 ```
 Arch marks the system Python as externally managed, so a plain `pip install` outside a virtual environment is refused. pipx installs Ensign into its own isolated environment and puts the `ensign-scan` command on your `PATH`. Update it later with `pipx upgrade ensign-scan`.
 
+Optional, for the YARA pass on files too large for ClamAV (see Large files): install `pipx install 'ensign-scan[yara]'` instead, or add it to an existing install with `pipx inject ensign-scan yara-x`. Then `pipx upgrade ensign-scan --include-injected` keeps both up to date.
+
 **With pip, in a virtual environment (any distro):**
 ```
 python3 -m venv ~/.venvs/ensign
-~/.venvs/ensign/bin/pip install ensign-scan
+~/.venvs/ensign/bin/pip install ensign-scan          # or 'ensign-scan[yara]' for the YARA pass
 ~/.venvs/ensign/bin/ensign-scan --help
 ```
 
@@ -70,7 +72,13 @@ If you have pacman installed, the command is:
 sudo pacman -S --needed python-sqlalchemy python-rich
 ```
 
-Optional: yara-x, for the sweep's YARA pass (see Large files): `pip install yara-x`. It isn't in the Arch repositories, so pip is the way to get it.
+Optional: yara-x, for the sweep's YARA pass (see Large files). It isn't in the Arch repositories, and Arch refuses a plain `pip install` outside a virtual environment, so run the checkout from one:
+```
+python3 -m venv --system-site-packages .venv   # keeps pacman's sqlalchemy and rich
+.venv/bin/pip install yara-x
+.venv/bin/python main.py --help
+```
+Under `sudo`, use the same interpreter: `sudo .venv/bin/python main.py ...`.
 
 ### A note for non-Arch users
 
@@ -90,7 +98,7 @@ Ensign makes no network connections. It talks to clamd over a local Unix socket 
 
 | Program | When | What for |
 |---|---|---|
-| `clamscan` | Only for files larger than clamd scans (see Large files) | Scans them, in batches, with the size limits switched off. Under `sudo`, as the `clamav` user |
+| `clamscan` | Only for files larger than clamd scans (see Large files) | Scans them, in batches, with the size limits switched off. Under `sudo`, as the `clamav` user; a file that user can't read is given to it on stdin |
 | `pacman -Qkk` / `dpkg --verify` / `rpm -Va` | Only with `--verify-packages` (whichever matches your distribution) | Read-only integrity check of installed files |
 | `pacman -Qo` / `dpkg-query -S` / `rpm -qf` `<file>` | When listing infected files (whichever matches your distribution) | Read-only lookup of which package owns a flagged file |
 | `pacman -Qo` + `pacman -Qkk <package>` / `dpkg-query -S` + `dpkg --verify <package>` / `rpm -qa` + `rpm -V <package>` | Only with `--persistence`, for new or changed startup entries outside your home folder | Read-only check of whether a package installed the entry, and whether it still matches (see Persistence Audit) |
@@ -108,6 +116,7 @@ Ensign never changes permissions, and never asks you to. It also never deletes, 
 - **Symlinked directories.** They are never walked into (see the Proton note below). Symlinks to individual files are followed and scanned.
 - **Excluded paths, and unchanged snapshot subtrees.** Whatever you list under `excludes` is not scanned, and subtrees under `snapshot_roots` are skipped while their modification time is unchanged.
 - **Files that vanish mid-scan.** Temp files and browser caches come and go; they are counted as skipped, not as errors.
+- **Most of what's inside files over about 2 GiB.** No ClamAV tool can scan a file that large, so Ensign marks it **not fully scanned**. With the sweep on, it still checks the raw bytes in slices, plus a YARA pass for the signatures slices miss, but nothing inside compressed or encrypted content (see Large files).
 - **Anything ClamAV has no signature for.** Ensign is a file scanner built on ClamAV. It doesn't look at memory or running processes, and a clean result only means "no known signature matched". It doesn't prove a file is safe.
 
 ## How clamd Reads Your Files
@@ -206,6 +215,8 @@ A scan's exit code says how it went, so a script or a scheduled run can act on i
 | 1 | Finished, but some results couldn't be saved to the database (a full disk, say). Those results are still reported and alerted on, listed at the end under "scanned but not saved" |
 | 75 | Another Ensign is running; nothing was scanned |
 
+`--persistence` has one more: **4** when startup entries are new, changed or gone since you last acknowledged them (0 when there are none). Entries it couldn't read without root don't count, so a run without sudo doesn't report them every time. `--acknowledge-all` exits 0 once it has acknowledged everything, and 4 if you answered no.
+
 ### Large files
 
 clamd skips any file larger than its `MaxFileSize` or `MaxScanSize` setting (100 MiB and 400 MiB by default), and still answers "OK" for it. Ensign doesn't take that answer. It reads the limits from clamd's config and sends larger files to `clamscan` instead, with the limits switched off. `clamscan` comes with ClamAV. Each `clamscan` run loads its own copy of the signatures, which takes seconds and about as much memory as clamd uses. So Ensign scans large files in batches of up to 32 files or 8 GiB, whichever comes first, alongside the files clamd scans. Several batches run at once when there's memory for it, within two limits checked before each one starts:
@@ -245,7 +256,7 @@ ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This 
 - **Where they live:** `yara/` in your data directory, as plain YARA source text, never compiled, since a file of compiled rules holds every signature's raw bytes and ClamAV flags it. Your own rules, for hunting payloads hidden in ordinary files, are planned separately and will have their own folder.
 - **Accuracy:** the translation was checked against `clamscan` on the same files (see [`docs/Large_Files_Research.md`](docs/Large_Files_Research.md)); a signature that can't be translated exactly is skipped and counted, never approximated. Signatures from unofficial databases keep ClamAV's `.UNOFFICIAL` suffix, so `--allow` and `--clamav-report` see the same name clamd would give.
 
-`clamscan` unpacks archives in `/var/tmp` rather than `/tmp`, which on many systems (Arch among them) is held in RAM. `clamscan` reads the files through descriptors Ensign has already opened, the same way clamd does, so it never reopens a file by name. Run under `sudo`, Ensign starts `clamscan` as the `clamav` user, not as root: like clamd, it parses untrusted files.
+`clamscan` unpacks archives in `/var/tmp` rather than `/tmp`, which on many systems (Arch among them) is held in RAM. Ensign hands `clamscan` the files it has already opened, named by descriptor (`/proc/self/fd/N`). `clamscan` turns that back into the file's current path and opens it again, so it needs read permission on the file. Run under `sudo`, Ensign starts `clamscan` as the `clamav` user, not as root: like clamd, it parses untrusted files, and a crafted file that hits a bug in one of its parsers would otherwise get root. The `clamav` user can't read your private files (mode 600, say), so those come back "Access denied". Each of them is then scanned again on its own, fed to `clamscan` on stdin from Ensign's open file, still as `clamav`. `clamscan` copies stdin to a temporary file in `/var/tmp` first; Ensign makes sure only `clamav` can read that copy, and `clamscan` deletes it when done. Each such file takes its own `clamscan` run, which loads the signatures again.
 
 `AlertExceedsMax yes` in clamd.conf is worth setting. Without it, clamd also says "OK" for an archive that unpacks to more than `MaxScanSize`, and Ensign can't tell from the file's size. With it, clamd flags these, and Ensign rescans them with `clamscan` (it doesn't count them as infected).
 
