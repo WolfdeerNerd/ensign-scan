@@ -296,6 +296,11 @@ def run_persistence(args: argparse.Namespace, config: Config, scanner: Scanner) 
             return EXIT_PERSISTENCE_PENDING
         count = persistence.acknowledge_all(scanner.engine, audit, log_path)
         print(f"[green]✓ Acknowledged {count}.[/green] Log: {shown(log_path)}")
+        unreadable = persistence.unreadable_pending(audit)
+        if unreadable:
+            print(f"[yellow]! {unreadable} couldn't be read, so they stay listed. Acknowledge them "
+                  f"with sudo: sudo ensign-scan --acknowledge-all[/yellow]")
+            return EXIT_PERSISTENCE_PENDING
         return 0
     return EXIT_PERSISTENCE_PENDING if audit.pending else 0
 

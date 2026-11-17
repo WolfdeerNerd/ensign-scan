@@ -157,9 +157,17 @@ class Entry:
     personal: bool = False
     # The audited folder (or file) it was found in, for grouping the report.
     place: str = ""
+    # False: a file this run may list but not open (a root-only cron job
+    # without sudo). Its type, permissions and owner are known, its content
+    # isn't, so it can't be acknowledged here, only noticed.
+    readable: bool = True
 
     def key(self) -> tuple:
         return (self.kind, self.digest, self.mode, self.uid, self.gid)
+
+    def meta_key(self) -> tuple:
+        """What can be compared without reading the file."""
+        return (self.kind, self.mode, self.uid, self.gid)
 
 
 @dataclass
@@ -226,6 +234,12 @@ def fingerprint(path: str, category: str, personal: bool, place: str = "") -> En
         else:
             try:
                 sha, opened = _sha256_nofollow(path)
+            except PermissionError:
+                # Listed but not readable: still an entry. New, or with other
+                # permissions or owner than acknowledged, it must be reported,
+                # or a root-only cron job would pass a run without sudo.
+                return Entry(path, category, kind, "", st.st_mode & 0o7777, st.st_uid, st.st_gid,
+                             personal, place or path, readable=False)
             except OSError as exc:
                 return exc.strerror or type(exc).__name__
             if sha is None:  # replaced by something else after the lstat()
@@ -347,6 +361,12 @@ def compare(engine: Engine, snap: Snapshot, check_packages: bool = True) -> Audi
         row = rows.get(path)
         if row is None:
             audit.new.append(entry)
+        elif not entry.readable:
+            # Only what lstat() shows can be compared; the content can't.
+            if (row.kind, row.mode, row.uid, row.gid) != entry.meta_key():
+                audit.changed.append((row, entry))
+            else:
+                audit.unchecked[path] = "Permission denied"
         elif _row_key(row) != entry.key():
             audit.changed.append((row, entry))
     for path, row in rows.items():
@@ -379,7 +399,12 @@ def compare(engine: Engine, snap: Snapshot, check_packages: bool = True) -> Audi
 # The report
 # ----------------------------------------------------------------------
 
+_UNREADABLE_NOTE = "  [yellow](couldn't read it; run with sudo to check its content)[/yellow]"
+
+
 def _describe(entry: Entry) -> str:
+    if not entry.readable:
+        return _UNREADABLE_NOTE
     if entry.kind == "symlink":
         return f" → {shown(entry.digest)}"
     if entry.kind not in ("file", "symlink"):
@@ -391,6 +416,8 @@ def _differences(row: PersistenceEntry, entry: Entry) -> str:
     parts = []
     if row.kind != entry.kind:
         parts.append(f"was a {row.kind}, now a {entry.kind}")
+    elif not entry.readable:
+        pass  # content unknown this run; permissions and owner below
     elif (row.digest or "") != entry.digest:
         if entry.kind == "symlink":
             parts.append(f"now points to {shown(entry.digest)} (was {shown(row.digest)})")
@@ -471,7 +498,8 @@ def report(audit: Audit) -> None:
     new = [(e.category, e.path, _describe(e) + _origin_note(audit, e.path), e.place) for e in audit.new]
     _print_section("NEW SINCE YOU LAST ACKNOWLEDGED", "yellow", "+", new, audit)
 
-    changed = [(e.category, e.path, f"  ({_differences(row, e)})" + _origin_note(audit, e.path), e.place)
+    changed = [(e.category, e.path, f"  ({_differences(row, e)})"
+                + (_UNREADABLE_NOTE if not e.readable else _origin_note(audit, e.path)), e.place)
                for row, e in audit.changed]
     _print_section("CHANGED SINCE YOU ACKNOWLEDGED THEM", "cyan", "~", changed, audit)
 
@@ -570,6 +598,10 @@ def _apply(session: Session, item, log_path: Path) -> int:
         _log(log_path, "gone", item.path, item.category, "now a directory")
         print_unwrapped(f"  [green]✓[/green] Now a folder; its contents are listed separately: {shown(item.path)}")
         return 1
+    if not item.readable:
+        print_unwrapped(f"  [yellow]Couldn't read it, so it can't be acknowledged as it is; "
+                        f"with sudo it can be:[/yellow] {shown(item.path)}")
+        return 0
     _store(session, item)
     _log(log_path, "acknowledged", item.path, *_detail(item))
     print_unwrapped(f"  [green]✓[/green] Acknowledged: {shown(item.path)}")
@@ -577,12 +609,20 @@ def _apply(session: Session, item, log_path: Path) -> int:
 
 
 def acknowledge_all(engine: Engine, audit: Audit, log_path: Path) -> int:
-    """Accept every new, changed and gone entry in this audit, in one go."""
+    """Accept every new, changed and gone entry in this audit, in one go,
+    except ones this run couldn't read (see unreadable_pending)."""
+    done = 0
     with Session(engine) as session:
         for item in audit.new:
+            if not item.readable:
+                continue
             _store(session, item)
             _log(log_path, "acknowledged", item.path, *_detail(item))
+            done += 1
         for _, item in audit.changed:
+            if not item.readable:
+                continue
+            done += 1
             if item.kind == "directory":
                 session.query(PersistenceEntry).filter(PersistenceEntry.path == item.path).delete()
                 _log(log_path, "gone", item.path, item.category, "now a directory")
@@ -592,8 +632,14 @@ def acknowledge_all(engine: Engine, audit: Audit, log_path: Path) -> int:
         for row in audit.removed:
             session.query(PersistenceEntry).filter(PersistenceEntry.path == row.path).delete()
             _log(log_path, "gone", row.path, row.category)
+            done += 1
         session.commit()
-    return audit.pending
+    return done
+
+
+def unreadable_pending(audit: Audit) -> int:
+    """New or changed entries this run could only list, not read."""
+    return sum(not e.readable for e in audit.new) + sum(not e.readable for _, e in audit.changed)
 
 
 def run_audit(engine: Engine, home: str, root: str = "/", check_packages: bool = True) -> Audit:
