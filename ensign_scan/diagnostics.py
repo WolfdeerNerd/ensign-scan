@@ -151,6 +151,26 @@ def _clamav_section(config: Config) -> list[str]:
     ]
 
 
+def _yara_section(config: Config) -> list[str]:
+    """The sweep's YARA pass: engine version and the stored rules' state.
+    Read from the rules' state file only (bigrules.read_state), never
+    rebuilt or compiled here; numbers and versions, no paths."""
+    from . import bigrules
+    engine = _pkg_version("yara-x")
+    state = bigrules.read_state(config.data_dir)
+    lines = [f"  yara-x:              {engine}"]
+    if not state:
+        return lines + ["  rules:               not built"]
+    versions = ", ".join(f"{k} {v}" for k, v in sorted(state.get("versions", {}).items())) or "unknown"
+    lines += [
+        f"  rules:               {sum(state.get('counts', {}).values())}",
+        f"  built with:          {state.get('engine', '?')} {state.get('engine_version', '?')}",
+        f"  from signatures:     {versions}",
+        f"  last update failed:  {'yes' if state.get('last_error') else 'no'}",
+    ]
+    return lines
+
+
 def _database_section(config: Config) -> list[str]:
     """Counts by status, read through a read-only connection.
 
@@ -234,6 +254,7 @@ def report(args_config: str | None) -> str:
     ]
     lines += ["", "Packages", *_packages_section(config)]
     lines += ["", "ClamAV", *_clamav_section(config)]
+    lines += ["", "YARA (the sweep's pass for files too large for ClamAV)", *_yara_section(config)]
     lines += ["", "Database", *_database_section(config)]
     return _scrub("\n".join(_align(line) for line in lines))
 

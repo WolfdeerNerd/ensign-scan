@@ -34,10 +34,12 @@ pipx install ensign-scan
 ```
 Arch marks the system Python as externally managed, so a plain `pip install` outside a virtual environment is refused. pipx installs Ensign into its own isolated environment and puts the `ensign-scan` command on your `PATH`. Update it later with `pipx upgrade ensign-scan`.
 
+Optional, for the YARA pass on files too large for ClamAV (see Large files): install `pipx install 'ensign-scan[yara]'` instead, or add it to an existing install with `pipx inject ensign-scan yara-x`. Then `pipx upgrade ensign-scan --include-injected` keeps both up to date.
+
 **With pip, in a virtual environment (any distro):**
 ```
 python3 -m venv ~/.venvs/ensign
-~/.venvs/ensign/bin/pip install ensign-scan
+~/.venvs/ensign/bin/pip install ensign-scan          # or 'ensign-scan[yara]' for the YARA pass
 ~/.venvs/ensign/bin/ensign-scan --help
 ```
 
@@ -70,7 +72,13 @@ If you have pacman installed, the command is:
 sudo pacman -S --needed python-sqlalchemy python-rich
 ```
 
-Optional: yara-x, for the sweep's YARA pass (see Large files): `pip install yara-x`. It isn't in the Arch repositories, so pip is the way to get it.
+Optional: yara-x, for the sweep's YARA pass (see Large files). It isn't in the Arch repositories, and Arch refuses a plain `pip install` outside a virtual environment, so run the checkout from one:
+```
+python3 -m venv --system-site-packages .venv   # keeps pacman's sqlalchemy and rich
+.venv/bin/pip install yara-x
+.venv/bin/python main.py --help
+```
+Under `sudo`, use the same interpreter: `sudo .venv/bin/python main.py ...`.
 
 ### A note for non-Arch users
 
@@ -108,6 +116,7 @@ Ensign never changes permissions, and never asks you to. It also never deletes, 
 - **Symlinked directories.** They are never walked into (see the Proton note below). Symlinks to individual files are followed and scanned.
 - **Excluded paths, and unchanged snapshot subtrees.** Whatever you list under `excludes` is not scanned, and subtrees under `snapshot_roots` are skipped while their modification time is unchanged.
 - **Files that vanish mid-scan.** Temp files and browser caches come and go; they are counted as skipped, not as errors.
+- **Most of what's inside files over about 2 GiB.** No ClamAV tool can scan a file that large, so Ensign marks it **not fully scanned**. With the sweep on, it still checks the raw bytes in slices, plus a YARA pass for the signatures slices miss, but nothing inside compressed or encrypted content (see Large files).
 - **Anything ClamAV has no signature for.** Ensign is a file scanner built on ClamAV. It doesn't look at memory or running processes, and a clean result only means "no known signature matched". It doesn't prove a file is safe.
 
 ## How clamd Reads Your Files
