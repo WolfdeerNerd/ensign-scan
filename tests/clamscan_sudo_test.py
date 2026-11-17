@@ -10,7 +10,9 @@ on stdin, still as clamav. Checked here, with the real clamscan:
   * a readable file in the same batch is scanned normally;
   * every file is reported to on_result exactly once, with its final
     answer (never the interim "Access denied");
-  * clamscan's temporary copy is readable by clamav only.
+  * clamscan runs with umask 077, so its temporary copy of stdin (and
+    anything else it creates) is readable by clamav only, and leaves no
+    copy behind.
 
 Needs root, a clamav user and clamscan; skipped (with a note) otherwise.
 The signature database is a one-line test signature made here.
@@ -96,6 +98,18 @@ with tempfile.TemporaryDirectory() as d:
     saved = clamd.clamscan_temp_dir
     clamd.clamscan_temp_dir = lambda: str(tmp)
     reported: list[tuple[int, object]] = []
+    # Record how each clamscan is started: the copy of stdin can come and go
+    # within a millisecond on a fast machine, too quickly to catch reliably,
+    # so the umask it gets is checked at the source.
+    real_run = clamd.subprocess.run
+    stdin_runs: list[dict] = []
+
+    def recording_run(argv, **kwargs):
+        if argv and argv[-1] == "-":
+            stdin_runs.append(kwargs)
+        return real_run(argv, **kwargs)
+
+    clamd.subprocess.run = recording_run
     try:
         limits = ClamdLimits(100, 100, str(db), False, "test")
         outcomes = clamd.scan_fds_with_clamscan(
@@ -103,6 +117,7 @@ with tempfile.TemporaryDirectory() as d:
             on_result=lambda fd, outcome: reported.append((fd, outcome)))
     finally:
         clamd.clamscan_temp_dir = saved
+        clamd.subprocess.run = real_run
         stop.set()
         watcher.join(5)
         for fd in fds.values():
@@ -115,7 +130,9 @@ with tempfile.TemporaryDirectory() as d:
     assert by_name["readable-infected.bin"].status is ScanStatus.INFECTED, by_name
     assert sorted(fd for fd, _ in reported) == sorted(fds.values()), "each file reported exactly once"
     assert not any("Access denied" in o.raw for _, o in reported), reported
-    assert seen_modes, "clamscan made no temporary copy (the stdin path didn't run?)"
+    assert len(stdin_runs) == 2, f"expected the two private files to go through stdin: {stdin_runs}"
+    assert all(kw.get("umask") == 0o077 for kw in stdin_runs), stdin_runs
+    # If the watcher did catch a copy, it must not be readable by others.
     assert all(mode & 0o077 == 0 for mode in seen_modes), f"temp copy readable by others: {seen_modes}"
     assert not list(tmp.iterdir()), "clamscan left a temporary copy behind"
 

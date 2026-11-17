@@ -276,8 +276,11 @@ with tempfile.TemporaryDirectory() as d:
     env = dict(os.environ, HOME=d)
 
     def run(*args):
+        # stdin from /dev/null: run from a terminal, the child would
+        # otherwise inherit it and wait at the confirm question, unseen.
         return subprocess.run([_sys_path.executable, str(ROOT / "main.py"), "--config", str(cfg), *args],
-                              capture_output=True, text=True, env=env, timeout=600, cwd=ROOT)
+                              capture_output=True, text=True, env=env, timeout=600, cwd=ROOT,
+                              stdin=subprocess.DEVNULL)
 
     write(Path(d, ".bashrc"), "alias ll='ls -l'\n")
     first = run("--persistence")
