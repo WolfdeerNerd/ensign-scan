@@ -488,9 +488,10 @@ def report(audit: Audit) -> None:
     if not audit.pending:
         print("\n[green]✓ Nothing new, changed or gone since you last acknowledged.[/green]")
         return
+    sudo = "sudo " if os.geteuid() == 0 else ""  # root-only entries need root to acknowledge
     print("\nIf you know where an entry came from (something you installed or set up), accept it:")
-    print("  ensign-scan --acknowledge PATH     one entry")
-    print("  ensign-scan --acknowledge-all      everything listed above")
+    print(f"  {sudo}ensign-scan --acknowledge PATH     one entry")
+    print(f"  {sudo}ensign-scan --acknowledge-all      everything listed above")
     print("If you don't, look at it before you accept it: an entry you can't explain is the "
           "reason this check exists.")
 
@@ -540,11 +541,14 @@ def acknowledge(engine: Engine, audit: Audit, paths: list[str], log_path: Path) 
             item = by_path.get(path)
             if item is None:
                 known = session.query(PersistenceEntry).filter(PersistenceEntry.path == path).count()
-                if known:
+                blocked = audit.unchecked.get(path) or next(
+                    (why for folder, why in audit.unchecked.items() if _under(path, folder)), None)
+                if blocked:
+                    # Checked first: "unchanged" would be a claim this run couldn't check.
+                    print_unwrapped(f"  [yellow]Couldn't read it ({shown(blocked)}), so there is "
+                                    f"nothing to acknowledge; with sudo it can be:[/yellow] {shown(path)}")
+                elif known:
                     print_unwrapped(f"  [dim]Already acknowledged, unchanged:[/dim] {shown(path)}")
-                elif path in audit.unchecked:
-                    print_unwrapped(f"  [yellow]Couldn't read it ({shown(audit.unchecked[path])}), "
-                                    f"so there is nothing to acknowledge:[/yellow] {shown(path)}")
                 else:
                     print_unwrapped(f"  [yellow]Not a startup entry the audit checks:[/yellow] {shown(path)}")
                 continue

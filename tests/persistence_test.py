@@ -192,6 +192,9 @@ with tempfile.TemporaryDirectory() as d:
             assert not any(r.path.startswith(str(profile_d)) for r in blocked.removed), blocked.removed
             _, out = quiet(persistence.report, blocked)
             assert "COULDN'T CHECK" in out, out
+            inside = str(profile_d / "locale.sh")       # acknowledged, but unreadable now
+            n, out = quiet(persistence.acknowledge, engine, blocked, [inside], log)
+            assert n == 0 and "Couldn't read it" in out and "unchanged" not in out, out
         finally:
             profile_d.chmod(0o755)
         print("persistence unreadable folder test passed ✓")

@@ -175,6 +175,11 @@ with tempfile.TemporaryDirectory() as d:
     set_record(s.engine, flagged, scan_result="sweep: Test.Evil in bytes 0-1048576")
     out, text = quiet(fpreport.make_report, s, config, str(flagged))
     assert out is None and "The sweep found this" in text, text
+    assert "--list-infected" not in text, "no such command"
+    set_record(s.engine, flagged, scan_result="sweep: Test.Evil FOUND at byte 9 of 99 by YARA, using "
+                                              "Ensign's translation of this ClamAV signature.")
+    out, text = quiet(fpreport.make_report, s, config, str(flagged))
+    assert out is None and "YARA found this" in text, text
     set_record(s.engine, flagged, scan_result="whatever: Test.Evil FOUND")
     print("sweep hit test passed ✓")
 

@@ -1289,7 +1289,7 @@ class Scanner:
         if self.big_rules is not None and not yara_note:
             summary = (f"{SWEPT_PREFIX}nothing found in the raw bytes ({len(ranges)} slices) "
                        f"{SWEPT_YARA_MARK} ({self.big_rules.count} position-bound or long "
-                       f"signatures); not a full scan")
+                       f"signature{'' if self.big_rules.count == 1 else 's'}); not a full scan")
         else:
             summary = f"{SWEPT_PREFIX}nothing found in the raw bytes ({len(ranges)} slices); not a full scan"
         if notes:
@@ -1324,7 +1324,7 @@ class Scanner:
             if os.pread(fd, 4, pe_at) == b"PE\0\0":
                 buckets.append("pe")
         print(f"[dim]→ YARA: {shown(path.name)} ({human_size(size)}), "
-              f"{rules.count} signatures the slices can miss[/dim]")
+              f"{rules.count} signature{'' if rules.count == 1 else 's'} the slices can miss[/dim]")
         try:
             hits = self._yara_worker.scan(fd, buckets)
         except yarachild.ChildFailed as exc:
