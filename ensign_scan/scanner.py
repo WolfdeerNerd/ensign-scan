@@ -46,7 +46,7 @@ from rich import print
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from . import allowlist, bigrules, secrets, yaraengine
+from . import allowlist, bigrules, secrets, yarachild, yaraengine
 from .clamd import (
     DEFAULT_LIMITS,
     LIMITS_EXCEEDED_PREFIX,
@@ -168,6 +168,10 @@ SWEPT_PREFIX = "swept: "
 # In a "swept:" result: the YARA pass ran too. A file swept without it is
 # swept again once the rules are there.
 SWEPT_YARA_MARK = "and by YARA"
+# In a "swept:" result: the YARA pass ran out of time on this file. Not
+# retried every run (it would only time out again); the file is swept
+# again when it changes or the signatures move on, like any swept file.
+SWEPT_YARA_TIMEOUT = "YARA pass timed out"
 # Seconds YARA may spend on one file. Both engines read about 100-250 MB/s,
 # so this is about 300-900 GB.
 _YARA_TIMEOUT = 3600
@@ -446,6 +450,8 @@ class Scanner:
         # YARA rules for what the sweep misses (bigrules.py), loaded by
         # prepare_big_rules() before a run that sweeps; None: sweep only.
         self.big_rules: bigrules.Loaded | None = None
+        # The child process that runs the YARA pass, during a sweep (yarachild.py).
+        self._yara_worker: yarachild.Worker | None = None
 
     def prepare_clamd(self) -> None:
         """Check clamd once, before the first file is sent to it.
@@ -1161,7 +1167,8 @@ class Scanner:
         if self.big_rules is not None:
             # Swept before the YARA rules were there: once more, with them.
             unswept = or_(unswept, and_(FileRecord.scan_result.like(f"{SWEPT_PREFIX}%"),
-                                        ~FileRecord.scan_result.like(f"%{SWEPT_YARA_MARK}%")))
+                                        ~FileRecord.scan_result.like(f"%{SWEPT_YARA_MARK}%"),
+                                        ~FileRecord.scan_result.like(f"%{SWEPT_YARA_TIMEOUT}%")))
         criteria = [unswept]
         threshold = self.config.rescan_after_signature_updates
         if threshold > 0 and self._sig_version is not None:
@@ -1197,10 +1204,17 @@ class Scanner:
             room = max(1, (free - reserve) // slice_size)
         in_flight = max(1, min(self.workers, room))
         swept = 0
-        for filepath, digest, size, mtime_ns, ctime_ns in rows:
-            if self._sweep_one(Path(filepath), digest, size, mtime_ns, ctime_ns,
-                               slice_size, overlap, in_flight):
-                swept += 1
+        self._yara_worker = (yarachild.Worker(self.big_rules.compiled, _YARA_TIMEOUT)
+                             if self.big_rules is not None else None)
+        try:
+            for filepath, digest, size, mtime_ns, ctime_ns in rows:
+                if self._sweep_one(Path(filepath), digest, size, mtime_ns, ctime_ns,
+                                   slice_size, overlap, in_flight):
+                    swept += 1
+        finally:
+            if self._yara_worker is not None:
+                self._yara_worker.close(kill=True)
+                self._yara_worker = None
         return swept
 
     def _sweep_one(self, path: Path, digest: str, size: int, mtime_ns: int, ctime_ns: int,
@@ -1252,7 +1266,7 @@ class Scanner:
             with ThreadPoolExecutor(max_workers=in_flight) as pool:
                 list(pool.map(scan_slice, ranges))
             yara_hit, yara_note = (None, None)
-            if not found and self.big_rules is not None:
+            if not found and self._yara_worker is not None:
                 yara_hit, yara_note = self._yara_one(fd, path, st.st_size)
         finally:
             os.close(fd)
@@ -1296,9 +1310,10 @@ class Scanner:
 
     def _yara_one(self, fd: int, path: Path, size: int) -> tuple[tuple[str, int | None] | None, str | None]:
         """The YARA pass on one file: ((signature, offset) of the first hit,
-        or None; a note if the pass couldn't finish). Reads the file through
-        the descriptor the sweep has open (/proc/self/fd/N), so it checks
-        the same file the sweep did, even if the path was swapped since."""
+        or None; a note if the pass couldn't finish). The child process
+        gets the descriptor the sweep has open, so it checks the same file
+        the sweep did, even if the path was swapped since, and a crash
+        while reading it (see yarachild.py) can't end the run."""
         rules = self.big_rules
         head = os.pread(fd, 64, 0)
         buckets = ["any"]
@@ -1310,17 +1325,18 @@ class Scanner:
                 buckets.append("pe")
         print(f"[dim]→ YARA: {shown(path.name)} ({human_size(size)}), "
               f"{rules.count} signatures the slices can miss[/dim]")
-        hits = []
         try:
-            for bucket in buckets:
-                hits += rules.engine.scan_file(rules.compiled[bucket], f"/proc/self/fd/{fd}", _YARA_TIMEOUT)
-        except yaraengine.ScanFailed as exc:
-            return None, f"YARA pass didn't finish ({exc})"
-        hits = [h for h in hits if h.meta.get("clamav_name") != bigrules.SELFTEST_NAME]
+            hits = self._yara_worker.scan(fd, buckets)
+        except yarachild.ChildFailed as exc:
+            text = str(exc)
+            if "timed out" in text:
+                return None, f"{SWEPT_YARA_TIMEOUT} ({text})"
+            return None, f"YARA pass didn't finish: {text}"
+        hits = [h for h in hits if h[0] != bigrules.SELFTEST_NAME]
         if not hits:
             return None, None
-        first = min(hits, key=lambda h: (h.offset is None, h.offset or 0))
-        return (str(first.meta.get("clamav_name") or first.rule), first.offset), None
+        name, offset = min(hits, key=lambda h: (h[1] is None, h[1] or 0))
+        return (str(name), offset), None
 
     def _remember_unsaved(self, path: Path, outcome: ScanOutcome | None, exc: Exception) -> None:
         """A result the database refused: say so now, keep it for the report."""
