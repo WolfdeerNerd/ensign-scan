@@ -75,12 +75,16 @@ class Worker:
     def _start(self) -> None:
         parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         package_parent = str(Path(__file__).resolve().parent.parent)
-        path = [package_parent] + [p for p in sys.path if p and p != os.getcwd()]
+        try:
+            cwd = os.getcwd()
+        except OSError:
+            cwd = None  # the folder Ensign was started from has been deleted
+        path = [package_parent] + [p for p in sys.path if p and p != cwd]
         code = ("import sys; sys.path[:] = " + repr(path) + "; "
                 "from ensign_scan import yarachild; yarachild.child_main(" + str(child.fileno()) + ")")
         self._proc = subprocess.Popen(
             [sys.executable, "-I", "-c", code], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, pass_fds=[child.fileno()], close_fds=True)
+            stderr=subprocess.DEVNULL, pass_fds=[child.fileno()], close_fds=True, cwd="/")
         child.close()
         self._sock = parent
         header = json.dumps({"buckets": {b: len(data) for b, data in self._payload.items()},
@@ -96,6 +100,17 @@ class Worker:
     def scan(self, fd: int, buckets: list[str]) -> list[tuple[str, int | None]]:
         """(signature name, offset) hits for the open file `fd`.
         Raises ChildFailed if the child crashed or ran out of time."""
+        try:
+            return self._scan(fd, buckets)
+        except ChildFailed:
+            raise
+        except Exception as exc:
+            # Whatever went wrong talking to the child, it ends this file's
+            # YARA pass, never the run.
+            self.close(kill=True)
+            raise ChildFailed(f"the YARA process couldn't be used ({type(exc).__name__}: {exc})") from None
+
+    def _scan(self, fd: int, buckets: list[str]) -> list[tuple[str, int | None]]:
         if self._proc is None or self._proc.poll() is not None:
             self.close()
             self._start()
@@ -142,9 +157,34 @@ def _read_exact(stream, n: int) -> bytes:
     return data
 
 
+def _no_core_dumps() -> None:
+    """Make this process leave no core dump if it crashes.
+
+    A core dump is a copy of the process's memory, and this process's
+    memory holds pieces of the files it scans, which may be private. A
+    crash here is also expected (the SIGBUS above), and handled. So:
+    PR_SET_DUMPABLE 0 tells the kernel not to dump this process at all,
+    whatever fs.suid_dumpable says, so systemd-coredump is never called and
+    the desktop shows no crash alert. RLIMIT_CORE 0 covers systems that
+    write core files directly. Ensign still sees the signal and records it.
+    """
+    import ctypes
+    import resource
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (ValueError, OSError):
+        pass
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE = 4
+    except (OSError, AttributeError):
+        pass
+
+
 def child_main(sock_fd: int) -> None:
     """Child side: load the rules from stdin, then answer one request per
     file until the parent closes the socket."""
+    _no_core_dumps()
     import yara_x
     stdin = sys.stdin.buffer
     header = json.loads(stdin.readline())

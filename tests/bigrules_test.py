@@ -17,7 +17,8 @@ Checked here, with a small made-up signature database:
     the rules existed is swept again once;
   * the YARA pass runs in a child process: if it is killed mid-file (the
     SIGBUS a file shrinking under yara-x causes), the run goes on and the
-    next file gets a new child; a timeout is reported and marked, so the
+    next file gets a new child; the child leaves no core dump (it holds
+    pieces of scanned files); a timeout is reported and marked, so the
     file isn't swept again every run;
   * a different yara-x version rebuilds the rules.
 
@@ -40,6 +41,7 @@ import json  # noqa: E402
 import os  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
+import sys  # noqa: E402
 import tarfile  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
@@ -347,7 +349,13 @@ def check(engine: yaraengine.Engine) -> None:
                     break
                 time.sleep(0.05)
             time.sleep(1.0)
-            os.kill(worker._proc.pid, signal.SIGBUS)   # what a shrinking file does to it
+            pid = worker._proc.pid
+            limits = Path(f"/proc/{pid}/limits").read_text()
+            assert any(line.startswith("Max core file size") and line.split()[4:6] == ["0", "0"]
+                       for line in limits.splitlines()), limits
+            # The core-size limit of 0 shows _no_core_dumps() ran in the child;
+            # what it does to the dumpable flag is checked on its own below.
+            os.kill(pid, signal.SIGBUS)   # what a shrinking file does to it
             t.join(60)
             assert box and isinstance(box[0], yarachild.ChildFailed), box
             assert "changed while YARA was reading it" in str(box[0]), box[0]
@@ -369,6 +377,32 @@ def check(engine: yaraengine.Engine) -> None:
             os.close(fd)
             worker.close(kill=True)
             huge.unlink()
+        # Started from a folder that has since been deleted: still works.
+        gone = Path(d, "gone")
+        gone.mkdir()
+        here = os.getcwd()
+        os.chdir(gone)
+        gone.rmdir()
+        lost = yarachild.Worker(status.loaded.compiled, timeout=60)
+        try:
+            small = Path(d, "tail3.bin")
+            small.write_bytes(b"\0" * 5000 + b"ENSIGN-EOF" + b"\0" * 10)
+            fd3 = os.open(small, os.O_RDONLY)
+            try:
+                assert lost.scan(fd3, ["any"]) == [("Test.Eof", 5000)]
+            finally:
+                os.close(fd3)
+        finally:
+            lost.close(kill=True)
+            os.chdir(here)
+        # _no_core_dumps() makes the process non-dumpable (PR_GET_DUMPABLE == 0).
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             f"import sys; sys.path.insert(0, {str(ROOT)!r}); import ctypes; "
+             "from ensign_scan.yarachild import _no_core_dumps; _no_core_dumps(); "
+             "print(ctypes.CDLL(None).prctl(3, 0, 0, 0, 0))"],
+            capture_output=True, text=True, timeout=60)
+        assert probe.stdout.strip() == "0", (probe.stdout, probe.stderr)
         print(f"[{engine.name}] YARA child process test passed ✓")
 
         # --- a new yara-x version rebuilds the rules ---------------------------------------------

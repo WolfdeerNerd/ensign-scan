@@ -13,6 +13,9 @@ read. Checked here:
   * a credential-looking file is never opened (its size and time stand in);
   * a folder that can't be read is "couldn't check", and the entries
     acknowledged inside it are not reported as gone;
+  * a file that can be listed but not read (a root-only cron job without
+    sudo) is still reported when it is new, or when its permissions or
+    owner changed; it can't be acknowledged without reading it;
   * a symlinked folder is an entry, not walked into, and a folder reached
     under two names is read once;
   * every acknowledgment is written to the log;
@@ -198,6 +201,30 @@ with tempfile.TemporaryDirectory() as d:
             assert n == 0 and "Couldn't read it" in out and "unchanged" not in out, out
         finally:
             profile_d.chmod(0o755)
+        # A file that can be listed but not read: new, it is still NEW.
+        hidden = write(root / "etc/cron.d/hidden", "* * * * * root /tmp/x\n", 0o000)
+        try:
+            seen = audit()
+            entry = {e.path: e for e in seen.new}.get(str(hidden))
+            assert entry is not None and not entry.readable, (seen.new, seen.unchecked)
+            assert seen.pending >= 1 and persistence.unreadable_pending(seen) == 1
+            _, out = quiet(persistence.report, seen)
+            assert "couldn't read it; run with sudo" in out and "Nothing new" not in out, out
+            n, out = quiet(persistence.acknowledge, engine, seen, [str(hidden)], log)
+            assert n == 0 and "with sudo it can be" in out, out
+            quiet(persistence.acknowledge_all, engine, seen, log)
+            assert str(hidden) in {e.path for e in audit().new}, "acknowledge-all can't take it either"
+        finally:
+            hidden.unlink()
+        # An acknowledged file made unreadable: its permissions changed, so CHANGED.
+        hook.chmod(0o000)
+        try:
+            seen = audit()
+            changed = {e.path: persistence._differences(row, e) for row, e in seen.changed}
+            assert changed.get(str(hook)) == "permissions 0666 → 0000", (changed, seen.unchecked)
+        finally:
+            hook.chmod(0o666)
+        assert audit().pending == 0
         print("persistence unreadable folder test passed ✓")
     else:
         print("persistence unreadable folder test skipped (running as root)")
