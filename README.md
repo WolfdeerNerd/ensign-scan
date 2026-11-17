@@ -206,6 +206,8 @@ A scan's exit code says how it went, so a script or a scheduled run can act on i
 | 1 | Finished, but some results couldn't be saved to the database (a full disk, say). Those results are still reported and alerted on, listed at the end under "scanned but not saved" |
 | 75 | Another Ensign is running; nothing was scanned |
 
+`--persistence` has one more: **4** when startup entries are new, changed or gone since you last acknowledged them (0 when there are none). Entries it couldn't read without root don't count, so a run without sudo doesn't report them every time. `--acknowledge-all` exits 0 once it has acknowledged everything, and 4 if you answered no.
+
 ### Large files
 
 clamd skips any file larger than its `MaxFileSize` or `MaxScanSize` setting (100 MiB and 400 MiB by default), and still answers "OK" for it. Ensign doesn't take that answer. It reads the limits from clamd's config and sends larger files to `clamscan` instead, with the limits switched off. `clamscan` comes with ClamAV. Each `clamscan` run loads its own copy of the signatures, which takes seconds and about as much memory as clamd uses. So Ensign scans large files in batches of up to 32 files or 8 GiB, whichever comes first, alongside the files clamd scans. Several batches run at once when there's memory for it, within two limits checked before each one starts:

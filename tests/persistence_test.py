@@ -20,7 +20,8 @@ read. Checked here:
     listed; a modified or unowned one is listed with a note;
   * pkgdb.origins() never calls a file verified when the package manager
     couldn't confirm it;
-  * pacman's and dpkg's batched owner lookups parse and escape correctly.
+  * pacman's and dpkg's batched owner lookups parse and escape correctly;
+  * main.py --persistence exits 4 while something is pending, 0 when not.
 
     python3 tests/persistence_test.py
 """
@@ -263,3 +264,31 @@ assert found == {"/usr/lib/systemd/system/sshd.service": "openssh",
 assert dpkg._glob_escape(r"/a/system-systemd\x2dsetup.slice") == r"/a/system-systemd\\x2dsetup.slice"
 assert dpkg._glob_escape("/a/[b]*?") == r"/a/\[b\]\*\?"
 print("pkgdb owner lookup parsing test passed ✓")
+
+# --- the exit code, end to end through main.py ---------------------------------------------------
+# This one audits the real system's locations (only the home folder is
+# fake), with package lookups off so it stays quick.
+import subprocess  # noqa: E402
+
+with tempfile.TemporaryDirectory() as d:
+    cfg = Path(d, "c.toml")
+    cfg.write_text(f'data_dir = "{d}"\npackage_verification = "off"\n')
+    env = dict(os.environ, HOME=d)
+
+    def run(*args):
+        return subprocess.run([_sys_path.executable, str(ROOT / "main.py"), "--config", str(cfg), *args],
+                              capture_output=True, text=True, env=env, timeout=600, cwd=ROOT)
+
+    write(Path(d, ".bashrc"), "alias ll='ls -l'\n")
+    first = run("--persistence")
+    assert first.returncode == 4, (first.returncode, first.stdout[-500:], first.stderr[-500:])
+    declined = run("--acknowledge-all")          # no terminal to ask on, no --yes: declined
+    assert declined.returncode == 4, (declined.returncode, declined.stdout[-300:])
+    done = run("--acknowledge-all", "--yes")
+    assert done.returncode == 0, (done.returncode, done.stdout[-500:])
+    clean = run("--persistence")
+    assert clean.returncode == 0, (clean.returncode, clean.stdout[-1500:])
+    write(Path(d, ".config/autostart/new.desktop"), "[Desktop Entry]\nExec=/bin/true\n")
+    again = run("--persistence")
+    assert again.returncode == 4 and "new.desktop" in again.stdout, (again.returncode, again.stdout[-500:])
+print("persistence exit code test passed ✓")
