@@ -135,11 +135,22 @@ def verify_all(timeout: float | None = None) -> PacmanVerifyResult | None:
     reason in `.error` instead of being silently indistinguishable from
     "not installed."
     """
+    return _qkk([], timeout)
+
+
+def verify_packages(packages: list[str], timeout: float | None = None) -> PacmanVerifyResult | None:
+    """`pacman -Qkk <package>...`: the same check, for these packages only."""
+    if not packages:
+        return PacmanVerifyResult(mismatches=[], candidate_line_count=0)
+    return _qkk(["--", *packages], timeout)
+
+
+def _qkk(extra: list[str], timeout: float | None) -> PacmanVerifyResult | None:
     if not available():
         return None
     try:
         result = subprocess.run(
-            ["pacman", "-Qkk"], capture_output=True, text=True, timeout=timeout,
+            ["pacman", "-Qkk", *extra], capture_output=True, text=True, timeout=timeout,
             env=c_locale_env(), errors="surrogateescape",
         )
     except subprocess.TimeoutExpired:
@@ -151,8 +162,17 @@ def verify_all(timeout: float | None = None) -> PacmanVerifyResult | None:
         )
     except OSError as exc:
         return PacmanVerifyResult(mismatches=[], candidate_line_count=0, error=f"pacman -Qkk failed to run: {exc}")
+    if extra and result.returncode != 0 and "was not found" in result.stderr:
+        # A package named here isn't installed (removed since the owner
+        # lookup): pacman checks nothing at all, so nothing counts as verified.
+        return PacmanVerifyResult(mismatches=[], candidate_line_count=0,
+                                  error="pacman -Qkk: a package to check is not installed")
+    return parse_qkk(result.stdout + "\n" + result.stderr)
 
-    lines = [ln.strip() for ln in (result.stdout + "\n" + result.stderr).splitlines() if ln.strip()]
+
+def parse_qkk(output: str) -> PacmanVerifyResult:
+    """Turn `pacman -Qkk` output into a PacmanVerifyResult (no commands run)."""
+    lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
     mismatches = []
     unparsed: list[str] = []
     candidates = 0
@@ -175,6 +195,45 @@ def verify_all(timeout: float | None = None) -> PacmanVerifyResult | None:
                               unparsed=tuple(unparsed))
 
 
+# One line per owned path in `pacman -Qo` output: "<path> is owned by <name> <version>".
+# The path may contain spaces, so it is everything before the LAST " is owned by ".
+_OWNED_LINE_RE = re.compile(r"^(?P<path>/.*) is owned by (?P<name>\S+) \S+$")
+_UNOWNED_LINE_RE = re.compile(r"^error: No package owns (?P<path>/.*)$")
+
+
+def parse_owners(stdout: str, stderr: str, asked: list[str]) -> dict[str, str | None]:
+    """`pacman -Qo` output for several paths -> {path: package name or None}.
+    Only paths that were asked about, printed back exactly, are kept: if
+    pacman ever prints a path differently, that path stays "unknown"."""
+    wanted = set(asked)
+    found: dict[str, str | None] = {}
+    for line in stdout.splitlines():
+        match = _OWNED_LINE_RE.match(line.strip())
+        if match and match["path"] in wanted:
+            found[match["path"]] = match["name"]
+    for line in stderr.splitlines():
+        match = _UNOWNED_LINE_RE.match(line.strip())
+        if match and match["path"] in wanted and match["path"] not in found:
+            found[match["path"]] = None
+    return found
+
+
+def owners(paths: list[str], timeout: float = 60.0) -> dict[str, str | None]:
+    """`pacman -Qo` for many paths, 200 per command (see parse_owners)."""
+    if not available():
+        return {}
+    found: dict[str, str | None] = {}
+    for start in range(0, len(paths), 200):
+        chunk = paths[start:start + 200]
+        try:
+            result = subprocess.run(["pacman", "-Qo", "--", *chunk], capture_output=True, text=True,
+                                    timeout=timeout, env=c_locale_env(), errors="surrogateescape")
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        found.update(parse_owners(result.stdout, result.stderr, chunk))
+    return found
+
+
 class PacmanBackend(Backend):
     """Arch Linux and derivatives (Manjaro, EndeavourOS, ...)."""
     name = "pacman"
@@ -188,8 +247,14 @@ class PacmanBackend(Backend):
     def owner(self, path: str) -> tuple[str, str | None]:
         return owner(path)
 
+    def owners(self, paths: list[str]) -> dict[str, str | None]:
+        return owners(paths)
+
     def verify_all(self) -> PacmanVerifyResult | None:
         return verify_all()
+
+    def verify_packages(self, packages: list[str]) -> PacmanVerifyResult | None:
+        return verify_packages(packages)
 
     def verify_command(self, package: str) -> str | None:
         return f"pacman -Qkk {package}"

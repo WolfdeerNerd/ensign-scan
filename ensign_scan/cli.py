@@ -23,8 +23,11 @@ from importlib.metadata import PackageNotFoundError, version as dist_version
 from rich import print
 
 from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
-from ensign_scan import allowlist, diagnostics, explanations, fpreport, logsetup, notify, pkgdb, secrets
-from ensign_scan.fsutil import shown
+from ensign_scan import (
+    allowlist, bigrules, diagnostics, explanations, fpreport, logsetup, notify, persistence, pkgdb,
+    secrets,
+)
+from ensign_scan.fsutil import print_unwrapped, shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
 from ensign_scan.reports import (
     error_summary,
@@ -83,6 +86,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sweep", action="store_true",
                         help="After this scan, sweep files too large for ClamAV (over ~2 GiB) in "
                              "slices (as sweep_huge_files = true does for every scan)")
+    parser.add_argument("--update-rules", action="store_true",
+                        help="Rebuild the YARA rules for files too large for ClamAV from ClamAV's "
+                             "current signatures, check them, then exit. Runs by itself before "
+                             "every sweep when the signatures have changed.")
     parser.add_argument("--allow", metavar="PATH", action="append", default=[],
                         help="Mark a file ClamAV flagged as a false positive (this exact content and "
                              "signature only), then exit. Asks to confirm. Can be given more than once.")
@@ -103,8 +110,20 @@ def parse_args() -> argparse.Namespace:
                         help="Prepare a false-positive report for ClamAV about a file it flagged, "
                              "then exit. Checks the file again first. Nothing is sent: you submit "
                              "it. Can be given more than once.")
+    parser.add_argument("--persistence", action="store_true",
+                        help="Check the places programs use to start themselves (systemd units, "
+                             "shell startup files, autostart, cron, ld.so.preload, pacman hooks) "
+                             "for entries that are new, changed or gone since you acknowledged "
+                             "them, then exit. Changes nothing.")
+    parser.add_argument("--acknowledge", metavar="PATH", action="append", default=[],
+                        help="Accept one startup entry the persistence check lists, as it is now, "
+                             "then exit. Asks to confirm. Can be given more than once.")
+    parser.add_argument("--acknowledge-all", action="store_true",
+                        help="Show the persistence check, then accept everything it lists. Asks "
+                             "to confirm.")
     parser.add_argument("--yes", action="store_true",
-                        help="Don't ask to confirm --allow or --allow-folder (for scripts)")
+                        help="Don't ask to confirm --allow, --allow-folder, --acknowledge or "
+                             "--acknowledge-all (for scripts)")
     parser.add_argument("--suggest-fixes", action="store_true",
                         help="List files clamd could not read, grouped by directory, then exit (no full scan). "
                              "Scoped to any targets given.")
@@ -143,6 +162,9 @@ def main() -> int:
     args.allow = [os.path.abspath(p) for p in args.allow]
     args.unallow = [os.path.abspath(p) for p in args.unallow]
     args.clamav_report = [os.path.abspath(p) for p in args.clamav_report]
+    # The audit stores entries with their folders resolved (/lib/x is
+    # /usr/lib/x on a merged-/usr system); the file itself is not followed.
+    args.acknowledge = [persistence.resolve_dirs(os.path.abspath(p)) for p in args.acknowledge]
     args.allow_folder = os.path.abspath(args.allow_folder) if args.allow_folder else None
     args.unallow_folder = os.path.abspath(args.unallow_folder) if args.unallow_folder else None
     # Before anything that writes (starter config, logs, database) or prints
@@ -163,8 +185,10 @@ def main() -> int:
     # and --rescan-errors first, so with either one also given, the run
     # writes and must take the lock like any other.
     writes = (args.purge_missing or args.rescan_errors or args.allow or args.unallow
-              or args.allow_folder or args.unallow_folder)
-    readonly = args.verify_packages or args.suggest_fixes or args.list_allowed or args.clamav_report
+              or args.allow_folder or args.unallow_folder or args.acknowledge or args.acknowledge_all
+              or args.update_rules)
+    readonly = (args.verify_packages or args.suggest_fixes or args.list_allowed or args.clamav_report
+                or args.persistence)
     if readonly and not writes:
         return run(args, config)
 
@@ -183,19 +207,46 @@ def main() -> int:
 
 
 def _confirm(assume_yes: bool):
-    """How --allow and --allow-folder ask to confirm: --yes skips it; without a terminal to
-    ask on (a script, a pipe), it refuses rather than guessing."""
+    """How --allow, --allow-folder and --acknowledge ask to confirm: --yes
+    skips it; without a terminal to ask on (a script, a pipe), it refuses rather than guessing."""
     def ask(prompt: str) -> bool:
         if assume_yes:
             return True
         if not sys.stdin.isatty():
-            print("  No terminal to confirm on; add --yes to allow without asking.")
+            print("  No terminal to confirm on; add --yes to go ahead without asking.")
             return False
         try:
             return input(prompt).strip().lower() in ("y", "yes")
         except EOFError:
             return False
     return ask
+
+
+def _print_rules_breakdown(state: dict) -> None:
+    """What --update-rules did with ClamAV's body signatures (.ndb)."""
+    counts = state.get("counts", {})
+    print(f"  Read {state.get('signatures_read', 0)} body signatures (.ndb) in "
+          f"{state.get('build_seconds', 0)}s:")
+    print(f"    {state.get('covered_by_sweep', 0)} left to the slices, which find them anyway")
+    print(f"    {sum(counts.values())} became YARA rules ({counts.get('any', 0)} for any file, "
+          f"{counts.get('pe', 0)} Windows executables, {counts.get('elf', 0)} Linux executables)")
+    skipped = state.get("skipped", {})
+    if skipped:
+        print(f"    {sum(skipped.values())} skipped, since they can't be translated exactly:")
+        for why, n in sorted(skipped.items(), key=lambda kv: (-kv[1], kv[0])):
+            print(f"      {n:>7}  {shown(why)}")
+    versions = ", ".join(f"{k} {v}" for k, v in sorted(state.get("versions", {}).items()))
+    if versions:
+        print(f"  Signature databases: {shown(versions)}")
+
+
+def _print_rules_status(status) -> None:
+    if status.ok:
+        print(f"[green]✓ {shown(status.message)}[/green]")
+    elif not status.failed:
+        print(f"[yellow]! {shown(status.message)}[/yellow]")
+    else:
+        print(f"[bold red]✗ {shown(status.message)}[/bold red]")
 
 
 def clamd_is_safe(scanner: Scanner) -> bool:
@@ -207,6 +258,42 @@ def clamd_is_safe(scanner: Scanner) -> bool:
         print(f"[red]✗ {exc}[/red]")
         return False
     return True
+
+
+def run_persistence(args: argparse.Namespace, config: Config, scanner: Scanner) -> int:
+    """--persistence, --acknowledge, --acknowledge-all."""
+    log_path = config.data_dir / "persistence_acknowledged.log"
+    confirm = _confirm(args.yes)
+    if args.acknowledge and not args.acknowledge_all:
+        # No package lookups: acknowledging one named entry needs only its
+        # state now, and the package check can take a while.
+        audit = persistence.run_audit(scanner.engine, str(HOME), check_packages=False)
+        pending = {e.path for e in audit.new} | {e.path for _, e in audit.changed} | {r.path for r in audit.removed}
+        named = [p for p in args.acknowledge if p in pending]
+        if named:
+            print(f"Acknowledge {len(named)} startup entr{'y' if len(named) == 1 else 'ies'} as "
+                  f"{'it is' if len(named) == 1 else 'they are'} now?")
+            for path in named:
+                print_unwrapped(f"  {shown(path)}")
+            if not confirm("Acknowledge? [y/N] "):
+                print("Nothing acknowledged.")
+                return 0
+        persistence.acknowledge(scanner.engine, audit, args.acknowledge, log_path)
+        return 0
+    backend = pkgdb.active()
+    if backend.name != "none":
+        print(f"Checking startup entries, and asking {backend.label} about new or changed ones "
+              f"outside your home folder…")
+    audit = persistence.run_audit(scanner.engine, str(HOME))
+    persistence.report(audit)
+    if args.acknowledge_all and audit.pending:
+        print()
+        if not confirm(f"Acknowledge all {audit.pending} listed above as they are now? [y/N] "):
+            print("Nothing acknowledged.")
+            return 0
+        count = persistence.acknowledge_all(scanner.engine, audit, log_path)
+        print(f"[green]✓ Acknowledged {count}.[/green] Log: {shown(log_path)}")
+    return 0
 
 
 def run(args: argparse.Namespace, config: Config) -> int:
@@ -226,6 +313,8 @@ def run(args: argparse.Namespace, config: Config) -> int:
     if args.list_allowed:
         allowlist.list_allowed(scanner.engine)
         return 0
+    if args.persistence or args.acknowledge or args.acknowledge_all:
+        return run_persistence(args, config, scanner)
     if args.clamav_report:
         if not scanner.clamd.ping():
             print("[red]✗ clamd is not answering on its socket.[/red] The file is scanned again "
@@ -237,6 +326,14 @@ def run(args: argparse.Namespace, config: Config) -> int:
             return 1
         fpreport.make_reports(scanner, config, args.clamav_report)
         return 0
+    if args.update_rules:
+        print("Building YARA rules from ClamAV's signatures. This reads every signature "
+              "database, so it can take a minute…")
+        status = scanner.prepare_big_rules(by_hand=True)
+        _print_rules_status(status)
+        if status.rebuilt:
+            _print_rules_breakdown(bigrules.read_state(config.data_dir))
+        return 0 if status.loaded is not None else 1
     if args.purge_missing:
         scanner.purge_missing()
         return 0
@@ -287,6 +384,10 @@ def run(args: argparse.Namespace, config: Config) -> int:
             if sig_age is not None and sig_age > config.signature_max_age_days:
                 print(f"[yellow]! Virus signatures are {sig_age} days old "
                       f"(threshold: {config.signature_max_age_days}). Run: sudo freshclam[/yellow]")
+        if args.sweep or config.sweep_huge_files:
+            # Before the scan, so a failed rule update is the first thing
+            # you see, not something buried after hours of scanning.
+            _print_rules_status(scanner.prepare_big_rules())
         print()
 
     targets = args.targets or config.scan_targets

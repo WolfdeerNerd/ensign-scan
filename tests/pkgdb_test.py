@@ -465,6 +465,32 @@ if expected:
             assert backend.owner(f.name) == ("unowned", None), "a fresh temp file belongs to no package"
         assert backend.owner("/usr/bin/ensign-no-such-file")[0] in ("unowned", "unknown")
 
+        # The batched lookups the persistence audit uses, against the real
+        # package manager: one owned file, one fresh temp file.
+        with tempfile.NamedTemporaryFile() as f:
+            found = backend.owners([known, f.name])
+            assert found == {known: expected, f.name: None}, found
+            origins = pkgdb.origins([known, f.name], backend)
+        assert origins[f.name] == (pkgdb.UNOWNED, None), origins
+        # The package's own binary normally matches it; MODIFIED would also
+        # be a real answer, and OWNED (couldn't compare) is allowed without root.
+        allowed = (pkgdb.FROM_PACKAGE, pkgdb.MODIFIED, pkgdb.OWNED)
+        assert origins[known][0] in allowed and origins[known][1] == expected, origins
+        if os.geteuid() == 0:
+            assert origins[known][0] == pkgdb.FROM_PACKAGE, origins
+        check = backend.verify_packages([expected])
+        assert check is not None and check.error is None and not check.unparsed, check
+        # A file CI changed on purpose (see tests.yml) must come back MODIFIED.
+        planted = None
+        if expected == "pacman" and os.path.exists("/tmp/ensign-planted-space"):
+            planted = open("/tmp/ensign-planted-space").read().strip()
+        elif os.environ.get("ENSIGN_EXPECT_VERIFY_FINDINGS") == "1":
+            planted = {"dpkg": "/etc/bash.bashrc", "rpm": "/etc/bashrc"}[expected]
+        if planted:
+            changed = pkgdb.origins([planted], backend)[planted]
+            assert changed[0] == pkgdb.MODIFIED, (planted, changed)
+        print(f"  batched owners and verify_packages: {origins[known][0]}")
+
     if expected != "none" and os.environ.get("ENSIGN_SKIP_FULL_VERIFY") == "1":
         print("  full verify skipped (ENSIGN_SKIP_FULL_VERIFY=1)")
     elif expected != "none":

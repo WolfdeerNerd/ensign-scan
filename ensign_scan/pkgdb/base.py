@@ -102,6 +102,26 @@ class Backend:
         if this can't run here."""
         raise NotImplementedError
 
+    def owners(self, paths: list[str]) -> dict[str, str | None]:
+        """Owning package NAME for many paths at once: {path: name}, or
+        {path: None} where the package manager says nothing owns it. A
+        path left out of the result is "unknown" -- an error never counts
+        as "not owned". Backends override this with one batched command;
+        this fallback asks owner() once per path."""
+        found: dict[str, str | None] = {}
+        for path in paths:
+            state, package = self.owner(path)
+            if state == "owned" and package:
+                found[path] = package.split()[0]
+            elif state == "unowned":
+                found[path] = None
+        return found
+
+    def verify_packages(self, packages: list[str]):
+        """Like verify_all(), but only these packages' files. None if this
+        backend can't do it, so callers treat everything as unverified."""
+        return None
+
     def verify_command(self, package: str) -> str | None:
         """The command a user can run to check one package by hand, shown
         as a hint next to findings. None if there is no such command."""
