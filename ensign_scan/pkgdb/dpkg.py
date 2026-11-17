@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -66,21 +67,30 @@ def _search_with_answers(paths: list[str], timeout: float) -> tuple[dict[str, st
     nothing owns). None if the command couldn't run at all.
 
     dpkg-query treats its arguments as shell patterns, so a path containing
-    "*" or "[" could match OTHER files. Only results whose path equals the
-    one asked about are kept; nothing is ever matched by pattern.
+    "*" or "[" could match OTHER files, and a backslash is read as an
+    escape: systemd's own "system-systemd\\x2dcryptsetup.slice" was asked
+    about as "...x2dcryptsetup.slice" and came back "not owned". Every
+    pattern character is escaped first, and only results whose path equals
+    the one asked about are kept.
 
     "Nothing owns it" counts only when dpkg says so in its own words for
     that path. dpkg-query exits non-zero for that AND for real failures (a
     damaged database), and a failure must come out as "unknown".
     """
+    patterns = {_glob_escape(p): p for p in paths}
     try:
-        result = subprocess.run(["dpkg-query", "-S", "--", *paths], capture_output=True,
+        result = subprocess.run(["dpkg-query", "-S", "--", *patterns], capture_output=True,
                                 text=True, timeout=timeout, env=c_locale_env(), errors="surrogateescape")
     except (subprocess.TimeoutExpired, OSError):
         return None
     found = _parse_search(result.stdout)
-    unowned = {p for p in paths if f"no path found matching pattern {p}" in result.stderr}
+    unowned = {p for pat, p in patterns.items() if f"no path found matching pattern {pat}" in result.stderr}
     return {p: found[p] for p in paths if p in found}, unowned
+
+
+def _glob_escape(path: str) -> str:
+    """A path as a dpkg-query pattern that matches only itself."""
+    return re.sub(r"([\\*?\[\]])", r"\\\1", path)
 
 
 def _search(paths: list[str], timeout: float) -> dict[str, str] | None:
@@ -214,6 +224,74 @@ def verify_all(timeout: float | None = None) -> VerifyResult | None:
     return parse_verify(output, owners, filters)
 
 
+def _owners_once(paths: list[str], timeout: float) -> dict[str, str | None]:
+    found: dict[str, str | None] = {}
+    for start in range(0, len(paths), 200):
+        chunk = paths[start:start + 200]
+        answer = _search_with_answers(chunk, timeout)
+        if answer is None:
+            continue
+        owned, unowned = answer
+        for path in chunk:
+            if path in owned:
+                found[path] = owned[path].split(":")[0]  # "libc6:amd64" -> "libc6"
+            elif path in unowned:
+                found[path] = None
+    return found
+
+
+def owners(paths: list[str], timeout: float = 60.0) -> dict[str, str | None]:
+    """dpkg-query -S for many paths, 200 per command: {path: package or None}.
+    Paths dpkg gave no real answer for are left out ("unknown")."""
+    if not available():
+        return {}
+    found = _owners_once(paths, timeout)
+    # The reverse of _parent_resolved: on a merged-/usr system a package
+    # built before the merge still records /lib/systemd/..., so a file found
+    # at /usr/lib/systemd/... looks unowned. Ask once more under the old name.
+    retry = {}
+    for path, package in found.items():
+        alias = _unmerged(path) if package is None else None
+        if alias:
+            retry[alias] = path
+    if retry:
+        for alias, package in _owners_once(list(retry), timeout).items():
+            if package:
+                found[retry[alias]] = package
+    return found
+
+
+_MERGED_DIRS = ("bin", "sbin", "lib", "lib32", "lib64", "libx32")
+
+
+def _unmerged(path: str) -> str | None:
+    """/usr/lib/x -> /lib/x when /lib is the merged-/usr symlink, else None."""
+    parts = path.split("/", 3)  # ["", "usr", "lib", "x..."]
+    if len(parts) == 4 and parts[1] == "usr" and parts[2] in _MERGED_DIRS:
+        old = "/" + parts[2]
+        if os.path.islink(old) and os.path.realpath(old) == "/usr/" + parts[2]:
+            return f"{old}/{parts[3]}"
+    return None
+
+
+def verify_packages(packages: list[str], timeout: float | None = None) -> VerifyResult | None:
+    """`dpkg --verify <package>...`: the same check, for these packages only."""
+    if not available():
+        return None
+    if not packages:
+        return VerifyResult([], 0)
+    try:
+        result = subprocess.run(["dpkg", "--verify", "--", *packages], capture_output=True, text=True,
+                                timeout=timeout, env=c_locale_env(), errors="surrogateescape")
+    except subprocess.TimeoutExpired:
+        return VerifyResult([], 0, error=f"dpkg --verify did not finish within {timeout:.0f}s")
+    except OSError as exc:
+        return VerifyResult([], 0, error=f"dpkg --verify failed to run: {exc}")
+    if result.returncode != 0 and "is not installed" in result.stderr:
+        return VerifyResult([], 0, error="dpkg --verify: a package to check is not installed")
+    return parse_verify(result.stdout + "\n" + result.stderr, {}, read_path_filters())
+
+
 class DpkgBackend(Backend):
     """Debian, Ubuntu and derivatives."""
     name = "dpkg"
@@ -227,8 +305,14 @@ class DpkgBackend(Backend):
     def owner(self, path: str) -> tuple[str, str | None]:
         return owner(path)
 
+    def owners(self, paths: list[str]) -> dict[str, str | None]:
+        return owners(paths)
+
     def verify_all(self) -> VerifyResult | None:
         return verify_all()
+
+    def verify_packages(self, packages: list[str]) -> VerifyResult | None:
+        return verify_packages(packages)
 
     def verify_command(self, package: str) -> str | None:
         return f"dpkg --verify {package}"

@@ -15,15 +15,15 @@ Every feature has to fit these criteria:
 
 ## Next
 
-Decided, and coming in this order:
+Decided, and coming next:
 
-1. **Persistence auditor.** Checks the places malware uses to start itself again after a reboot: systemd units and timers, shell startup files, XDG autostart, cron, `ld.so.preload` and pacman hooks. Opt-in (`--persistence`) at first. You can acknowledge entries one by one or all at once, so only new or changed ones are reported.
-2. **YARA rules.** Custom rules, written from scratch, as a second check alongside ClamAV. Which YARA engine to use is still open.
+- **Your own YARA rules.** Custom rules, written from scratch, for payloads hidden inside ordinary files, checked on every file as a second check alongside ClamAV. They will use yara-x, which the sweep already uses for files too large for ClamAV.
 
 ## Planned
 
 Decided, no order yet:
 
+- **More persistence checks.** udev rules, `modules-load.d`, `sudoers.d` and PAM, in the persistence audit (`--persistence`). Later, the audit as part of every run, once it's quiet.
 - **Reports for Ensign's own mistakes.** A scrubbed report for Ensign's GitHub detection form, like `--clamav-report` does for ClamAV.
 - **clamd.conf suggestions.** One section with settings worth changing in clamd's config and why, such as `MaxThreads` or `TemporaryDirectory`. Advice only, as always.
 - **A steadier ETA.** The time estimate still swings a lot during large-file scanning.

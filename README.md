@@ -70,6 +70,8 @@ If you have pacman installed, the command is:
 sudo pacman -S --needed python-sqlalchemy python-rich
 ```
 
+Optional: yara-x, for the sweep's YARA pass (see Large files): `pip install yara-x`. It isn't in the Arch repositories, so pip is the way to get it.
+
 ### A note for non-Arch users
 
 Ensign's core scanning, hashing, and database tracking are plain Python + SQLAlchemy + ClamAV — nothing Arch-specific. It should run on any Linux distro with Python 3.11+ and ClamAV installed.
@@ -91,6 +93,7 @@ Ensign makes no network connections. It talks to clamd over a local Unix socket 
 | `clamscan` | Only for files larger than clamd scans (see Large files) | Scans them, in batches, with the size limits switched off. Under `sudo`, as the `clamav` user |
 | `pacman -Qkk` / `dpkg --verify` / `rpm -Va` | Only with `--verify-packages` (whichever matches your distribution) | Read-only integrity check of installed files |
 | `pacman -Qo` / `dpkg-query -S` / `rpm -qf` `<file>` | When listing infected files (whichever matches your distribution) | Read-only lookup of which package owns a flagged file |
+| `pacman -Qo` + `pacman -Qkk <package>` / `dpkg-query -S` + `dpkg --verify <package>` / `rpm -qa` + `rpm -V <package>` | Only with `--persistence`, for new or changed startup entries outside your home folder | Read-only check of whether a package installed the entry, and whether it still matches (see Persistence Audit) |
 | `notify-send` | At the end of a run, if installed | Desktop notification |
 | `gdbus` | After an infected-files alert | Closes that notification after its timeout |
 | `pgrep` | When sending an infected-files alert | Checks whether a Steam game is running (see Alerts) |
@@ -184,6 +187,10 @@ These run one job and exit — no full scan.
 | `python3 main.py --allow-folder FOLDER --signature NAME` | Allow every file under a folder that one signature flags right now (see A note on infected results). Asks once to confirm; `--yes` skips the question |
 | `python3 main.py --unallow-folder FOLDER --signature NAME` | Undo `--allow-folder`: those files count as infected again |
 | `python3 main.py --list-allowed` | List every file you've allowed, and the folders you ran `--allow-folder` on |
+| `python3 main.py --update-rules` | Rebuild the YARA rules the sweep uses from ClamAV's current signatures (see Large files). Runs by itself before a sweep when freshclam has changed the signatures |
+| `python3 main.py --persistence` | List startup entries that are new, changed or gone since you acknowledged them (see Persistence Audit). Changes nothing |
+| `python3 main.py --acknowledge PATH` | Accept one startup entry the persistence audit lists, as it is now. Asks to confirm; `--yes` skips the question |
+| `python3 main.py --acknowledge-all` | Show the persistence audit, then accept everything it lists. Asks to confirm |
 | `python3 main.py --clamav-report PATH` | Prepare a false-positive report for ClamAV about a flagged file (see A note on infected results). Nothing is sent: you submit it |
 
 ### Only one run at a time
@@ -229,6 +236,14 @@ ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This 
 - **What it costs:** it reads each file once more, only when the file is new or has changed, or when the signatures have moved on by your `rescan_after_signature_updates` setting. Slices go to clamd through memory, never as a copy on disk, and are sized to fit clamd's limits (at most 256 MiB). Raising clamd's `MaxFileSize` to `2000M` means fewer, bigger slices.
 - **Sweep results are left alone by the normal rescans,** which can't see what the sweep saw and would wipe its verdict. A sweep result changes only when the file changes, or when the sweep runs again after a signature update.
 
+**YARA, for what the slices miss.** A slice has its own start and end, so two kinds of ClamAV signature can't match in one: those tied to a position (a byte offset, a distance from the end of the file, an executable's entry point or sections), and patterns that can stretch further than the slices overlap (1 MiB). When a YARA engine is installed, the sweep also runs those signatures over the whole file in one pass, after the slices. Ensign translates them from ClamAV's own databases into YARA rules; everything else stays with the slices. A hit flags the file infected like a slice hit, and the report says YARA found it. A file with no hit is still **not fully scanned**: the YARA pass covers what the slices miss, nothing more.
+
+- **Engine:** yara-x (`pip install yara-x`), VirusTotal's rewrite of YARA in Rust. The original YARA only gets bug fixes now, and yara-x is memory-safe, which matters for an engine that parses untrusted files inside Ensign's own process. Without it, the sweep runs as before and the run says the YARA pass is off.
+- **Kept current with freshclam:** before any run that sweeps, Ensign compares ClamAV's databases with the ones the rules were made from, and rebuilds the rules if freshclam has changed them. `python3 main.py --update-rules` rebuilds them on demand and shows what was translated and what was skipped.
+- **Checked every time:** a rebuild that fails (an unreadable or damaged database, say), or one that suddenly yields fewer than half the rules it did last time, is shown in red at the top of the run, before scanning starts. The previous rules stay in use, and the run tries again next time. The rules must also pass a self-test each time they load, or they aren't used. A drop in the count you know is real (ClamAV retired signatures) is accepted by running `--update-rules`.
+- **Where they live:** `yara/` in your data directory, as plain YARA source text, never compiled, since a file of compiled rules holds every signature's raw bytes and ClamAV flags it. Your own rules, for hunting payloads hidden in ordinary files, are planned separately and will have their own folder.
+- **Accuracy:** the translation was checked against `clamscan` on the same files (see [`docs/Large_Files_Research.md`](docs/Large_Files_Research.md)); a signature that can't be translated exactly is skipped and counted, never approximated. Signatures from unofficial databases keep ClamAV's `.UNOFFICIAL` suffix, so `--allow` and `--clamav-report` see the same name clamd would give.
+
 `clamscan` unpacks archives in `/var/tmp` rather than `/tmp`, which on many systems (Arch among them) is held in RAM. `clamscan` reads the files through descriptors Ensign has already opened, the same way clamd does, so it never reopens a file by name. Run under `sudo`, Ensign starts `clamscan` as the `clamav` user, not as root: like clamd, it parses untrusted files.
 
 `AlertExceedsMax yes` in clamd.conf is worth setting. Without it, clamd also says "OK" for an archive that unpacks to more than `MaxScanSize`, and Ensign can't tell from the file's size. With it, clamd flags these, and Ensign rescans them with `clamscan` (it doesn't count them as infected).
@@ -246,6 +261,35 @@ Since clamd reads files through the handle Ensign passes it, a "could not read" 
 If the listed files no longer exist (temp files, cleaned-up downloads, build artifacts), they're stale records. Run:
     `python3 main.py --purge-missing`
 
+
+## Persistence Audit
+
+Malware that wants to come back after a reboot has to leave something in a place that starts programs by itself. `--persistence` checks those places:
+
+| Category | Where |
+|---|---|
+| systemd (system and user) | Units, timers, drop-ins, `.wants` links and generators in `/etc/systemd`, `/usr/lib/systemd`, `/usr/local/lib/systemd`, `~/.config/systemd/user` and `~/.local/share/systemd/user` |
+| Shell startup | `~/.bashrc`, `~/.profile`, the zsh and fish files, `~/.xprofile`/`~/.xinitrc`, `~/.config/environment.d`, `/etc/profile` and `/etc/profile.d`, `/etc/environment`, and root's own startup files |
+| Desktop autostart | `~/.config/autostart`, `/etc/xdg/autostart`, and KDE Plasma's `env` and `shutdown` scripts |
+| cron | `/etc/crontab`, `/etc/anacrontab`, `/etc/cron.*`, `/var/spool/cron` |
+| `ld.so.preload` | `/etc/ld.so.preload`, which normally doesn't exist |
+| pacman hooks | `/etc/pacman.d/hooks`, `/usr/share/libalpm/hooks` |
+
+Ensign doesn't judge these entries. It compares each one with how it was when you acknowledged it, and lists what is new, changed or gone. An entry is its content (a SHA-256 hash), or the target of a symlink, plus its permissions and owner. Only the hash is stored. Credential-looking files are never opened here either; their size and modification time stand in for the hash.
+
+**The first run** lists everything, since nothing is acknowledged yet. To keep that list readable, entries a package installed that still match what the package installed are counted per folder ("319 in /usr/lib/systemd/system came from packages and match what the package installed"). Ensign asks your package manager about them. Everything else is listed one by one: entries no package owns (the `.wants` links `systemctl enable` creates are among them), entries that differ from their package, and everything in your home folder. Read through it, then set the baseline:
+
+```
+python3 main.py --acknowledge-all
+```
+
+After that, a run lists only what changed. Accept an entry you recognize with `--acknowledge PATH`, or everything listed with `--acknowledge-all`. A package update changes the units it ships, so expect a short list after one.
+
+**Without root,** a few places can't be read (`/var/spool/cron`, root's own startup files). They are listed under "COULDN'T CHECK", and entries you acknowledged inside them aren't reported as gone. `sudo python3 main.py --persistence` includes them.
+
+**Every acknowledgment is logged** to `persistence_acknowledged.log` in your data directory: one line per entry, with the time, the path, and the hash or link target, separated by tabs.
+
+**The limit to know about:** the baseline lives in your data directory, which you own. Malware running as you can write there too, so it could acknowledge its own entry. The log makes such a change visible, but it sits in the same folder. A baseline kept where only root can write would close this gap; that isn't built yet.
 
 ## What Gets Rescanned
 

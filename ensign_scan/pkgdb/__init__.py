@@ -10,6 +10,7 @@ verification off.
 """
 from __future__ import annotations
 
+import os
 import shlex
 from pathlib import Path
 
@@ -117,3 +118,61 @@ def active() -> Backend:
     if _active is None:
         _active = select("auto")
     return _active
+
+
+# ----------------------------------------------------------------------
+# Where did these files come from?
+# ----------------------------------------------------------------------
+
+# Origin states, from most to least reassuring.
+FROM_PACKAGE = "package"      # a package owns it, and it matches what the package installed
+MODIFIED = "modified"         # a package owns it, and it differs from what the package installed
+OWNED = "owned"               # a package owns it, but it couldn't be compared
+UNOWNED = "unowned"           # the package manager says no package owns it
+UNKNOWN = "unknown"           # no answer (no package manager, or an error)
+
+
+def _same_file_key(path: str) -> str:
+    """The path with its directories resolved, the file itself not (as the
+    dpkg and rpm backends do), so /lib/x from a package record and
+    /usr/lib/x found on disk compare equal on a merged-/usr system."""
+    head, tail = os.path.split(path)
+    return os.path.join(os.path.realpath(head or "/"), tail)
+
+
+def origins(paths: list[str], backend: Backend | None = None) -> dict[str, tuple[str, str | None]]:
+    """{path: (state, package name)} for each path; see the states above.
+
+    One batched owner lookup, then one verify of just the owning packages.
+    Only FROM_PACKAGE means "checked and unchanged". Anything the package
+    manager couldn't confirm -- no answer, an error, a package removed in
+    between, an output line the parser didn't understand -- comes out as
+    OWNED or UNKNOWN instead, so a doubt never makes a file look verified.
+    """
+    backend = backend or active()
+    result: dict[str, tuple[str, str | None]] = {p: (UNKNOWN, None) for p in paths}
+    if not paths or backend.name == "none":
+        return result
+    owners = backend.owners(paths)
+    packages = sorted({name for name in owners.values() if name})
+    for path, name in owners.items():
+        result[path] = (OWNED, name) if name else (UNOWNED, None)
+    if not packages:
+        return result
+    check = backend.verify_packages(packages)
+    if check is None or check.error or check.unparsed:
+        return result  # couldn't verify cleanly: owned, not verified
+    differs: dict[str, bool] = {}  # key -> True if any difference was really checked
+    for m in check.mismatches:
+        key = _same_file_key(m.filepath)
+        differs[key] = differs.get(key, False) or not m.unverified
+    for path, name in owners.items():
+        if not name:
+            continue
+        key = _same_file_key(path)
+        if key not in differs:
+            result[path] = (FROM_PACKAGE, name)
+        elif differs[key]:
+            result[path] = (MODIFIED, name)
+        # only unverified lines for it: stays OWNED
+    return result

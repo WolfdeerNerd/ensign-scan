@@ -14,7 +14,7 @@ The question for these experiments: how close to a real verdict can Ensign get o
 
 | Experiment | Result | Verdict |
 |---|---|---|
-| Convert ClamAV's `.ndb` signatures to YARA rules | Accurate, and as fast as the sweep, while covering far fewer signatures | Not worth adopting |
+| Convert ClamAV's `.ndb` signatures to YARA rules | Accurate, and as fast as the sweep, while covering far fewer signatures | Not worth adopting as a replacement; adopted later for the sweep's blind spots only (see below) |
 | Census of how big files store their contents | About a quarter stored raw, a tenth openable, the rest opaque or mixed | Shows where effort pays off |
 | Archive walker for zip and tar | Every member of four real archives was looked at, almost all with ClamAV's full check | Works; candidate for Ensign |
 
@@ -34,6 +34,8 @@ The question for these experiments: how close to a real verdict can Ensign get o
 - On the same 9.4 GiB of files, the sweep took about 45 s and the converted rules took 43 s. The sweep applies everything clamd has loaded. The converted rules cover only `.ndb`, which is the small part of the database next to roughly 290,000 logical signatures and about 8 million hash signatures.
 - Its two real advantages are narrow: signatures tied to a file offset or to the end of the file, which slicing breaks, and patterns longer than the sweep's overlap.
 - It shares the sweep's main blind spot: compressed content.
+
+**Later adopted, narrowly.** Ensign now uses the translation for exactly the signatures the sweep misses: those tied to a position, and patterns that can stretch past the slice overlap. Everything else stays with the slices. The rules are rebuilt from ClamAV's databases whenever freshclam changes them (`ensign_scan/bigrules.py`, and Large files in the README).
 
 **Worth keeping from it**
 

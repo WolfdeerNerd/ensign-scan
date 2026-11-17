@@ -125,6 +125,39 @@ def verify_all(timeout: float | None = None) -> VerifyResult | None:
     return parse_verify(output, owners)
 
 
+def owners(paths: list[str], timeout: float = 120.0) -> dict[str, str | None]:
+    """Owners for many paths from one full listing (see _all_owners): {path:
+    package or None}. If the listing fails, every path stays "unknown"."""
+    if not available():
+        return {}
+    listing = _all_owners(timeout)
+    if not listing:
+        return {}
+    found: dict[str, str | None] = {}
+    for path in paths:
+        package = listing.get(path) or listing.get(_parent_resolved(path))
+        found[path] = package
+    return found
+
+
+def verify_packages(packages: list[str], timeout: float | None = None) -> VerifyResult | None:
+    """`rpm -V --nodeps <package>...`: the same check, for these packages only."""
+    if not available():
+        return None
+    if not packages:
+        return VerifyResult([], 0)
+    try:
+        result = subprocess.run(["rpm", "-V", "--nodeps", "--", *packages], capture_output=True,
+                                text=True, timeout=timeout, env=c_locale_env(), errors="surrogateescape")
+    except subprocess.TimeoutExpired:
+        return VerifyResult([], 0, error=f"rpm -V did not finish within {timeout:.0f}s")
+    except OSError as exc:
+        return VerifyResult([], 0, error=f"rpm -V failed to run: {exc}")
+    if "is not installed" in result.stdout + result.stderr:
+        return VerifyResult([], 0, error="rpm -V: a package to check is not installed")
+    return parse_verify(result.stdout + "\n" + result.stderr, {})
+
+
 class RpmBackend(Backend):
     """Fedora, RHEL and rebuilds, openSUSE, Mageia."""
     name = "rpm"
@@ -138,8 +171,14 @@ class RpmBackend(Backend):
     def owner(self, path: str) -> tuple[str, str | None]:
         return owner(path)
 
+    def owners(self, paths: list[str]) -> dict[str, str | None]:
+        return owners(paths)
+
     def verify_all(self) -> VerifyResult | None:
         return verify_all()
+
+    def verify_packages(self, packages: list[str]) -> VerifyResult | None:
+        return verify_packages(packages)
 
     def verify_command(self, package: str) -> str | None:
         return f"rpm -V {package}"

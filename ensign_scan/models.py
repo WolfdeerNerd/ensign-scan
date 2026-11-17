@@ -245,3 +245,31 @@ class DirectoryRecord(Base):
 
     def __repr__(self) -> str:
         return f"<DirectoryRecord {self.directory_path!r}>"
+
+
+class PersistenceEntry(Base):
+    """One startup entry you acknowledged with --acknowledge or
+    --acknowledge-all: a file in a place programs use to start themselves
+    again after a reboot or login (a systemd unit, ~/.bashrc, a cron job,
+    ...), as it was when you acknowledged it. The persistence audit reports
+    an entry that has no row here, differs from its row, or has a row but
+    is gone. See persistence.py."""
+    __tablename__ = "persistence_entries"
+
+    id = Column(Integer, primary_key=True)
+    path = Column(FsPath, unique=True, nullable=False)
+    category = Column(String, nullable=False)
+    # "file", "symlink", or the type of anything else found there ("fifo",
+    # "socket", "device", "directory").
+    kind = Column(String, nullable=False)
+    # A file's SHA-256, a symlink's target (a path, so FsPath), or "" for
+    # the other kinds. For a credential-looking file, which is never
+    # opened, its size and modification time instead (see persistence.py).
+    digest = Column(FsPath, nullable=False, default="")
+    mode = Column(Integer)   # permission bits (st_mode & 0o7777)
+    uid = Column(Integer)
+    gid = Column(Integer)
+    acknowledged_at = Column(DateTime, default=utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<PersistenceEntry {self.path!r} {self.kind}>"

@@ -24,5 +24,8 @@ class NoneBackend(Backend):
     def owner(self, path: str) -> tuple[str, str | None]:
         return ("unknown", None)
 
+    def owners(self, paths: list[str]) -> dict[str, str | None]:
+        return {}
+
     def verify_all(self):
         return None

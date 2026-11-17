@@ -46,7 +46,7 @@ from rich import print
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from . import allowlist, secrets
+from . import allowlist, bigrules, secrets, yaraengine
 from .clamd import (
     DEFAULT_LIMITS,
     LIMITS_EXCEEDED_PREFIX,
@@ -165,6 +165,12 @@ _SWEEP_OVERLAP_MAX = 2**20
 # and would quietly turn "infected" back into "not fully scanned".
 SWEEP_HIT_PREFIX = "sweep: "
 SWEPT_PREFIX = "swept: "
+# In a "swept:" result: the YARA pass ran too. A file swept without it is
+# swept again once the rules are there.
+SWEPT_YARA_MARK = "and by YARA"
+# Seconds YARA may spend on one file. Both engines read about 100-250 MB/s,
+# so this is about 300-900 GB.
+_YARA_TIMEOUT = 3600
 _HEURISTIC_PREFIX = "Heuristics."
 
 
@@ -437,6 +443,9 @@ class Scanner:
         # finish in a clamscan batch; None outside a pass.
         self._advance = None
         self._warned_clamscan: set[str] = set()
+        # YARA rules for what the sweep misses (bigrules.py), loaded by
+        # prepare_big_rules() before a run that sweeps; None: sweep only.
+        self.big_rules: bigrules.Loaded | None = None
 
     def prepare_clamd(self) -> None:
         """Check clamd once, before the first file is sent to it.
@@ -1110,6 +1119,17 @@ class Scanner:
     # The sweep: files too large for ClamAV, in slices
     # ------------------------------------------------------------------
 
+    def prepare_big_rules(self, by_hand: bool = False) -> bigrules.Status:
+        """Bring the YARA rules for the sweep's blind spots up to date with
+        ClamAV's databases (rebuilding them if freshclam changed them) and
+        load them. The caller prints the status, at the top of the run.
+        Needs only clamd's config (for its DatabaseDirectory), not clamd."""
+        limits = self.limits or self._read_limits()
+        db_dir = Path(limits.database_dir or bigrules.DEFAULT_DATABASE_DIR)
+        status = bigrules.update(self.config.data_dir, db_dir, yaraengine.find(), by_hand=by_hand)
+        self.big_rules = status.loaded
+        return status
+
     def sweep_huge(self, roots: list[str] | None = None) -> int:
         """Sweep files ClamAV refused as too large (over ~2 GiB), within
         `roots` (None: everywhere), that haven't been swept since they last
@@ -1138,6 +1158,10 @@ class Scanner:
             FileRecord.threat_name == f"{LIMITS_EXCEEDED_PREFIX}.MaxFileSize",
             FileRecord.scan_result.like("clamscan:%"),  # ClamAV's own refusal, not yet swept
         )
+        if self.big_rules is not None:
+            # Swept before the YARA rules were there: once more, with them.
+            unswept = or_(unswept, and_(FileRecord.scan_result.like(f"{SWEPT_PREFIX}%"),
+                                        ~FileRecord.scan_result.like(f"%{SWEPT_YARA_MARK}%")))
         criteria = [unswept]
         threshold = self.config.rescan_after_signature_updates
         if threshold > 0 and self._sig_version is not None:
@@ -1227,6 +1251,9 @@ class Scanner:
 
             with ThreadPoolExecutor(max_workers=in_flight) as pool:
                 list(pool.map(scan_slice, ranges))
+            yara_hit, yara_note = (None, None)
+            if not found and self.big_rules is not None:
+                yara_hit, yara_note = self._yara_one(fd, path, st.st_size)
         finally:
             os.close(fd)
 
@@ -1236,7 +1263,21 @@ class Scanner:
                    f"ClamAV can't scan this file whole; the sweep found this signature in it.")
             self._finish(path, st, digest, ScanOutcome(ScanStatus.INFECTED, raw, name))
             return True
-        summary = f"{SWEPT_PREFIX}nothing found in the raw bytes ({len(ranges)} slices); not a full scan"
+        if yara_hit is not None:
+            name, at = yara_hit
+            where = f"at byte {at} of {st.st_size}" if at is not None else f"in its {st.st_size} bytes"
+            raw = (f"{SWEEP_HIT_PREFIX}{name} FOUND {where} by YARA, using Ensign's translation of "
+                   f"this ClamAV signature. ClamAV can't scan this file whole.")
+            self._finish(path, st, digest, ScanOutcome(ScanStatus.INFECTED, raw, name))
+            return True
+        if yara_note:
+            notes.append(yara_note)
+        if self.big_rules is not None and not yara_note:
+            summary = (f"{SWEPT_PREFIX}nothing found in the raw bytes ({len(ranges)} slices) "
+                       f"{SWEPT_YARA_MARK} ({self.big_rules.count} position-bound or long "
+                       f"signatures); not a full scan")
+        else:
+            summary = f"{SWEPT_PREFIX}nothing found in the raw bytes ({len(ranges)} slices); not a full scan"
         if notes:
             summary += ". Notes: " + "; ".join(notes[:5])
         # Still not fully scanned (also if an earlier sweep had flagged it and
@@ -1252,6 +1293,34 @@ class Scanner:
             session.commit()
         print(f"{_STATUS_SYMBOLS[ScanStatus.INCOMPLETE.value]} {shown(path.name):.<50} swept, nothing found")
         return True
+
+    def _yara_one(self, fd: int, path: Path, size: int) -> tuple[tuple[str, int | None] | None, str | None]:
+        """The YARA pass on one file: ((signature, offset) of the first hit,
+        or None; a note if the pass couldn't finish). Reads the file through
+        the descriptor the sweep has open (/proc/self/fd/N), so it checks
+        the same file the sweep did, even if the path was swapped since."""
+        rules = self.big_rules
+        head = os.pread(fd, 64, 0)
+        buckets = ["any"]
+        if head[:4] == b"\x7fELF":
+            buckets.append("elf")
+        elif head[:2] == b"MZ" and len(head) >= 64:
+            pe_at = int.from_bytes(head[60:64], "little")
+            if os.pread(fd, 4, pe_at) == b"PE\0\0":
+                buckets.append("pe")
+        print(f"[dim]→ YARA: {shown(path.name)} ({human_size(size)}), "
+              f"{rules.count} signatures the slices can miss[/dim]")
+        hits = []
+        try:
+            for bucket in buckets:
+                hits += rules.engine.scan_file(rules.compiled[bucket], f"/proc/self/fd/{fd}", _YARA_TIMEOUT)
+        except yaraengine.ScanFailed as exc:
+            return None, f"YARA pass didn't finish ({exc})"
+        hits = [h for h in hits if h.meta.get("clamav_name") != bigrules.SELFTEST_NAME]
+        if not hits:
+            return None, None
+        first = min(hits, key=lambda h: (h.offset is None, h.offset or 0))
+        return (str(first.meta.get("clamav_name") or first.rule), first.offset), None
 
     def _remember_unsaved(self, path: Path, outcome: ScanOutcome | None, exc: Exception) -> None:
         """A result the database refused: say so now, keep it for the report."""
