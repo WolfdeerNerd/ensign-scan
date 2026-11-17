@@ -120,10 +120,15 @@ def make_report(scanner, config, path_text: str) -> Path | None:
         return None
     from .scanner import SWEEP_HIT_PREFIX
     if result.startswith(SWEEP_HIT_PREFIX):
-        print_unwrapped(f"[yellow]No report:[/yellow] {shown(path)}\n  The sweep found this, in a "
-                        f"slice of a file too large for ClamAV to scan whole, so ClamAV couldn't "
-                        f"reproduce the detection from the file. The signature name and byte range "
-                        f"are in the details: ensign-scan --list-infected.")
+        if "by YARA" in result:
+            how = ("YARA found this, using Ensign's translation of a ClamAV signature, in a file "
+                   "too large for ClamAV to scan whole")
+        else:
+            how = "The sweep found this, in a slice of a file too large for ClamAV to scan whole"
+        print_unwrapped(f"[yellow]No report:[/yellow] {shown(path)}\n  {how}, so ClamAV couldn't "
+                        f"reproduce the detection from the file. The signature name and where it "
+                        f"matched are in the file's details, in the infected list at the end of a "
+                        f"scan.")
         return None
 
     try:

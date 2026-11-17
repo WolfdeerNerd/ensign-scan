@@ -616,7 +616,8 @@ def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_ha
         return Status(None, False, "YARA rules for files too large for ClamAV are missing. "
                                    "Build them: ensign-scan --update-rules")
     word = "rebuilt just now" if rebuilt else "up to date"
-    message = (f"YARA rules for files too large for ClamAV: {loaded.count} signatures, {word} "
+    message = (f"YARA rules for files too large for ClamAV: {loaded.count} "
+               f"signature{'' if loaded.count == 1 else 's'}, {word} "
                f"({engine.label}).")
     if warning:
         return Status(loaded, False, message + f" Note: {warning}.", rebuilt)
