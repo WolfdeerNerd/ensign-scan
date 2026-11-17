@@ -14,7 +14,12 @@ Checked here, with a small made-up signature database:
   * rules that fail their self-test aren't used;
   * in the sweep, a signature the slices miss is found by YARA and flags
     the file; nothing found says the YARA pass ran; a file swept before
-    the rules existed is swept again once.
+    the rules existed is swept again once;
+  * the YARA pass runs in a child process: if it is killed mid-file (the
+    SIGBUS a file shrinking under yara-x causes), the run goes on and the
+    next file gets a new child; a timeout is reported and marked, so the
+    file isn't swept again every run;
+  * a different yara-x version rebuilds the rules.
 
 Needs yara-x for most of it (skipped, with a note, without).
 
@@ -32,6 +37,7 @@ _sys_path.path.insert(0, str(ROOT))
 import contextlib  # noqa: E402
 import io  # noqa: E402
 import json  # noqa: E402
+import os  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
 import tarfile  # noqa: E402
@@ -82,6 +88,14 @@ def write_db(folder: Path, signatures=SIGNATURES, version: int = 27000) -> None:
     header = f"ClamAV-VDB:17 Nov 2026 04-00 +0000:{version}:{len(signatures)}:90:x:x:x:0".encode()
     (folder / "daily.cvd").write_bytes(header.ljust(512, b" ") + buf.getvalue())
     (folder / "local.ign2").write_text("Test.Ignored\n")
+
+
+def _try(fn, *args):
+    """fn(*args), or the exception it raised."""
+    try:
+        return fn(*args)
+    except Exception as exc:
+        return exc
 
 
 def quiet(fn, *args, **kwargs):
@@ -314,6 +328,56 @@ def check(engine: yaraengine.Engine) -> None:
             (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
              scanner_mod.clamscan_user, yaraengine.find) = saved
         print(f"[{engine.name}] YARA in the sweep test passed ✓")
+
+        # --- the YARA child: a crash ends only the child -------------------------------------------
+        import signal
+        import threading
+        from ensign_scan import yarachild
+        huge = Path(d, "huge.bin")
+        with open(huge, "wb") as f:      # sparse: 20 GiB that take no disk space
+            f.truncate(20 * 2**30)
+        worker = yarachild.Worker(status.loaded.compiled, timeout=600)
+        fd = os.open(huge, os.O_RDONLY)
+        try:
+            box = []
+            t = threading.Thread(target=lambda: box.append(_try(worker.scan, fd, ["any"])))
+            t.start()
+            for _ in range(200):          # wait for the child to start scanning
+                if worker._proc is not None and worker._proc.poll() is None:
+                    break
+                time.sleep(0.05)
+            time.sleep(1.0)
+            os.kill(worker._proc.pid, signal.SIGBUS)   # what a shrinking file does to it
+            t.join(60)
+            assert box and isinstance(box[0], yarachild.ChildFailed), box
+            assert "changed while YARA was reading it" in str(box[0]), box[0]
+            small = Path(d, "tail2.bin")
+            small.write_bytes(b"\0" * 5000 + b"ENSIGN-EOF" + b"\0" * 10)
+            fd2 = os.open(small, os.O_RDONLY)
+            try:
+                assert worker.scan(fd2, ["any"]) == [("Test.Eof", 5000)], "a new child takes over"
+            finally:
+                os.close(fd2)
+            # --- a timeout is a timeout -------------------------------------------------------
+            slow = yarachild.Worker(status.loaded.compiled, timeout=1)
+            try:
+                failed = _try(slow.scan, fd, ["any"])
+                assert isinstance(failed, yarachild.ChildFailed) and "timed out" in str(failed), failed
+            finally:
+                slow.close(kill=True)
+        finally:
+            os.close(fd)
+            worker.close(kill=True)
+            huge.unlink()
+        print(f"[{engine.name}] YARA child process test passed ✓")
+
+        # --- a new yara-x version rebuilds the rules ---------------------------------------------
+        state = bigrules.read_state(data)
+        state["engine_version"] = "0.0.1"
+        bigrules._write_state(data, state)
+        upgraded = bigrules.update(data, db, engine)
+        assert upgraded.ok and upgraded.rebuilt, upgraded.message
+        assert bigrules.read_state(data)["engine_version"] == engine.version
 
         # The state file carries no paths or names that could leak into a bug report.
         assert str(d) not in json.dumps(bigrules.read_state(data))

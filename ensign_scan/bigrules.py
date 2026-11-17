@@ -482,8 +482,11 @@ def _write_state(data_dir: Path, state: dict) -> None:
 
 
 def _stamp(db_dir: Path, engine: yaraengine.Engine) -> dict:
+    # The engine's version too: a newer yara-x may refuse a rule the old
+    # one took, and rebuilding is what finds and drops it.
     return {"fingerprint": fingerprint(db_dir), "engine": engine.name,
-            "converter": CONVERTER_VERSION, "overlap": SWEEP_OVERLAP}
+            "engine_version": engine.version, "converter": CONVERTER_VERSION,
+            "overlap": SWEEP_OVERLAP}
 
 
 @dataclass
@@ -523,7 +526,8 @@ class Status:
     failed: bool = True
 
 
-def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_hand: bool = False) -> Status:
+def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_hand: bool = False,
+           force: bool = False) -> Status:
     """Rebuild the rules if the databases changed since the last build, or
     the last try failed, then load them. `by_hand` (--update-rules):
     rebuild in any case, and accept a big drop in the rule count, with a
@@ -546,7 +550,7 @@ def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_ha
     current = stamp is not None and not state.get("last_error") \
         and all(state.get(k) == v for k, v in stamp.items())
     rebuilt = False
-    if stamp is not None and (by_hand or not current):
+    if stamp is not None and (by_hand or force or not current):
         started = time.monotonic()
         try:
             result = build(db_dir, engine)
@@ -567,7 +571,7 @@ def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_ha
             for bucket, text in result.sources.items():
                 _write_atomic(folder / f"clamav-gaps-{bucket}.yar", text)
             state = {**stamp, "built_at": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
-                     "engine_version": engine.version, "counts": result.counts,
+                     "counts": result.counts,
                      "signatures_read": result.signatures_read,
                      "covered_by_sweep": result.covered_by_sweep, "skipped": result.skipped,
                      "versions": result.versions, "build_seconds": round(time.monotonic() - started, 1)}
@@ -588,6 +592,14 @@ def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_ha
             loaded = _load(data_dir, engine, state)
         except FileNotFoundError:
             loaded = None
+        except yaraengine.RuleError as exc:
+            # The stored rules don't compile with this engine (a changed
+            # engine, or edited files): rebuild them once, right away.
+            if not (by_hand or force or rebuilt) and stamp is not None:
+                return update(data_dir, db_dir, engine, force=True)
+            return Status(None, False, f"YARA rules for files too large for ClamAV couldn't be "
+                                       f"loaded ({exc}). Those files get the sweep only. Retry: "
+                                       f"ensign-scan --update-rules")
         except Exception as exc:
             return Status(None, False, f"YARA rules for files too large for ClamAV couldn't be "
                                        f"loaded ({exc}). Those files get the sweep only. Retry: "
@@ -603,7 +615,7 @@ def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_ha
     if loaded is None:
         return Status(None, False, "YARA rules for files too large for ClamAV are missing. "
                                    "Build them: ensign-scan --update-rules")
-    word = "rebuilt from the new signatures" if rebuilt else "up to date"
+    word = "rebuilt just now" if rebuilt else "up to date"
     message = (f"YARA rules for files too large for ClamAV: {loaded.count} signatures, {word} "
                f"({engine.label}).")
     if warning:
