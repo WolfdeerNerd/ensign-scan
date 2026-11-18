@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import pkgdb
 from .clamd import ClamdClient
-from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATA_DIR, HOME, HOSTNAME, Config
+from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATA_DIR, HOME, HOSTNAME, LEGACY_DATA_DIR, Config, default_config_path
 
 # Settings whose values are numbers or booleans -- safe to print as-is.
 _SAFE_VALUE_SETTINGS = (
@@ -87,7 +87,9 @@ def _config_section(args_config: str | None) -> tuple[list[str], Config]:
         origin = "$ENSIGN_CONFIG"
     else:
         origin = "default location"
-    path = Path(explicit) if explicit else DEFAULT_CONFIG_PATH
+        if default_config_path() != DEFAULT_CONFIG_PATH:
+            origin = "default location, old (before 0.8.1)"
+    path = Path(explicit) if explicit else default_config_path()
 
     if not path.is_file():
         if explicit:
@@ -115,12 +117,20 @@ def _config_section(args_config: str | None) -> tuple[list[str], Config]:
         f"  excludes:            {len(config.excludes)} entries",
         f"  snapshot_roots:      {len(config.snapshot_roots)} entries",
         f"  clamd_socket:        {'default' if config.clamd_socket == _DEFAULT_SOCKET else 'custom'}",
-        f"  data_dir:            {'default' if config.data_dir == DEFAULT_DATA_DIR else 'custom'}",
+        f"  data_dir:            {_data_dir_kind(config)}",
         f"  custom_secrets:      {sum(len(v) for v in config.custom_secrets.values() if isinstance(v, list))} entries",
         f"  custom_threats:      {len(config.custom_threats)} entries",
         f"  custom_pacman_reasons: {len(config.custom_pacman_reasons)} entries",
     ]
     return lines, config
+
+
+def _data_dir_kind(config: Config) -> str:
+    if config.data_dir == DEFAULT_DATA_DIR:
+        return "default"
+    if config.data_dir == LEGACY_DATA_DIR:
+        return "default, old location (before 0.8.1)"
+    return "custom"
 
 
 def _packages_section(config: Config) -> list[str]:

@@ -22,7 +22,7 @@ from importlib.metadata import PackageNotFoundError, version as dist_version
 
 from rich import print
 
-from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
+from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config, legacy_notice
 from ensign_scan import (
     allowlist, bigrules, diagnostics, explanations, fpreport, logsetup, notify, persistence, pkgdb,
     secrets,
@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("targets", nargs="*",
                         help="Directories to scan (default: scan_targets from config)")
     parser.add_argument("--config", metavar="PATH",
-                        help="Config file (default: ~/.config/ensign/config.toml)")
+                        help="Config file (default: ~/.config/ensign-scan/config.toml)")
     parser.add_argument("--no-scan", action="store_true",
                         help="Hash and record files without ClamAV scanning")
     parser.add_argument("--skip-rescans", action="store_true",
@@ -184,6 +184,25 @@ def main() -> int:
         print(f"[bold red]✗ Config error:[/bold red] {shown(str(exc))}")
         print("Nothing was scanned. Fix the setting named above and run again.")
         return 1
+    # Still on the pre-0.8.1 folders: say so before the run and again after
+    # it, where it isn't scrolled away under the scan.
+    notice = legacy_notice(config)
+    if notice:
+        _print_legacy(notice)
+    try:
+        return _after_config(args, config)
+    finally:
+        if notice:
+            _print_legacy(notice)
+
+
+def _print_legacy(notice: str) -> None:
+    # Line by line: shown() writes a newline out as "\\n".
+    for line in notice.splitlines():
+        print(f"[yellow]{shown(line)}[/yellow]")
+
+
+def _after_config(args, config: Config) -> int:
     secrets.load_custom(config)
     explanations.load_custom(config)
     pkgdb.configure(config.package_verification)

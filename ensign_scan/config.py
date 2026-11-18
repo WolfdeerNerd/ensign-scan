@@ -4,8 +4,9 @@ Design for multi-machine use:
 
   * The code contains NO machine-specific values. Everything lives in a
     TOML file, so any user on any box gets sane defaults out of the box.
-  * Config search order: --config flag > $ENSIGN_CONFIG > 
-    ~/.config/ensign/config.toml > built-in defaults.
+  * Config search order: --config flag > $ENSIGN_CONFIG >
+    ~/.config/ensign-scan/config.toml > built-in defaults. (Before 0.8.1
+    the folders were named "ensign"; see legacy_notice().)
   * Per-machine differences go in [hosts.<hostname>] sections of the
     SAME file, so you can sync one config across all your machines and
     each one picks up its own overrides.
@@ -48,8 +49,33 @@ def real_home() -> Path:
 HOME = real_home()
 HOSTNAME = socket.gethostname()
 
-DEFAULT_DATA_DIR = HOME / ".local" / "share" / "ensign"
-DEFAULT_CONFIG_PATH = HOME / ".config" / "ensign" / "config.toml"
+DEFAULT_DATA_DIR = HOME / ".local" / "share" / "ensign-scan"
+DEFAULT_CONFIG_PATH = HOME / ".config" / "ensign-scan" / "config.toml"
+
+# Before 0.8.1 the folders were named just "ensign": generic enough that some
+# other program could pick the same name and share a folder with Ensign's
+# database. They're renamed after the package and the command (ensign-scan).
+# An install that already has the old folders keeps using them -- nothing is
+# moved for you, since moving the database under a running scan could lose
+# it -- and every run says how to move them (legacy_notice).
+LEGACY_DATA_DIR = HOME / ".local" / "share" / "ensign"
+LEGACY_CONFIG_PATH = HOME / ".config" / "ensign" / "config.toml"
+
+
+def default_config_path() -> Path:
+    """The config file to use when none is named: the new place, unless only
+    the old one has a file."""
+    if not DEFAULT_CONFIG_PATH.exists() and LEGACY_CONFIG_PATH.is_file():
+        return LEGACY_CONFIG_PATH
+    return DEFAULT_CONFIG_PATH
+
+
+def default_data_dir() -> Path:
+    """The data folder to use when data_dir isn't set: the new place, unless
+    only the old one exists."""
+    if not DEFAULT_DATA_DIR.exists() and LEGACY_DATA_DIR.is_dir():
+        return LEGACY_DATA_DIR
+    return DEFAULT_DATA_DIR
 
 _DEFAULT_TARGETS = ("~/Downloads", "~/Documents", "~/Pictures", "~")
 
@@ -219,12 +245,14 @@ class Config:
         default location merely falling back to defaults is not.
         """
         explicit = path or os.environ.get("ENSIGN_CONFIG")
-        cfg_path = Path(explicit) if explicit else DEFAULT_CONFIG_PATH
+        cfg_path = Path(explicit) if explicit else default_config_path()
 
         if not cfg_path.is_file():
             if explicit:
                 raise FileNotFoundError(f"Config file not found: {cfg_path}")
-            return cls()
+            # Not cls(): its data folder is fixed at the new place, and an
+            # install with only the old folder must keep finding its database.
+            return cls._from_dict({}, source="built-in defaults")
 
         with open(cfg_path, "rb") as f:
             try:
@@ -267,7 +295,7 @@ class Config:
             print(f"[ensign] Warning: unknown config key {key!r} ignored")
 
         _check_paths(raw, source)
-        data_dir = _expand(raw.get("data_dir", DEFAULT_DATA_DIR))
+        data_dir = _expand(raw["data_dir"]) if "data_dir" in raw else default_data_dir()
         kwargs: dict = {
             "db_url": f"sqlite:///{data_dir / 'system.db'}",
             "log_file": data_dir / "error_logs.txt",
@@ -362,7 +390,7 @@ EXAMPLE_CONFIG = """\
 # on that machine only — so this one file can be synced everywhere.
 
 # Where the database and error log live.
-# data_dir = "~/.local/share/ensign"
+# data_dir = "~/.local/share/ensign-scan"
 
 # Worker threads. 0 = auto (sized from clamd's MaxThreads and CPU count).
 max_workers = 0
@@ -509,8 +537,71 @@ excludes = [
 def ensure_default_config() -> None:
     """Write the commented template on first run so users have something
     to edit instead of reading source code to learn the options."""
-    if DEFAULT_CONFIG_PATH.exists():
+    # An old-location config counts: a fresh template at the new place
+    # would win over it and quietly drop every setting in it.
+    if DEFAULT_CONFIG_PATH.exists() or LEGACY_CONFIG_PATH.exists():
         return
     DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     DEFAULT_CONFIG_PATH.write_text(EXAMPLE_CONFIG)
     print(f"[ensign] Wrote starter config to {DEFAULT_CONFIG_PATH}")
+
+
+def _tilde(path: Path) -> str:
+    text = str(path)
+    home = str(HOME)
+    return "~" + text[len(home):] if text == home or text.startswith(home + "/") else text
+
+
+def legacy_notice(config: "Config") -> str | None:
+    """How to move off the pre-0.8.1 folders, when this run uses one of them.
+
+    Nothing when the old folders aren't in use, including when they're left
+    over next to the new ones (the new ones win then). Printed at the start of
+    a run and again at the end, where it isn't buried under the scan.
+    """
+    def same(a: Path, b: Path) -> bool:
+        try:
+            return a.exists() and a.resolve() == b.resolve()
+        except OSError:
+            return False
+
+    old_config = config.source != "built-in defaults" and same(Path(config.source), LEGACY_CONFIG_PATH)
+    old_data = same(config.data_dir, LEGACY_DATA_DIR)
+    if not (old_config or old_data):
+        return None
+
+    lines = ["Ensign's folders are now named ensign-scan (they were ensign before 0.8.1), so",
+             "they can't collide with another program's. This run still uses the old ones:"]
+    if old_config:
+        lines.append(f"  config: {_tilde(LEGACY_CONFIG_PATH.parent)}/")
+    if old_data:
+        lines.append(f"  data:   {_tilde(LEGACY_DATA_DIR)}/")
+    lines += ["To move them, first make sure no Ensign run or scheduled scan is going, then:"]
+    moves = ([(LEGACY_CONFIG_PATH.parent, DEFAULT_CONFIG_PATH.parent)] if old_config else []) + \
+            ([(LEGACY_DATA_DIR, DEFAULT_DATA_DIR)] if old_data else [])
+    for old, new in moves:
+        if new.exists():
+            # mv into an existing folder would nest the old one inside it.
+            lines.append(f"  {_tilde(new)}/ already exists: move what you need from "
+                         f"{_tilde(old)}/ into it by hand, then delete {_tilde(old)}/")
+        else:
+            lines.append(f"  mv {_tilde(old)} {_tilde(new)}")
+    if old_data and "data_dir" in _set_in(config):
+        lines.append(f'  and change data_dir in your config to "{_tilde(DEFAULT_DATA_DIR)}"')
+    lines += ["If a script, timer or $ENSIGN_CONFIG names the old config path, update it too.",
+              "Until then Ensign keeps using the old folders; nothing is moved for you."]
+    return "\n".join(lines)
+
+
+def _set_in(config: "Config") -> dict:
+    """The settings the config file itself sets (top level and this host's section)."""
+    if config.source == "built-in defaults":
+        return {}
+    try:
+        with open(config.source, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    host = data.get("hosts", {})
+    host = host.get(HOSTNAME, {}) if isinstance(host, dict) else {}
+    return {**data, **(host if isinstance(host, dict) else {})}
