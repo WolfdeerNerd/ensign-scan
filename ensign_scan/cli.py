@@ -22,9 +22,9 @@ from importlib.metadata import PackageNotFoundError, version as dist_version
 
 from rich import print
 
-from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config
+from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config, legacy_notice
 from ensign_scan import (
-    allowlist, bigrules, diagnostics, explanations, fpreport, logsetup, notify, persistence, pkgdb,
+    allowlist, bigrules, diagnostics, explanations, fpreport, logsetup, migrate, notify, persistence, pkgdb,
     secrets,
 )
 from ensign_scan.fsutil import print_unwrapped, shown
@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("targets", nargs="*",
                         help="Directories to scan (default: scan_targets from config)")
     parser.add_argument("--config", metavar="PATH",
-                        help="Config file (default: ~/.config/ensign/config.toml)")
+                        help="Config file (default: ~/.config/ensign-scan/config.toml)")
     parser.add_argument("--no-scan", action="store_true",
                         help="Hash and record files without ClamAV scanning")
     parser.add_argument("--skip-rescans", action="store_true",
@@ -176,6 +176,14 @@ def main() -> int:
     if args.diagnostics:
         builtin_print(diagnostics.report(args.config))
         return 0
+    # Before the starter config: it must never be written next to an old
+    # config that's about to move into the new place.
+    moved, not_moved = migrate.move_legacy_folders(args.config)
+    if moved:
+        print("[green]Moved Ensign's folders to their new names (ensign-scan, since 0.8.1):[/green]")
+        for line in moved:
+            print(shown(line))
+        print("If a script or timer names an old path, update it.")
     if not args.config:
         ensure_default_config()
     try:
@@ -184,6 +192,25 @@ def main() -> int:
         print(f"[bold red]✗ Config error:[/bold red] {shown(str(exc))}")
         print("Nothing was scanned. Fix the setting named above and run again.")
         return 1
+    # Still on the pre-0.8.1 folders: say so before the run and again after
+    # it, where it isn't scrolled away under the scan.
+    notice = legacy_notice(config, not_moved)
+    if notice:
+        _print_legacy(notice)
+    try:
+        return _after_config(args, config)
+    finally:
+        if notice:
+            _print_legacy(notice)
+
+
+def _print_legacy(notice: str) -> None:
+    # Line by line: shown() writes a newline out as "\\n".
+    for line in notice.splitlines():
+        print(f"[yellow]{shown(line)}[/yellow]")
+
+
+def _after_config(args, config: Config) -> int:
     secrets.load_custom(config)
     explanations.load_custom(config)
     pkgdb.configure(config.package_verification)
@@ -379,7 +406,11 @@ def run(args: argparse.Namespace, config: Config) -> int:
         suggest_fixes(scanner.engine, paths=args.targets or None)
         return 0
     auto = " (auto)" if config.max_workers <= 0 else ""
-    print(f" Workers:  {scanner.workers}{auto}")
+    workers = scanner.workers
+    if config.max_workers <= 0 and scanner.clamd_max_threads is None:
+        # The fallback, said out loud: a quiet 5 looked like a real answer.
+        auto = " (auto; couldn't read clamd's MaxThreads, so a safe default)"
+    print(f" Workers:  {workers}{auto}")
     scan = not args.no_scan
     hint = scanner.thread_hint() if scan else None  # --no-scan doesn't use clamd
     if hint:

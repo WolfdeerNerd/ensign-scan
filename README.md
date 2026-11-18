@@ -54,6 +54,20 @@ python3 main.py --help
 
 Either way, read the first-run note under Usage before your first scan.
 
+**Upgrading from before 0.8.1:** Ensign's folders were renamed from `ensign` to `ensign-scan`, matching the package and the command, so they can't collide with another program's folder. On its first run, 0.8.1 moves the old folders (`~/.config/ensign/` and `~/.local/share/ensign/`) to the new names itself and says so. It only does this when it's clearly safe:
+- the new folder doesn't exist yet;
+- the old folder holds only files Ensign creates (so it's never another program's);
+- no other Ensign run is going;
+- nothing names the old paths (`--config`, `$ENSIGN_CONFIG` or `data_dir`);
+- and the folder can be renamed in one step (same filesystem; nothing is ever copied).
+
+If any check fails, Ensign keeps using the old folder, and each run prints a notice at the start and the end saying why and how to move it by hand:
+```
+mv ~/.config/ensign ~/.config/ensign-scan
+mv ~/.local/share/ensign ~/.local/share/ensign-scan
+```
+Do that while no Ensign run or scheduled scan is going. Either way, if a script or timer names an old path, update it. If you never had the old folders, there's nothing to do.
+
 ## Requirements
 
 This section is for running Ensign from a source checkout; an installed copy (above) pulls in its own dependencies.
@@ -144,13 +158,13 @@ Worker count is either set explicitly (`max_workers` in config) or resolved auto
 
 `cpu_share` (default 50) is how much of your CPU a scan may use, in percent of its threads, so you can keep using the machine while it runs. The scan workers and any `clamscan` runs share it: a `clamscan` starts only if it fits alongside the workers busy at that moment, though one always runs so large files still get scanned. Set it to 100 to let a scan have the whole machine. When clamd's `MaxThreads` is what holds Ensign below that share, the start of a scan suggests the `MaxThreads` that would reach it. Ensign never changes clamd's settings itself.
 
-If clamd can't be reached to ask, Ensign falls back to a safe default of 5 workers (fewer if `cpu_share` allows fewer). And no matter how constrained the machine — single core, a very low `MaxThreads` on clamd — the worker count can never drop below 1. **Ensign will always run, even on modest hardware;** it just scans one file at a time in that case rather than failing or requiring a separate no-threading mode.
+If clamd can't be reached to ask, Ensign falls back to a safe default of 5 workers (fewer if `cpu_share` allows fewer), and the `Workers:` line says it's the fallback. clamd's own default `MaxThreads` is 10, which gives 8 workers unless `cpu_share` or your CPU count is lower. And no matter how constrained the machine — single core, a very low `MaxThreads` on clamd — the worker count can never drop below 1. **Ensign will always run, even on modest hardware;** it just scans one file at a time in that case rather than failing or requiring a separate no-threading mode.
 
 ## Usage
 
 The examples below are written as `python3 main.py` (running from a checkout). If you installed Ensign, use `ensign-scan` instead: `ensign-scan --help`, `ensign-scan ~/Downloads`, and so on.
 
-**First run: don't use `sudo`.** Run Ensign under your own username the first time. Ensign creates its config, database and log files on first run, and whoever runs it owns them. If the first run is as root, those files end up owned by root and your username can't use them afterwards. If that happens, delete the root-created files (the database in `~/.local/share/ensign/` and the config in `~/.config/ensign/`) and run Ensign once under your own username to recreate them.
+**First run: don't use `sudo`.** Run Ensign under your own username the first time. Ensign creates its config, database and log files on first run, and whoever runs it owns them. If the first run is as root, those files end up owned by root and your username can't use them afterwards. If that happens, delete the root-created files (the database in `~/.local/share/ensign-scan/` and the config in `~/.config/ensign-scan/`) and run Ensign once under your own username to recreate them.
 
 **First quick scan:** Before scanning everything, test your setup on one folder.
 
@@ -177,7 +191,7 @@ While it runs, the bottom line of the terminal shows live progress: files done o
 | `python3 main.py --no-scan` | Hash and record files, skip ClamAV entirely |
 | `python3 main.py --skip-rescans` | Skip the infected/error/stale rescan passes at the end |
 | `python3 main.py --sweep` | After the scan, sweep files too large for ClamAV in slices (see Large files) |
-| `python3 main.py --config PATH` | Use an alternate config file (default: `~/.config/ensign/config.toml`) |
+| `python3 main.py --config PATH` | Use an alternate config file (default: `~/.config/ensign-scan/config.toml`) |
 | `ENSIGN_CONFIG=PATH python3 main.py` | The same as `--config`, set through an environment variable. If both are given, `--config` wins |
 
 ### Standalone maintenance commands
@@ -204,7 +218,7 @@ These run one job and exit — no full scan.
 
 ### Only one run at a time
 
-Before it scans, purges or retries errors, Ensign takes a lock: a small file called `ensign.lock` in your data directory (`~/.local/share/ensign/` unless you've set a custom `data_dir`). If another Ensign already holds it, the new one prints which process has it, exits with code 75 and scans nothing. That way a scheduled run and a manual run can't overlap and scan the same files twice.
+Before it scans, purges or retries errors, Ensign takes a lock: a small file called `ensign.lock` in your data directory (`~/.local/share/ensign-scan/` unless you've set a custom `data_dir`). If another Ensign already holds it, the new one prints which process has it, exits with code 75 and scans nothing. That way a scheduled run and a manual run can't overlap and scan the same files twice.
 
 A scan's exit code says how it went, so a script or a scheduled run can act on it:
 
@@ -324,7 +338,7 @@ When a scan ends with infected files, Ensign sends a critical desktop notificati
 
 ## Logs
 
-Errors are written to one log file per run: `<data_dir>/logs/ensign-YYYYMMDD-HHMMSS.log`, which is `~/.local/share/ensign/logs/` unless you've set a custom `data_dir`. A run with no errors leaves no file.
+Errors are written to one log file per run: `<data_dir>/logs/ensign-YYYYMMDD-HHMMSS.log`, which is `~/.local/share/ensign-scan/logs/` unless you've set a custom `data_dir`. A run with no errors leaves no file.
 
 - **Repeats are collapsed.** The first 20 occurrences of each distinct error are logged in full, then only counted, with a one-line total at the end of the run. One repeating problem (Ensign once logged 302,289 "stat failed" lines for broken symlinks) can't fill the disk.
 - **Old logs are deleted automatically.** Runs older than `log_keep_days` (default `90`) go first. If the folder is still over `log_max_total_mb` (default `2048`), the oldest go next, so the size limit wins. `0` turns either rule off. Only files named `ensign-*.log` in that folder are ever deleted.
@@ -364,30 +378,30 @@ The first time you run Ensign it writes a starter `config.toml` with all of thes
 
 ## Querying the Database Directly
 
-Most day-to-day questions are covered by the commands above. But the database is just SQLite, kept locally at the path printed in the `Database:` line when Ensign starts (`~/.local/share/ensign/system.db` unless you've set a custom `data_dir`) — for anything the built-in reports don't cover, `sqlite3` gets you there directly.
+Most day-to-day questions are covered by the commands above. But the database is just SQLite, kept locally at the path printed in the `Database:` line when Ensign starts (`~/.local/share/ensign-scan/system.db` unless you've set a custom `data_dir`) — for anything the built-in reports don't cover, `sqlite3` gets you there directly.
 
 The `files` table's `scan_status` column is one of: `clean`, `infected`, `error`, `pending`, `classified`.
 
 See the details behind current errors:
 ```
-sqlite3 ~/.local/share/ensign/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='error';"
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='error';"
 ```
 
 See what's been classified (credential files Ensign deliberately never opened):
 ```
-sqlite3 ~/.local/share/ensign/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='classified';"
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='classified';"
 ```
 
 The list of paths/filenames/extensions used to make that call isn't arbitrary — see `docs/Classified_Paths_Research.md` for the sourcing behind each entry, and `ensign_scan/secrets.py` for the confidence tiers and how `skip_reason()` uses them.
 
 See infected files and what triggered them:
 ```
-sqlite3 ~/.local/share/ensign/system.db "SELECT filepath, threat_name FROM files WHERE scan_status='infected';"
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, threat_name FROM files WHERE scan_status='infected';"
 ```
 
 Look up everything Ensign knows about one specific file:
 ```
-sqlite3 ~/.local/share/ensign/system.db "SELECT * FROM files WHERE filepath='/full/path/to/file';"
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT * FROM files WHERE filepath='/full/path/to/file';"
 
 
 ```

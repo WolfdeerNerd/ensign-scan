@@ -4,7 +4,7 @@
 # on that machine only — so this one file can be synced everywhere.
 
 # Where the database and error log live.
-# data_dir = "~/.local/share/ensign"
+# data_dir = "~/.local/share/ensign-scan"
 
 # Worker threads. 0 = auto (sized from clamd's MaxThreads and CPU count).
 max_workers = 0

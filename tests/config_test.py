@@ -25,7 +25,7 @@ assert cfg.infected_alert_seconds == 60
 assert cfg.infected_alert_only_while_gaming is True
 assert cfg.log_keep_days == 90 and cfg.log_max_total_mb == 2048
 assert cfg.log_dir == cfg.data_dir / 'logs'
-assert "ensign/system.db" in cfg.db_url
+assert "ensign-scan/system.db" in cfg.db_url
 
 # 2. TOML with global values + a hosts section for THIS machine
 toml = f"""
