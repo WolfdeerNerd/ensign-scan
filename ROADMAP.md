@@ -2,7 +2,7 @@
 
 Where Ensign is headed. There are no dates, and plans can change. Details live in GitHub issues; this page stays short.
 
-Want something that isn't here? [Open a feature request](https://github.com/WolfdeerNerd/ensign-scan/issues/new/choose).
+Want something that isn't here? [Open a feature request](https://github.com/WolfdeerNerd/ensign-scan/issues/new/choose). Want to build it? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What won't change
 
