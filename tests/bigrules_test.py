@@ -129,7 +129,7 @@ print("big-file rule translation test passed ✓")
 
 found = yaraengine.find()
 if found is None:
-    print("big-file rule tests skipped: yara-x isn't installed (pip install yara-x)")
+    print("big-file rule tests skipped: yara-x isn't installed for this Python")
     raise SystemExit(0)
 engines = [found]
 

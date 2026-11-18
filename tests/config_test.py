@@ -134,3 +134,42 @@ for key in ("resweep_after_signature_updates", "resweep_after_days"):
         assert getattr(cfg, key) == expect, (key, value, getattr(cfg, key))
         assert ("outside 7-90" in buf.getvalue()) == (value != expect), (key, value, buf.getvalue())
 print("resweep settings test passed ✓")
+
+# Wrong types fail loudly, before anything runs
+for raw, needle in (({"sweep_huge_files": "no"}, "true or false"),
+                    ({"resweep_after_days": "30"}, "remove the quotes"),
+                    ({"max_workers": True}, "whole number"),
+                    ({"rescan_after_signature_updates": 7.5}, "whole number"),
+                    ({"scan_targets": "~/Downloads"}, "list of paths"),
+                    ({"excludes": [1, 2]}, "list of paths"),
+                    ({"clamd_socket": 5}, "path in quotes")):
+    try:
+        Config._from_dict(raw, source="t")
+    except ValueError as exc:
+        assert needle in str(exc), (raw, exc)
+    else:
+        raise AssertionError(f"accepted {raw}")
+assert Config._from_dict({"sweep_huge_files": False, "max_workers": 4}, source="t").max_workers == 4
+with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as bad:
+    bad.write("not = valid = toml\n")
+try:
+    Config.load(Path(bad.name))
+except ValueError as exc:
+    assert bad.name in str(exc) and "not valid TOML" in str(exc), exc
+else:
+    raise AssertionError("broken TOML accepted")
+finally:
+    os.unlink(bad.name)
+print("config type checks test passed ✓")
+
+# ...and the command line says so in one line, with no traceback, and exits 1
+import subprocess  # noqa: E402
+
+with tempfile.TemporaryDirectory() as d:
+    cfg = Path(d, "c.toml")
+    cfg.write_text(f'data_dir = "{d}"\nsweep_huge_files = "no"\n')
+    run = subprocess.run([_sys_path.executable, str(ROOT / "main.py"), "--config", str(cfg)],
+                         capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    assert run.returncode == 1 and "Config error" in run.stdout, (run.returncode, run.stdout, run.stderr)
+    assert "Traceback" not in run.stdout + run.stderr, run.stderr
+print("config error on the command line test passed ✓")

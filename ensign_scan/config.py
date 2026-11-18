@@ -68,6 +68,32 @@ def _expand(value: str | Path) -> Path:
 # The config object
 # ----------------------------------------------------------------------
 
+# Settings that are true/false, and settings that are whole numbers. A value
+# of the wrong type fails loudly: "no" in quotes is a non-empty string, which
+# Python treats as true, so sweep_huge_files = "no" would quietly mean yes,
+# and a quoted number crashed the run hours in, when it was first compared.
+_BOOL_SETTINGS = ("sweep_huge_files", "infected_alert_only_while_gaming")
+_INT_SETTINGS = ("max_workers", "cpu_share", "max_clamscans", "clamscan_memory_percent",
+                 "resweep_after_signature_updates", "resweep_after_days", "rescan_after_days",
+                 "rescan_after_signature_updates", "infected_alert_seconds", "log_keep_days",
+                 "log_max_total_mb", "signature_max_age_days")
+
+
+def _check_types(values: dict, source: str) -> None:
+    for key in _BOOL_SETTINGS:
+        if key in values and not isinstance(values[key], bool):
+            raise ValueError(f"{source}: {key} must be true or false (no quotes), "
+                             f"got {values[key]!r}")
+    for key in _INT_SETTINGS:
+        value = values.get(key)
+        if key in values and (isinstance(value, bool) or not isinstance(value, int)):
+            hint = " (remove the quotes)" if isinstance(value, str) and value.strip().isdigit() else ""
+            raise ValueError(f"{source}: {key} must be a whole number{hint}, got {value!r}")
+    if "clamd_socket" in values and not isinstance(values["clamd_socket"], str):
+        raise ValueError(f"{source}: clamd_socket must be a path in quotes, "
+                         f"got {values['clamd_socket']!r}")
+
+
 # Allowed range for rescan_after_signature_updates in a config file.
 # Below 7 is a full pass of a big machine every few days; above 31 leaves
 # clean files unchecked for over a month. 0 (off) is always allowed.
@@ -180,7 +206,10 @@ class Config:
             return cls()
 
         with open(cfg_path, "rb") as f:
-            data = tomllib.load(f)
+            try:
+                data = tomllib.load(f)
+            except tomllib.TOMLDecodeError as exc:
+                raise ValueError(f"{cfg_path}: not valid TOML: {exc}") from None
 
         # Per-machine overrides: [hosts.<hostname>] beats top level.
         # TOML allows any value type here, so check before trusting it.
@@ -230,6 +259,13 @@ class Config:
                     "resweep_after_signature_updates", "resweep_after_days"):
             if key in raw:
                 kwargs[key] = raw[key]
+        _check_types(kwargs, source)
+        for key in ("scan_targets", "snapshot_roots", "excludes"):
+            value = raw.get(key)
+            if value is not None and (not isinstance(value, list)
+                                      or not all(isinstance(v, str) for v in value)):
+                raise ValueError(f'{source}: {key} must be a list of paths in quotes, like '
+                                 f'["~/Downloads"], got {value!r}')
         if "scan_targets" in raw:
             kwargs["scan_targets"] = tuple(_expand(t) for t in raw["scan_targets"])
         if "snapshot_roots" in raw:
