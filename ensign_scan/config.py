@@ -56,8 +56,8 @@ DEFAULT_CONFIG_PATH = HOME / ".config" / "ensign-scan" / "config.toml"
 # other program could pick the same name and share a folder with Ensign's
 # database. They're renamed after the package and the command (ensign-scan).
 # An install that already has the old folders keeps using them -- nothing is
-# moved for you, since moving the database under a running scan could lose
-# it -- and every run says how to move them (legacy_notice).
+# moved unless every safety check in migrate.py passes -- and while they're
+# still in use, every run says why and how to move them (legacy_notice).
 LEGACY_DATA_DIR = HOME / ".local" / "share" / "ensign"
 LEGACY_CONFIG_PATH = HOME / ".config" / "ensign" / "config.toml"
 
@@ -88,6 +88,20 @@ def _expand(value: str | Path) -> Path:
     if text.startswith("~/"):
         return HOME / text[2:]
     return Path(text)
+
+
+# Every setting a config file may hold (besides [hosts.<hostname>] sections).
+KNOWN_SETTINGS = frozenset({
+    "data_dir", "clamd_socket", "max_workers", "cpu_share", "max_clamscans",
+    "clamscan_memory_percent", "sweep_huge_files",
+    "resweep_after_signature_updates", "resweep_after_days",
+    "rescan_after_days", "rescan_after_signature_updates",
+    "infected_alert_seconds", "infected_alert_only_while_gaming",
+    "log_keep_days", "log_max_total_mb",
+    "scan_targets", "snapshot_roots",
+    "excludes", "signature_max_age_days", "package_verification",
+    "custom_secrets", "custom_threats", "custom_pacman_reasons",
+})
 
 
 # ----------------------------------------------------------------------
@@ -280,18 +294,7 @@ class Config:
 
     @classmethod
     def _from_dict(cls, raw: dict, source: str) -> "Config":
-        known = {
-            "data_dir", "clamd_socket", "max_workers", "cpu_share", "max_clamscans",
-            "clamscan_memory_percent", "sweep_huge_files",
-            "resweep_after_signature_updates", "resweep_after_days",
-            "rescan_after_days", "rescan_after_signature_updates",
-            "infected_alert_seconds", "infected_alert_only_while_gaming",
-            "log_keep_days", "log_max_total_mb",
-            "scan_targets", "snapshot_roots",
-            "excludes", "signature_max_age_days", "package_verification",
-            "custom_secrets", "custom_threats", "custom_pacman_reasons",
-        }
-        for key in raw.keys() - known:
+        for key in raw.keys() - KNOWN_SETTINGS:
             print(f"[ensign] Warning: unknown config key {key!r} ignored")
 
         _check_paths(raw, source)
@@ -552,7 +555,7 @@ def _tilde(path: Path) -> str:
     return "~" + text[len(home):] if text == home or text.startswith(home + "/") else text
 
 
-def legacy_notice(config: "Config") -> str | None:
+def legacy_notice(config: "Config", not_moved: list[str] | tuple = ()) -> str | None:
     """How to move off the pre-0.8.1 folders, when this run uses one of them.
 
     Nothing when the old folders aren't in use, including when they're left
@@ -572,11 +575,14 @@ def legacy_notice(config: "Config") -> str | None:
 
     lines = ["Ensign's folders are now named ensign-scan (they were ensign before 0.8.1), so",
              "they can't collide with another program's. This run still uses the old ones:"]
+    lines_why = [f"  - {why}" for why in not_moved]
     if old_config:
         lines.append(f"  config: {_tilde(LEGACY_CONFIG_PATH.parent)}/")
     if old_data:
         lines.append(f"  data:   {_tilde(LEGACY_DATA_DIR)}/")
-    lines += ["To move them, first make sure no Ensign run or scheduled scan is going, then:"]
+    if lines_why:
+        lines += ["Ensign moves them itself when it safely can, but didn't this time because:", *lines_why]
+    lines += ["To move them by hand, first make sure no Ensign run or scheduled scan is going, then:"]
     moves = ([(LEGACY_CONFIG_PATH.parent, DEFAULT_CONFIG_PATH.parent)] if old_config else []) + \
             ([(LEGACY_DATA_DIR, DEFAULT_DATA_DIR)] if old_data else [])
     for old, new in moves:
@@ -589,7 +595,7 @@ def legacy_notice(config: "Config") -> str | None:
     if old_data and "data_dir" in _set_in(config):
         lines.append(f'  and change data_dir in your config to "{_tilde(DEFAULT_DATA_DIR)}"')
     lines += ["If a script, timer or $ENSIGN_CONFIG names the old config path, update it too.",
-              "Until then Ensign keeps using the old folders; nothing is moved for you."]
+              "Until then Ensign keeps using the old folders."]
     return "\n".join(lines)
 
 

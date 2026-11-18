@@ -14,6 +14,13 @@ the real home is never touched. Checked:
     change that line;
   * a real run prints the notice twice: at the start and at the end.
 
+Then the automatic move (migrate.py): both folders move, database intact,
+when every check passes; and nothing moves when the old folder holds a file
+Ensign doesn't make, the config has a setting Ensign doesn't have, the
+database lacks Ensign's tables, another run holds the lock, data_dir names
+the old folder, --config or $ENSIGN_CONFIG names the old file, or the new
+folder already exists.
+
     python3 tests/legacy_paths_test.py
 """
 from __future__ import annotations
@@ -129,3 +136,151 @@ with tempfile.TemporaryDirectory() as d:
     assert text.count("Ensign's folders are now named ensign-scan") == 2, text
 
 print("legacy paths test passed ✓")
+
+
+# ======================================================================
+# The automatic move (migrate.py)
+# ======================================================================
+import sqlite3  # noqa: E402
+import fcntl  # noqa: E402
+
+MOVE = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from ensign_scan import migrate
+moved, not_moved = migrate.move_legacy_folders(sys.argv[2] or None)
+print("MOVED", repr(moved))
+print("NOT", repr(not_moved))
+"""
+
+
+def move(home: Path, explicit: str = "", env_extra: dict | None = None) -> tuple[list, list]:
+    env = {k: v for k, v in os.environ.items() if k not in ("SUDO_USER", "ENSIGN_CONFIG")}
+    env["HOME"] = str(home)
+    env.update(env_extra or {})
+    out = subprocess.run([sys.executable, "-c", MOVE, str(ROOT), explicit], env=env, capture_output=True,
+                         text=True, check=True, stdin=subprocess.DEVNULL).stdout
+    got = dict(line.split(" ", 1) for line in out.splitlines() if line.startswith(("MOVED", "NOT")))
+    return eval(got["MOVED"]), eval(got["NOT"])
+
+
+def ensign_tree(home: Path, *, config_text: str = "max_workers = 0\n") -> None:
+    """Old folders as Ensign really leaves them: a database with its tables
+    and a row, the lock, a log folder."""
+    (home / ".config/ensign").mkdir(parents=True)
+    (home / ".config/ensign/config.toml").write_text(config_text)
+    data = home / ".local/share/ensign"
+    (data / "logs").mkdir(parents=True)
+    conn = sqlite3.connect(data / "system.db")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE files (filepath TEXT)")
+    conn.execute("CREATE TABLE directories (path TEXT)")
+    conn.execute("INSERT INTO files VALUES ('/x')")
+    conn.commit()
+    conn.close()
+    (data / "ensign.lock").write_text("")
+
+
+def rows(db: Path) -> int:
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute("SELECT count(*) FROM files").fetchone()[0]
+    finally:
+        conn.close()
+
+
+with tempfile.TemporaryDirectory() as d:
+    # --- the normal case: both move, the database comes along whole -----------------------------
+    home = Path(d, "ok")
+    home.mkdir()
+    ensign_tree(home)
+    moved, not_moved = move(home)
+    assert len(moved) == 2 and not not_moved, (moved, not_moved)
+    assert not (home / ".config/ensign").exists() and not (home / ".local/share/ensign").exists()
+    assert (home / ".config/ensign-scan/config.toml").read_text() == "max_workers = 0\n"
+    assert rows(home / ".local/share/ensign-scan/system.db") == 1
+    assert move(home) == ([], []), "a second run has nothing left to do"
+
+    # --- a file Ensign doesn't make: not ours alone, stays put ---------------------------------
+    home = Path(d, "foreign")
+    home.mkdir()
+    ensign_tree(home)
+    (home / ".local/share/ensign/someone-elses.dat").write_text("x")
+    (home / ".config/ensign/other.ini").write_text("x")
+    moved, not_moved = move(home)
+    assert moved == [] and len(not_moved) == 2, (moved, not_moved)
+    assert (home / ".local/share/ensign/someone-elses.dat").exists()
+
+    # --- a config with a setting Ensign doesn't have: not Ensign's ------------------------------
+    home = Path(d, "otherconfig")
+    home.mkdir()
+    ensign_tree(home, config_text='theme = "dark"\n')
+    moved, not_moved = move(home)
+    assert (home / ".config/ensign/config.toml").exists(), "moved a config that isn't Ensign's"
+    assert any("config.toml" in w for w in not_moved), not_moved
+
+    # --- a database without Ensign's tables ------------------------------------------------------
+    home = Path(d, "otherdb")
+    home.mkdir()
+    ensign_tree(home)
+    conn = sqlite3.connect(home / ".local/share/ensign/system.db")
+    conn.execute("DROP TABLE files")
+    conn.commit()
+    conn.close()
+    moved, not_moved = move(home)
+    assert (home / ".local/share/ensign").exists() and any("doesn't create" in w for w in not_moved)
+
+    # --- another run holds the lock ------------------------------------------------------------------
+    home = Path(d, "busy")
+    home.mkdir()
+    ensign_tree(home)
+    fd = os.open(home / ".local/share/ensign/ensign.lock", os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        moved, not_moved = move(home)
+    finally:
+        os.close(fd)
+    assert (home / ".local/share/ensign/system.db").exists(), "moved the data under a running scan"
+    assert any("another Ensign run" in w for w in not_moved), not_moved
+
+    # --- data_dir names the old folder: the next run would start an empty database ----------
+    home = Path(d, "datadir")
+    home.mkdir()
+    ensign_tree(home, config_text='data_dir = "~/.local/share/ensign"\n')
+    moved, not_moved = move(home)
+    assert (home / ".local/share/ensign").exists() and any("data_dir" in w for w in not_moved)
+
+    # --- --config / $ENSIGN_CONFIG names the old file: nothing moves ----------------------------
+    for explicit, extra in ((str(Path(d, "byflag/.config/ensign/config.toml")), {}),
+                            ("", {"ENSIGN_CONFIG": str(Path(d, "byenv/.config/ensign/config.toml"))})):
+        home = Path(d, "byflag" if explicit else "byenv")
+        home.mkdir()
+        ensign_tree(home)
+        moved, not_moved = move(home, explicit, extra)
+        assert moved == [] and (home / ".config/ensign").exists() and (home / ".local/share/ensign").exists()
+
+    # --- the new folder already exists: never merged ---------------------------------------------
+    home = Path(d, "both2")
+    home.mkdir()
+    ensign_tree(home)
+    (home / ".local/share/ensign-scan").mkdir(parents=True)
+    moved, not_moved = move(home)
+    assert (home / ".local/share/ensign/system.db").exists() and not any("data" in m for m in moved)
+
+    # --- end to end: a real database made by Ensign, then renamed back to the old names -----
+    home = Path(d, "real")
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if k not in ("SUDO_USER", "ENSIGN_CONFIG")}
+    env.update(HOME=str(home), COLUMNS="200")
+    run = [sys.executable, str(ROOT / "main.py"), "--list-allowed"]
+    subprocess.run(run, env=env, capture_output=True, stdin=subprocess.DEVNULL, timeout=120)
+    assert (home / ".local/share/ensign-scan/system.db").exists()
+    os.rename(home / ".config/ensign-scan", home / ".config/ensign")
+    os.rename(home / ".local/share/ensign-scan", home / ".local/share/ensign")
+    (home / ".local/share/ensign/ensign.lock").write_text("")  # a scan would have left it
+    out = subprocess.run(run, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+    text = out.stdout + out.stderr
+    assert "Moved Ensign's folders" in text and "now named ensign-scan" not in text, text
+    assert (home / ".local/share/ensign-scan/system.db").exists() and not (home / ".local/share/ensign").exists()
+
+print("automatic move test passed ✓")

@@ -24,7 +24,7 @@ from rich import print
 
 from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config, legacy_notice
 from ensign_scan import (
-    allowlist, bigrules, diagnostics, explanations, fpreport, logsetup, notify, persistence, pkgdb,
+    allowlist, bigrules, diagnostics, explanations, fpreport, logsetup, migrate, notify, persistence, pkgdb,
     secrets,
 )
 from ensign_scan.fsutil import print_unwrapped, shown
@@ -176,6 +176,14 @@ def main() -> int:
     if args.diagnostics:
         builtin_print(diagnostics.report(args.config))
         return 0
+    # Before the starter config: it must never be written next to an old
+    # config that's about to move into the new place.
+    moved, not_moved = migrate.move_legacy_folders(args.config)
+    if moved:
+        print("[green]Moved Ensign's folders to their new names (ensign-scan, since 0.8.1):[/green]")
+        for line in moved:
+            print(shown(line))
+        print("If a script or timer names an old path, update it.")
     if not args.config:
         ensure_default_config()
     try:
@@ -186,7 +194,7 @@ def main() -> int:
         return 1
     # Still on the pre-0.8.1 folders: say so before the run and again after
     # it, where it isn't scrolled away under the scan.
-    notice = legacy_notice(config)
+    notice = legacy_notice(config, not_moved)
     if notice:
         _print_legacy(notice)
     try:

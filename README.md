@@ -54,12 +54,19 @@ python3 main.py --help
 
 Either way, read the first-run note under Usage before your first scan.
 
-**Upgrading from before 0.8.1:** Ensign's folders were renamed from `ensign` to `ensign-scan`, matching the package and the command, so they can't collide with another program's folder. If you already have the old folders (`~/.config/ensign/` and `~/.local/share/ensign/`), Ensign keeps using them and nothing is moved for you. Instead, each run prints a notice at the start and the end with the commands to move them. Move them while no Ensign run or scheduled scan is going:
+**Upgrading from before 0.8.1:** Ensign's folders were renamed from `ensign` to `ensign-scan`, matching the package and the command, so they can't collide with another program's folder. On its first run, 0.8.1 moves the old folders (`~/.config/ensign/` and `~/.local/share/ensign/`) to the new names itself and says so. It only does this when it's clearly safe:
+- the new folder doesn't exist yet;
+- the old folder holds only files Ensign creates (so it's never another program's);
+- no other Ensign run is going;
+- nothing names the old paths (`--config`, `$ENSIGN_CONFIG` or `data_dir`);
+- and the folder can be renamed in one step (same filesystem; nothing is ever copied).
+
+If any check fails, Ensign keeps using the old folder, and each run prints a notice at the start and the end saying why and how to move it by hand:
 ```
 mv ~/.config/ensign ~/.config/ensign-scan
 mv ~/.local/share/ensign ~/.local/share/ensign-scan
 ```
-If your config sets `data_dir`, or a script, timer or `$ENSIGN_CONFIG` names the old config path, update those too. If you never had the old folders, there's nothing to do.
+Do that while no Ensign run or scheduled scan is going. Either way, if a script or timer names an old path, update it. If you never had the old folders, there's nothing to do.
 
 ## Requirements
 
