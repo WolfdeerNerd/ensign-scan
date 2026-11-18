@@ -390,50 +390,35 @@ def new_in_allowed_folders(engine: Engine, paths: list[str] | None = None, top: 
     return total
 
 
-def allowed_report(engine: Engine, paths: list[str] | None = None, top: int = 10) -> int:
-    """The end-of-run section: files currently allowed, within the run's
-    scope (`paths`, as for the other reports). Returns how many there are."""
-    from .reports import _scope_filter  # reports doesn't import this module; no cycle
-    paths_filter = _scope_filter(paths)
-    with Session(engine) as session:
-        query = session.query(FileRecord.filepath, FileRecord.threat_name, FileRecord.file_hash).filter(
-            FileRecord.scan_status == ScanStatus.ALLOWED.value)
-        if paths_filter is not None:
-            query = query.filter(paths_filter)
-        rows = sorted(query.all(), key=lambda r: (r.threat_name or "", r.filepath))
-        when = {(h, t): at for h, t, at in
-                session.query(Allowance.file_hash, Allowance.threat_name, Allowance.allowed_at)}
-    if not rows:
-        return 0
-    print(f"\n[bold]=== ALLOWED BY YOU ({len(rows)} file{'s' if len(rows) != 1 else ''}) ===[/bold]")
-    print("Flagged by ClamAV, and marked by you as false positives. Not counted as infected. "
-          "ensign-scan --list-allowed shows them all; --unallow PATH undoes one.")
-    for filepath, threat, digest in rows[:top]:
-        date = when.get((digest, threat))
-        on = f", allowed {date:%Y-%m-%d}" if date else ""
-        print_unwrapped(f"  [cyan]○[/cyan] {shown(filepath)}  [dim]({shown(threat)}{on})[/dim]")
-    if len(rows) > top:
-        print(f"  … and {len(rows) - top} more (ensign-scan --list-allowed)")
-    return len(rows)
-
-
 def _under(path: str, folder: str) -> bool:
     folder = _folder_text(folder)
     return path == folder or path.startswith(folder.rstrip("/") + "/")
 
 
-def list_allowed(engine: Engine) -> int:
-    """Everything you've allowed: each folder once, with its signatures, and
-    each file once, with its signatures. A file that a folder entry covers
-    (same signature, inside the folder) is counted under the folder, not
-    listed again. Returns how many folders and files were listed."""
+# The allowed listings nest by four spaces a level: a folder or file, then
+# what's under it (signatures, the hash), then -- with --list-allowed-all --
+# a folder's files and theirs.
+_L1, _L2, _L3 = " " * 2, " " * 6, " " * 10
+
+
+def _gather(engine: Engine) -> tuple[dict, dict, dict]:
+    """Everything allowed, arranged for the listings.
+
+    folders: folder -> {"signatures": [(name, first, last, files now)],
+             "infected": files there infected now and not allowed,
+             "files": {path: {"hash", "signatures": [(name, date)]}} covered by it}
+    files:   path -> {"hash", "signatures"}, for signatures no folder covers
+    gone:    (path, hash) -> {"hash", "signatures"}, allowed content with no
+             tracked file now, under the path it had when allowed
+    A file allowed under one signature by a folder and under another on its
+    own appears in both places, each with its own signatures.
+    """
     with Session(engine) as session:
         folder_rows = session.query(AllowedFolder).order_by(AllowedFolder.folder,
                                                             AllowedFolder.threat_name).all()
-        folder_rules = [(f.folder, f.threat_name) for f in folder_rows]
         folders: dict[str, dict] = {}
         for f in folder_rows:
-            entry = folders.setdefault(f.folder, {"signatures": [], "infected": 0})
+            entry = folders.setdefault(f.folder, {"signatures": [], "infected": 0, "files": {}})
             now_allowed = session.query(FileRecord).filter(
                 FileRecord.scan_status == ScanStatus.ALLOWED.value,
                 FileRecord.threat_name == f.threat_name,
@@ -444,7 +429,6 @@ def list_allowed(engine: Engine) -> int:
             entry["infected"] = session.query(FileRecord).filter(
                 FileRecord.scan_status == ScanStatus.INFECTED.value,
                 path_under(FileRecord.filepath, folder)).count()
-
         allowances = session.query(Allowance).all()
         # Every tracked file with allowed content, whatever its status now: one
         # flagged since by a new signature is still that content, on disk.
@@ -452,68 +436,111 @@ def list_allowed(engine: Engine) -> int:
         tracked = [(p, h) for p, h in session.query(FileRecord.filepath, FileRecord.file_hash)
                    if h in hashes]
 
-    def covered(path: str, threat: str) -> bool:
-        return any(threat == t and _under(path, folder) for folder, t in folder_rules)
+    rules = [(f.folder, f.threat_name) for f in folder_rows]
 
-    # One entry per file: its content's hash and every signature allowed on
-    # it. The database keeps one signature per file (the latest match), so
-    # the others allowed on the same content are found by its hash.
-    files: dict[str, dict] = {}
+    def covering(path: str, threat: str) -> str | None:
+        """The innermost allowed folder that covers this file for this signature."""
+        found = [folder for folder, t in rules if t == threat and _under(path, folder)]
+        return max(found, key=len) if found else None
+
+    # The database keeps one signature per file (the latest match), so the
+    # others allowed on the same content are found by its hash.
     paths_of: dict[str, list[str]] = {}
     for path, digest in tracked:
         paths_of.setdefault(digest, []).append(path)
+    files: dict[str, dict] = {}
     for a in sorted(allowances, key=lambda a: a.threat_name):
         for path in paths_of.get(a.file_hash, []):
-            if not covered(path, a.threat_name):
-                files.setdefault(path, {"hash": a.file_hash, "signatures": []})["signatures"].append(
-                    (a.threat_name, a.allowed_at))
-    # Allowed content with no tracked file right now: shown where it was.
+            folder = covering(path, a.threat_name)
+            into = folders[folder]["files"] if folder else files
+            into.setdefault(path, {"hash": a.file_hash, "signatures": []})["signatures"].append(
+                (a.threat_name, a.allowed_at))
     gone: dict[tuple[str, str], dict] = {}
     for a in allowances:
-        if a.file_hash in paths_of or covered(a.filepath, a.threat_name):
+        if a.file_hash in paths_of or covering(a.filepath, a.threat_name):
             continue
         gone.setdefault((a.filepath, a.file_hash), {"hash": a.file_hash, "signatures": []})[
             "signatures"].append((a.threat_name, a.allowed_at))
+    return folders, files, gone
 
+
+def _print_file(path: str, entry: dict, indent: str, inner: str) -> None:
+    print_unwrapped(f"\n{indent}File: {shown(path)}")
+    width = max(len(shown(t)) for t, _ in entry["signatures"])
+    for threat, at in sorted(entry["signatures"], key=lambda s: s[0]):
+        print(f"{inner}{shown(threat):<{width}}  allowed {at:%Y-%m-%d}")
+    print(f"{inner}SHA-256: {entry['hash']}")
+
+
+def _print_folders(folders: dict, expand: bool) -> None:
+    print(f"\n[bold]=== FOLDERS YOU ALLOWED ({len(folders)}) ===[/bold]")
+    print("A folder allows nothing by itself: each file in it is allowed by its own content. "
+          "Undo one with --unallow-folder FOLDER --signature NAME.")
+    for folder, entry in folders.items():
+        print_unwrapped(f"\n{_L1}Folder: {shown(folder)}")
+        width = max(len(shown(t)) for t, *_ in entry["signatures"])
+        for threat, first, last, now_allowed in entry["signatures"]:
+            again = f", last run {last:%Y-%m-%d}" if last.date() != first.date() else ""
+            plural = "s" if now_allowed != 1 else ""
+            print(f"{_L2}{shown(threat):<{width}}  {now_allowed} file{plural} allowed · "
+                  f"since {first:%Y-%m-%d}{again}")
+        if entry["infected"]:
+            n = entry["infected"]
+            print_unwrapped(f"{_L2}[red]●[/red] {n} file{'s' if n != 1 else ''} here "
+                            f"{'are' if n != 1 else 'is'} infected now and not allowed: "
+                            f"{_command('--list-infected', folder)}")
+        if expand:
+            for path, file_entry in sorted(entry["files"].items()):
+                _print_file(path, file_entry, _L2, _L3)
+
+
+def _print_files(title: str, entries: dict, note: str, top: int | None = None) -> None:
+    print(f"\n[bold]=== {title} ({len(entries)}) ===[/bold]")
+    print(note)
+    for key, entry in sorted(entries.items())[:top]:
+        _print_file(key if isinstance(key, str) else key[0], entry, _L1, _L2)
+    if top is not None and len(entries) > top:
+        print(f"\n{_L1}… and {len(entries) - top} more: ensign-scan --list-allowed")
+
+
+def allowed_report(engine: Engine, paths: list[str] | None = None, top: int = 10) -> int:
+    """The end-of-run section: the --list-allowed layout, limited to the
+    run's scope (`paths`, as for the other reports). Every folder that
+    overlaps the scope is shown; files stop at `top`. Returns how many
+    folders and files there are in scope."""
+    folders, files, _gone = _gather(engine)
+    if paths:
+        scope = [str(p).rstrip("/") or "/" for p in paths]
+        folders = {f: e for f, e in folders.items()
+                   if any(_under(f, p) or _under(p, f) for p in scope)}
+        files = {f: e for f, e in files.items() if any(_under(f, p) for p in scope)}
+    if folders:
+        _print_folders(folders, expand=False)
+    if files:
+        _print_files("FILES YOU ALLOWED", files,
+                     "Flagged by ClamAV, and marked by you as false positives; not counted as "
+                     "infected. Undo one with --unallow PATH.", top=top)
+    return len(folders) + len(files)
+
+
+def list_allowed(engine: Engine, expand: bool = False) -> int:
+    """Everything you've allowed: each folder once, with its signatures, then
+    each file once, with its signatures. A file that a folder covers (same
+    signature, inside it) is counted under the folder; with `expand`
+    (--list-allowed-all) it's also listed there, one level in. Returns how
+    many folders and files were listed."""
+    folders, files, gone = _gather(engine)
     if not folders and not files and not gone:
         print("Nothing is allowed. (ensign-scan --allow PATH marks a flagged file as a false positive.)")
         return 0
-
-    detail = " " * 6
     if folders:
-        print(f"\n=== FOLDERS YOU ALLOWED ({len(folders)}) ===")
-        print("A folder allows nothing by itself: each file in it is allowed by its own content. "
-              "Undo one with --unallow-folder FOLDER --signature NAME.")
-        for folder, entry in folders.items():
-            print_unwrapped(f"\n  Folder: {shown(folder)}")
-            width = max(len(shown(t)) for t, *_ in entry["signatures"])
-            for threat, first, last, now_allowed in entry["signatures"]:
-                again = f", last run {last:%Y-%m-%d}" if last.date() != first.date() else ""
-                plural = "s" if now_allowed != 1 else ""
-                print(f"{detail}{shown(threat):<{width}}  {now_allowed} file{plural} allowed · "
-                      f"since {first:%Y-%m-%d}{again}")
-            if entry["infected"]:
-                n = entry["infected"]
-                print_unwrapped(f"{detail}[red]●[/red] {n} file{'s' if n != 1 else ''} here "
-                                f"{'are' if n != 1 else 'is'} infected now and not allowed: "
-                                f"{_command('--list-infected', folder)}")
-
-    def print_files(title: str, entries: dict, note: str) -> None:
-        print(f"\n=== {title} ({len(entries)}) ===")
-        print(note)
-        for key, entry in sorted(entries.items()):
-            path = key if isinstance(key, str) else key[0]
-            print_unwrapped(f"\n  File: {shown(path)}")
-            width = max(len(shown(t)) for t, _ in entry["signatures"])
-            for threat, at in sorted(entry["signatures"], key=lambda s: s[0]):
-                on = f"allowed {at:%Y-%m-%d}"
-                print(f"{detail}{shown(threat):<{width}}  {on}")
-            print(f"{detail}SHA-256: {entry['hash']}")
-
+        _print_folders(folders, expand)
+        if not expand:
+            print(f"\n{_L1}ensign-scan --list-allowed-all also lists the files in each folder.")
     if files:
-        print_files("FILES YOU ALLOWED", files, "Undo one with --unallow PATH.")
+        _print_files("FILES YOU ALLOWED", files, "Undo one with --unallow PATH.")
     if gone:
-        print_files("ALLOWED, BUT NOT ON DISK NOW", gone,
-                    "No tracked file has this content right now; shown where it was when you "
-                    "allowed it. If it comes back unchanged, it's still allowed.")
+        _print_files("ALLOWED, BUT NOT ON DISK NOW", gone,
+                     "No tracked file has this content right now; shown where it was when you "
+                     "allowed it. If it comes back unchanged, it's still allowed.")
     return len(folders) + len(files) + len(gone)

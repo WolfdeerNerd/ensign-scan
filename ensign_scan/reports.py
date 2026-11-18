@@ -533,7 +533,7 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
             results.append({"filepath": filepath, "threat": threat, "scanned": scanned})
         print()
         _note("›", "Think it's a false positive? ensign-scan --clamav-report PATH checks the file "
-              "again and prepares a report for ClamAV (nothing is sent for you).")
+              "again and prepares a report for ClamAV (nothing is sent for you).", indent=len(_DETAIL))
     return results
 
 
