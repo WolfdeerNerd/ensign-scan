@@ -142,7 +142,13 @@ for raw, needle in (({"sweep_huge_files": "no"}, "true or false"),
                     ({"rescan_after_signature_updates": 7.5}, "whole number"),
                     ({"scan_targets": "~/Downloads"}, "list of paths"),
                     ({"excludes": [1, 2]}, "list of paths"),
-                    ({"clamd_socket": 5}, "path in quotes")):
+                    ({"clamd_socket": 5}, "path in quotes"),
+                    ({"data_dir": 5}, "path in quotes"),
+                    ({"data_dir": "ensign-data"}, "start with / or ~/"),
+                    ({"excludes": ["Downloads/big"]}, "start with / or ~/"),
+                    ({"scan_targets": ["~/ok", "relative"]}, "start with / or ~/"),
+                    ({"custom_secrets": "x"}, "must be a table"),
+                    ({"custom_threats": ["a"]}, "must be a table")):
     try:
         Config._from_dict(raw, source="t")
     except ValueError as exc:
@@ -150,6 +156,7 @@ for raw, needle in (({"sweep_huge_files": "no"}, "true or false"),
     else:
         raise AssertionError(f"accepted {raw}")
 assert Config._from_dict({"sweep_huge_files": False, "max_workers": 4}, source="t").max_workers == 4
+assert Config._from_dict({"data_dir": "~/x", "excludes": ["/a", "~/b", "$HOME/c"]}, source="t").excludes
 with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as bad:
     bad.write("not = valid = toml\n")
 try:

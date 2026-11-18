@@ -79,6 +79,27 @@ _INT_SETTINGS = ("max_workers", "cpu_share", "max_clamscans", "clamscan_memory_p
                  "log_max_total_mb", "signature_max_age_days")
 
 
+def _check_paths(raw: dict, source: str) -> None:
+    """data_dir and the path lists must name absolute places. A relative
+    data_dir put the database wherever Ensign was started from (a different
+    one for a timer than for your shell), and a relative exclude or target
+    never matched anything, with no warning."""
+    if "data_dir" in raw:
+        value = raw["data_dir"]
+        if not isinstance(value, str):
+            raise ValueError(f"{source}: data_dir must be a path in quotes, got {value!r}")
+        if not _expand(value).is_absolute():
+            raise ValueError(f'{source}: data_dir must start with / or ~/, got {value!r}')
+    for key in ("scan_targets", "snapshot_roots", "excludes"):
+        value = raw.get(key)
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            continue  # the type check after this one names that problem
+        relative = [v for v in value if not _expand(v).is_absolute()]
+        if relative:
+            raise ValueError(f"{source}: every entry in {key} must start with / or ~/, "
+                             f"got {relative[0]!r}")
+
+
 def _check_types(values: dict, source: str) -> None:
     for key in _BOOL_SETTINGS:
         if key in values and not isinstance(values[key], bool):
@@ -245,6 +266,7 @@ class Config:
         for key in raw.keys() - known:
             print(f"[ensign] Warning: unknown config key {key!r} ignored")
 
+        _check_paths(raw, source)
         data_dir = _expand(raw.get("data_dir", DEFAULT_DATA_DIR))
         kwargs: dict = {
             "db_url": f"sqlite:///{data_dir / 'system.db'}",
@@ -266,6 +288,10 @@ class Config:
                                       or not all(isinstance(v, str) for v in value)):
                 raise ValueError(f'{source}: {key} must be a list of paths in quotes, like '
                                  f'["~/Downloads"], got {value!r}')
+        for key in ("custom_secrets", "custom_threats", "custom_pacman_reasons"):
+            if key in raw and not isinstance(raw[key], dict):
+                raise ValueError(f"{source}: {key} must be a table ([{key}] with entries under "
+                                 f"it), got {raw[key]!r}")
         if "scan_targets" in raw:
             kwargs["scan_targets"] = tuple(_expand(t) for t in raw["scan_targets"])
         if "snapshot_roots" in raw:
