@@ -1143,8 +1143,9 @@ class Scanner:
 
         Also re-swept: files the sweep already judged ("sweep:" hits, allowed
         or not, and "swept:" misses) once the signatures have moved on by
-        rescan_after_signature_updates, so a fixed false positive or a new
-        signature applies to them too.
+        resweep_after_signature_updates or resweep_after_days have passed,
+        whichever comes first, so a fixed false positive or a new signature
+        applies to them too.
 
         Each file is read in overlapping slices, and each slice goes to
         clamd like an ordinary file -- through an in-memory file (memfd)
@@ -1170,14 +1171,20 @@ class Scanner:
                                         ~FileRecord.scan_result.like(f"%{SWEPT_YARA_MARK}%"),
                                         ~FileRecord.scan_result.like(f"%{SWEPT_YARA_TIMEOUT}%")))
         criteria = [unswept]
-        threshold = self.config.rescan_after_signature_updates
-        if threshold > 0 and self._sig_version is not None:
+        stale_if = []
+        versions = self.config.resweep_after_signature_updates
+        if versions > 0 and self._sig_version is not None:
+            stale_if += [FileRecord.sig_version.is_(None),
+                         FileRecord.sig_version <= self._sig_version - versions,
+                         FileRecord.sig_version > self._sig_version]
+        days = self.config.resweep_after_days
+        if days > 0:
+            stale_if += [FileRecord.last_scanned.is_(None),
+                         FileRecord.last_scanned < utcnow() - timedelta(days=days)]
+        if stale_if:
             judged = or_(FileRecord.scan_result.like(f"{SWEEP_HIT_PREFIX}%"),
                          FileRecord.scan_result.like(f"{SWEPT_PREFIX}%"))
-            stale = or_(FileRecord.sig_version.is_(None),
-                        FileRecord.sig_version <= self._sig_version - threshold,
-                        FileRecord.sig_version > self._sig_version)
-            criteria = [or_(unswept, and_(judged, stale))]
+            criteria = [or_(unswept, and_(judged, or_(*stale_if)))]
         if roots:
             criteria.append(or_(*[c for r in roots for c in (
                 FileRecord.filepath == str(r).rstrip("/"), path_under(FileRecord.filepath, str(r)))]))
@@ -1187,6 +1194,19 @@ class Scanner:
         print(f"\nSweeping {len(rows)} file(s) too large for ClamAV…")
         if not rows:
             return 0
+        total = sum(r[2] or 0 for r in rows)
+        # A rough guess from measured speeds: slices and the YARA pass each
+        # read about 200-250 MB/s on a desktop, one after the other.
+        minutes = max(1, round(total / (110 * 10**6) / 60))
+        again = []
+        if self.config.resweep_after_days > 0:
+            again.append(f"every {self.config.resweep_after_days} days")
+        if self.config.resweep_after_signature_updates > 0:
+            again.append(f"{self.config.resweep_after_signature_updates} signature updates")
+        recheck = f", and a re-check after {' or '.join(again)}" if again else ""
+        print(f"[dim]{human_size(total)} to read: roughly {minutes} min, more on a slow disk. "
+              f"Later runs sweep only new or changed files{recheck}. To turn the sweep off: "
+              f"sweep_huge_files = false in your config.[/dim]")
         limit = self._scan_limit()
         slice_size = min(_SWEEP_SLICE_MAX, limit - 1)  # clamd must scan each slice whole
         overlap = min(_SWEEP_OVERLAP_MAX, slice_size // 4)
