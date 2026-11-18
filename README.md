@@ -2,7 +2,7 @@
 
 **A local-first ClamAV file scanner for Linux.**
 
-[Install](#installation) · [Usage](#usage) · [Roadmap](https://github.com/WolfdeerNerd/ensign-scan/blob/main/ROADMAP.md) · [Security](https://github.com/WolfdeerNerd/ensign-scan/blob/main/SECURITY.md) · [Report a bug](https://github.com/WolfdeerNerd/ensign-scan/issues/new/choose)
+[Install](#installation) · [Usage](#usage) · [Roadmap](https://github.com/WolfdeerNerd/ensign-scan/blob/main/ROADMAP.md) · [Security](https://github.com/WolfdeerNerd/ensign-scan/blob/main/SECURITY.md) · [Contributing](https://github.com/WolfdeerNerd/ensign-scan/blob/main/CONTRIBUTING.md) · [Report a bug](https://github.com/WolfdeerNerd/ensign-scan/issues/new/choose)
 
 Greetings!
 
