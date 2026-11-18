@@ -524,10 +524,13 @@ class Status:
     # Something went wrong (shown in red), as opposed to "not installed",
     # which is a choice (shown in yellow).
     failed: bool = True
+    # Rules are stored and can be loaded (update(..., load=False) leaves
+    # `loaded` empty on purpose, to compile them only when needed).
+    available: bool = False
 
 
 def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_hand: bool = False,
-           force: bool = False) -> Status:
+           force: bool = False, load: bool = True) -> Status:
     """Rebuild the rules if the databases changed since the last build, or
     the last try failed, then load them. `by_hand` (--update-rules):
     rebuild in any case, and accept a big drop in the rule count, with a
@@ -586,6 +589,11 @@ def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_ha
             _write_state(data_dir, state)
         except OSError:
             pass
+    if not load and state.get("counts"):
+        # Up to date (or rebuilt, which compiled them already): report from
+        # the stored state. Compiling 50,000 rules takes seconds and
+        # hundreds of MB, so it waits until a file actually needs them.
+        return _unloaded_status(data_dir, engine, state, error, warning, rebuilt)
     loaded = None
     if state.get("counts"):
         try:
@@ -620,5 +628,26 @@ def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_ha
                f"signature{'' if loaded.count == 1 else 's'}, {word} "
                f"({engine.label}).")
     if warning:
-        return Status(loaded, False, message + f" Note: {warning}.", rebuilt)
-    return Status(loaded, True, message, rebuilt)
+        return Status(loaded, False, message + f" Note: {warning}.", rebuilt, available=True)
+    return Status(loaded, True, message, rebuilt, available=True)
+
+
+def _unloaded_status(data_dir: Path, engine: yaraengine.Engine, state: dict, error: str | None,
+                     warning: str | None, rebuilt: bool) -> Status:
+    """update(..., load=False): the same messages, without compiling."""
+    present = all((rules_dir(data_dir) / f"clamav-gaps-{b}.yar").is_file() for b in MODULE_FOR_BUCKET)
+    if not present:
+        return Status(None, False, "YARA rules for files too large for ClamAV are missing. "
+                                   "Build them: ensign-scan --update-rules")
+    count = sum(state.get("counts", {}).values())
+    if error:
+        return Status(None, False, f"YARA rules for files too large for ClamAV couldn't be updated "
+                                   f"({error}). Using the rules from {state.get('built_at', '?')}, "
+                                   f"made from older signatures. Retry: ensign-scan --update-rules",
+                      available=True)
+    word = "rebuilt just now" if rebuilt else "up to date"
+    message = (f"YARA rules for files too large for ClamAV: {count} "
+               f"signature{'' if count == 1 else 's'}, {word} ({engine.label}).")
+    if warning:
+        return Status(None, False, message + f" Note: {warning}.", rebuilt, available=True)
+    return Status(None, True, message, rebuilt, available=True)

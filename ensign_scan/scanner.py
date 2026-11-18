@@ -450,6 +450,10 @@ class Scanner:
         # YARA rules for what the sweep misses (bigrules.py), loaded by
         # prepare_big_rules() before a run that sweeps; None: sweep only.
         self.big_rules: bigrules.Loaded | None = None
+        # The rules exist and the sweep may compile them (prepare_big_rules
+        # checks them before the scan, compiling them only once a file
+        # actually needs them).
+        self._big_rules_available = False
         # The child process that runs the YARA pass, during a sweep (yarachild.py).
         self._yara_worker: yarachild.Worker | None = None
 
@@ -1127,14 +1131,35 @@ class Scanner:
 
     def prepare_big_rules(self, by_hand: bool = False) -> bigrules.Status:
         """Bring the YARA rules for the sweep's blind spots up to date with
-        ClamAV's databases (rebuilding them if freshclam changed them) and
-        load them. The caller prints the status, at the top of the run.
-        Needs only clamd's config (for its DatabaseDirectory), not clamd."""
-        limits = self.limits or self._read_limits()
-        db_dir = Path(limits.database_dir or bigrules.DEFAULT_DATABASE_DIR)
-        status = bigrules.update(self.config.data_dir, db_dir, yaraengine.find(), by_hand=by_hand)
+        ClamAV's databases (rebuilding them if freshclam changed them). The
+        caller prints the status, at the top of the run. The rules are only
+        compiled and self-tested here for --update-rules (`by_hand`); for a
+        run, that waits until the sweep has a file for them (_load_big_rules),
+        so a run with nothing to sweep doesn't pay seconds and hundreds of MB
+        for it. Needs only clamd's config (for its DatabaseDirectory)."""
+        status = bigrules.update(self.config.data_dir, self._rules_db_dir(), yaraengine.find(),
+                                 by_hand=by_hand, load=by_hand)
         self.big_rules = status.loaded
+        self._big_rules_available = status.available
         return status
+
+    def _rules_db_dir(self) -> Path:
+        limits = self.limits or self._read_limits()
+        return Path(limits.database_dir or bigrules.DEFAULT_DATABASE_DIR)
+
+    def _load_big_rules(self) -> None:
+        """Compile and self-test the rules, the first time a file needs them.
+        A failure is printed here, at the sweep: the sweep goes on with the
+        slices only."""
+        if self.big_rules is not None or not self._big_rules_available:
+            return
+        print("[dim]Loading the YARA rules for the sweep…[/dim]")
+        status = bigrules.update(self.config.data_dir, self._rules_db_dir(), yaraengine.find())
+        self.big_rules = status.loaded
+        self._big_rules_available = status.loaded is not None
+        if status.loaded is None:  # anything else was already said before the scan
+            colour = "bold red" if status.failed else "yellow"
+            print(f"[{colour}]{'✗' if status.failed else '!'} {shown(status.message)}[/{colour}]")
 
     def sweep_huge(self, roots: list[str] | None = None) -> int:
         """Sweep files ClamAV refused as too large (over ~2 GiB), within
@@ -1165,7 +1190,7 @@ class Scanner:
             FileRecord.threat_name == f"{LIMITS_EXCEEDED_PREFIX}.MaxFileSize",
             FileRecord.scan_result.like("clamscan:%"),  # ClamAV's own refusal, not yet swept
         )
-        if self.big_rules is not None:
+        if self.big_rules is not None or self._big_rules_available:
             # Swept before the YARA rules were there: once more, with them.
             unswept = or_(unswept, and_(FileRecord.scan_result.like(f"{SWEPT_PREFIX}%"),
                                         ~FileRecord.scan_result.like(f"%{SWEPT_YARA_MARK}%"),
@@ -1224,6 +1249,7 @@ class Scanner:
             room = max(1, (free - reserve) // slice_size)
         in_flight = max(1, min(self.workers, room))
         swept = 0
+        self._load_big_rules()
         self._yara_worker = (yarachild.Worker(self.big_rules.compiled, _YARA_TIMEOUT)
                              if self.big_rules is not None else None)
         try:
