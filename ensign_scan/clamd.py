@@ -455,11 +455,14 @@ class ClamdClient:
         self.socket_path = socket_path
         self.timeout = timeout
 
-    def _command(self, command: str) -> str:
+    def _command(self, command: str, end: bytes = b"\n") -> str:
         """Send one command and read the full reply.
 
-        clamd terminates replies with a newline; a single recv(4096)
-        can truncate long responses, so read until the terminator.
+        clamd terminates most replies with a newline; a single recv(4096)
+        can truncate long responses, so read until the reply ends with
+        `end`. STATS is several lines that a busy clamd writes a few at a
+        time and closes with "END": stopping at the first piece that ended
+        in a newline cut it short, before its THREADS line (see max_threads).
         """
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(self.timeout)
@@ -473,7 +476,7 @@ class ClamdClient:
                 if not data:
                     break
                 chunks.append(data)
-                if data.endswith(b"\n"):
+                if (b"".join(chunks) if len(chunks) > 1 else data).endswith(end):
                     break
         # clamd's reply repeats the path; decode it the same way.
         return b"".join(chunks).decode("utf-8", "surrogateescape").strip()
@@ -493,7 +496,7 @@ class ClamdClient:
         the true ceiling for useful worker-pool size.
         """
         try:
-            stats = self._command("STATS")
+            stats = self._command("STATS", end=b"END\n")
         except OSError:
             return None
         match = re.search(r"THREADS:.*?\bmax\s+(\d+)", stats)

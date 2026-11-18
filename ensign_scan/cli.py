@@ -379,7 +379,11 @@ def run(args: argparse.Namespace, config: Config) -> int:
         suggest_fixes(scanner.engine, paths=args.targets or None)
         return 0
     auto = " (auto)" if config.max_workers <= 0 else ""
-    print(f" Workers:  {scanner.workers}{auto}")
+    workers = scanner.workers
+    if config.max_workers <= 0 and scanner.clamd_max_threads is None:
+        # The fallback, said out loud: a quiet 5 looked like a real answer.
+        auto = " (auto; couldn't read clamd's MaxThreads, so a safe default)"
+    print(f" Workers:  {workers}{auto}")
     scan = not args.no_scan
     hint = scanner.thread_hint() if scan else None  # --no-scan doesn't use clamd
     if hint:
