@@ -88,7 +88,8 @@ def parse_args() -> argparse.Namespace:
                              "Contains no paths, usernames, hostnames or file names.")
     parser.add_argument("--sweep", action="store_true",
                         help="After this scan, sweep files too large for ClamAV (over ~2 GiB) in "
-                             "slices (as sweep_huge_files = true does for every scan)")
+                             "slices. Only needed with sweep_huge_files = false: the sweep is on "
+                             "by default")
     parser.add_argument("--update-rules", action="store_true",
                         help="Rebuild the YARA rules for files too large for ClamAV from ClamAV's "
                              "current signatures, check them, then exit. Runs by itself before "

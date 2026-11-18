@@ -32,6 +32,7 @@ from .config import DEFAULT_CONFIG_PATH, DEFAULT_DATA_DIR, HOME, HOSTNAME, Confi
 # Settings whose values are numbers or booleans -- safe to print as-is.
 _SAFE_VALUE_SETTINGS = (
     "max_workers", "rescan_after_days", "rescan_after_signature_updates",
+    "sweep_huge_files", "resweep_after_signature_updates", "resweep_after_days",
     "infected_alert_seconds", "infected_alert_only_while_gaming",
     "log_keep_days", "log_max_total_mb", "signature_max_age_days",
     "package_verification",

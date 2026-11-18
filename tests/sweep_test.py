@@ -29,10 +29,12 @@ ROOT = _Path(__file__).resolve().parent.parent
 _sys_path.path.insert(0, str(ROOT))
 
 import contextlib  # noqa: E402
+import dataclasses  # noqa: E402
 import io  # noqa: E402
 import os  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
+from datetime import timedelta  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from sqlalchemy.orm import Session  # noqa: E402
@@ -40,7 +42,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 from ensign_scan import allowlist, scanner as scanner_mod  # noqa: E402
 from ensign_scan.clamd import ClamdLimits, ScanOutcome  # noqa: E402
 from ensign_scan.config import Config  # noqa: E402
-from ensign_scan.models import FileRecord, ScanStatus  # noqa: E402
+from ensign_scan.models import FileRecord, ScanStatus, utcnow  # noqa: E402
 from ensign_scan.scanner import Scanner, _sweep_slices  # noqa: E402
 
 LIMIT = 64 * 1024
@@ -129,7 +131,8 @@ try:
         (tree / "empty.img").write_bytes(b"\0" * size)
         Path(d, "data").mkdir()
         config = Config(db_url=f"sqlite:///{d}/data/system.db", log_file=Path(d, "data", "e.txt"),
-                        max_workers=3, rescan_after_signature_updates=1)
+                        max_workers=3, rescan_after_signature_updates=1,
+                        resweep_after_signature_updates=1, resweep_after_days=0)
         clamd = FakeClamd()
 
         def scanner():
@@ -199,6 +202,27 @@ try:
         assert statuses(engine)["deep.img"][0] == "incomplete"
         print("changed file test passed ✓")
 
+        # --- re-sweep by days: an unchanged swept file waits until it is due -------------------
+        def resweep_with(**kw):
+            clamd.slices.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                Scanner(dataclasses.replace(config, **kw), clamd=clamd).sweep_huge([str(tree)])
+            return bool(clamd.slices)
+
+        assert not resweep_with(resweep_after_signature_updates=30, resweep_after_days=30), \
+            "swept moments ago: not due"
+        with Session(engine) as session:   # pretend the last sweep was 31 days ago
+            session.query(FileRecord).filter(FileRecord.scan_result.like("swept:%")).update(
+                {FileRecord.last_scanned: utcnow() - timedelta(days=31)}, synchronize_session=False)
+            session.commit()
+        assert not resweep_with(resweep_after_signature_updates=30, resweep_after_days=0), \
+            "days trigger off: still not due"
+        assert resweep_with(resweep_after_signature_updates=30, resweep_after_days=30), \
+            "31 days since the last sweep: due, though the signatures barely moved"
+        assert not resweep_with(resweep_after_signature_updates=30, resweep_after_days=30), \
+            "just re-swept: not due again"
+        print("re-sweep by days test passed ✓")
+
         # --- clamd limits too small to sweep: skipped with a warning, nothing changed --------
         class TinyClamd(FakeClamd):
             def limits(self):
@@ -214,7 +238,8 @@ try:
 finally:
     scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available, scanner_mod.clamscan_user = real
 
-assert Config().sweep_huge_files is False, "off by default"
+assert Config().sweep_huge_files is True, "on by default"
+assert (Config().resweep_after_signature_updates, Config().resweep_after_days) == (30, 30)
 
 # --- real clamd (CI) --------------------------------------------------------------------------
 socket_path = os.environ.get("ENSIGN_TEST_CLAMD_SOCKET")

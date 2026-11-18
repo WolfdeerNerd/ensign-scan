@@ -19,6 +19,8 @@ cfg = Config()
 assert cfg.max_workers == 0  # 0 = auto
 assert cfg.signature_max_age_days == 3
 assert cfg.rescan_after_signature_updates == 7  # default: about weekly
+assert cfg.sweep_huge_files is True  # the sweep is on by default
+assert (cfg.resweep_after_signature_updates, cfg.resweep_after_days) == (30, 30)
 assert cfg.infected_alert_seconds == 60
 assert cfg.infected_alert_only_while_gaming is True
 assert cfg.log_keep_days == 90 and cfg.log_max_total_mb == 2048
@@ -122,3 +124,13 @@ with tempfile.TemporaryDirectory() as _d:
 print("EXAMPLE_CONFIG sync test passed ✓")
 
 print("All config tests passed ✓")
+
+# resweep_after_*: 7-90 allowed, 0 = off, others clamped with a warning
+for key in ("resweep_after_signature_updates", "resweep_after_days"):
+    for value, expect in ((30, 30), (0, 0), (3, 7), (400, 90)):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cfg = Config._from_dict({key: value}, source="t")
+        assert getattr(cfg, key) == expect, (key, value, getattr(cfg, key))
+        assert ("outside 7-90" in buf.getvalue()) == (value != expect), (key, value, buf.getvalue())
+print("resweep settings test passed ✓")

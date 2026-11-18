@@ -244,8 +244,9 @@ def incomplete_report(engine: Engine, top: int = 10, paths: list[str] | None = N
         print(f"{swept} of them were swept in slices and nothing was found in their raw bytes, "
               f"which doesn't cover what's inside compressed archives.")
     elif any((r[2] or "").endswith("MaxFileSize") for r in rows):
-        print("For files over 2 GiB, a sweep in slices can look for malware bytes in them: "
-              "ensign-scan --sweep, or sweep_huge_files = true in the config.")
+        print("For files over 2 GiB, a sweep in slices can look for malware bytes in them. "
+              "It's on by default; if you turned it off (sweep_huge_files = false), "
+              "ensign-scan --sweep runs it once.")
     for filepath, size, reason, result in rows[:top]:
         why = reason or result or "unknown"
         if (result or "").startswith("swept: "):

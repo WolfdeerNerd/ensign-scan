@@ -73,6 +73,11 @@ def _expand(value: str | Path) -> Path:
 # clean files unchecked for over a month. 0 (off) is always allowed.
 SIGNATURE_RESCAN_MIN = 7
 SIGNATURE_RESCAN_MAX = 31
+# Allowed range for resweep_after_signature_updates and resweep_after_days:
+# a re-sweep reads every large file again, so not more often than weekly,
+# and not less often than about every three months. 0 (off) is allowed.
+RESWEEP_MIN = 7
+RESWEEP_MAX = 90
 CLAMSCAN_MEMORY_PERCENT_MIN = 5
 CPU_SHARE_MIN = 10
 CPU_SHARE_MAX = 100
@@ -101,10 +106,19 @@ class Config:
     # CLAMSCAN_MEMORY_PERCENT_MIN..CLAMSCAN_MEMORY_PERCENT_MAX, with a warning.
     clamscan_memory_percent: int = 25
     # Sweep files too large for ClamAV (over ~2 GiB) in overlapping slices
-    # after the scan: catches raw byte patterns, but not what's inside
-    # compressed archives, so it never marks a file clean. Off by default;
-    # --sweep runs it once.
-    sweep_huge_files: bool = False
+    # after the scan, plus the YARA pass for what slices miss: catches raw
+    # byte patterns, but not what's inside compressed archives, so it never
+    # marks a file clean. On by default; false turns it off (--sweep then
+    # runs it for one scan).
+    sweep_huge_files: bool = True
+    # Sweep an unchanged, already-swept file again once the signatures have
+    # moved this many versions on, or this many days have passed since its
+    # last sweep, whichever comes first. Longer than for ordinary files: a
+    # re-sweep reads every large file in full again. A config file may set
+    # RESWEEP_MIN..RESWEEP_MAX (clamped, with a warning), or 0 to turn that
+    # trigger off. A changed file is swept again on the next run regardless.
+    resweep_after_signature_updates: int = 30
+    resweep_after_days: int = 30
     rescan_after_days: int = 90
     # Rescan a clean file once the signature database has moved this many
     # versions past the one it was last scanned under. Usually about one
@@ -191,6 +205,7 @@ class Config:
         known = {
             "data_dir", "clamd_socket", "max_workers", "cpu_share", "max_clamscans",
             "clamscan_memory_percent", "sweep_huge_files",
+            "resweep_after_signature_updates", "resweep_after_days",
             "rescan_after_days", "rescan_after_signature_updates",
             "infected_alert_seconds", "infected_alert_only_while_gaming",
             "log_keep_days", "log_max_total_mb",
@@ -211,7 +226,8 @@ class Config:
                     "rescan_after_days",
                     "rescan_after_signature_updates", "infected_alert_seconds",
                     "infected_alert_only_while_gaming", "log_keep_days",
-                    "log_max_total_mb", "signature_max_age_days", "sweep_huge_files"):
+                    "log_max_total_mb", "signature_max_age_days", "sweep_huge_files",
+                    "resweep_after_signature_updates", "resweep_after_days"):
             if key in raw:
                 kwargs[key] = raw[key]
         if "scan_targets" in raw:
@@ -238,6 +254,14 @@ class Config:
                 print(f"[ensign] Warning: rescan_after_signature_updates = {n} is outside "
                       f"{SIGNATURE_RESCAN_MIN}-{SIGNATURE_RESCAN_MAX}; using {clamped}")
                 kwargs["rescan_after_signature_updates"] = clamped
+        for key in ("resweep_after_signature_updates", "resweep_after_days"):
+            n = kwargs.get(key)
+            if isinstance(n, int) and not isinstance(n, bool) and n != 0:
+                clamped = min(max(n, RESWEEP_MIN), RESWEEP_MAX)
+                if clamped != n:
+                    print(f"[ensign] Warning: {key} = {n} is outside {RESWEEP_MIN}-{RESWEEP_MAX}; "
+                          f"using {clamped}")
+                    kwargs[key] = clamped
         if "cpu_share" in kwargs:
             n = kwargs["cpu_share"]
             clamped = min(max(n, CPU_SHARE_MIN), CPU_SHARE_MAX)
@@ -296,12 +320,21 @@ max_clamscans = 0
 # RAM, however much happens to be free (5-75; one always runs).
 clamscan_memory_percent = 25
 
-# ClamAV can't scan files over about 2 GiB at all. true = after each scan,
-# sweep such files in overlapping slices through clamd: it finds malware
-# bytes sitting in the raw file, but not inside compressed archives, so a
-# swept file is never called clean. Reads each one once more, only when it
-# is new or has changed. --sweep runs it for a single scan.
-sweep_huge_files = false
+# ClamAV can't scan files over about 2 GiB at all. true (the default) =
+# after each scan, sweep such files in overlapping slices through clamd,
+# then run the YARA pass for the signatures slices can miss: it finds
+# malware bytes sitting in the raw file, but not inside compressed
+# archives, so a swept file is never called clean. Each file is read once
+# more when it is new or has changed, which on a big game library takes a
+# while the first time. false = off (--sweep then runs it for one scan).
+sweep_huge_files = true
+
+# Sweep an unchanged file again once the signatures have moved this many
+# versions on (about one a day), or this many days have passed since its
+# last sweep, whichever comes first. Allowed range 7-90 (anything else is
+# clamped, with a warning); 0 turns that trigger off.
+resweep_after_signature_updates = 30
+resweep_after_days = 30
 rescan_after_days = 90
 
 # Rescan an unchanged, previously-clean file once the virus-signature
