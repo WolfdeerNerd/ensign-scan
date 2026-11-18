@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 import os
 import textwrap
+from pathlib import Path
 
 from rich import get_console, print
 from rich.cells import cell_len
@@ -465,19 +466,23 @@ def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, in
 
 
 def list_infected(engine: Engine, paths: list[str] | None = None,
-                  files_per_threat: int = 25, more_elsewhere: bool = False) -> list[dict]:
+                  files_per_threat: int | None = 25, more_elsewhere: bool = False) -> list[dict]:
     """Print infected files grouped by threat name, so a signature that hits
     many files (a game's assets, say) is explained once, not once per file.
     Returns one dict per infected file, as before.
 
     more_elsewhere: infections were also found that couldn't be saved (see
-    unsaved_report). Then "none found" would be false, so it isn't printed."""
+    unsaved_report). Then "none found" would be false, so it isn't printed.
+
+    files_per_threat: None lists every file (--list-infected)."""
+    from .fpreport import _personal_folder  # fpreport pulls in diagnostics; only needed here
     with Session(engine) as session:
         query = session.query(
             FileRecord.filepath,
             FileRecord.threat_name,
             FileRecord.last_scanned,
             FileRecord.scan_result,
+            FileRecord.file_hash,
         ).filter(FileRecord.scan_status == ScanStatus.INFECTED.value)
         scope = _scope_filter(paths)
         if scope is not None:
@@ -507,18 +512,28 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
             if explanation.false_positive_note:
                 label = "Hint" if explanation.decoded else "Known false positive"
                 _note("›", explanation.false_positive_note, label=label)
-        for i, (filepath, _t, scanned, detail) in enumerate(group):
-            if i < files_per_threat:
+        for i, (filepath, _t, scanned, detail, digest) in enumerate(group):
+            if files_per_threat is None or i < files_per_threat:
                 # Each file is its own block: the path, then its details
                 # indented under it, so a long list reads down the paths.
                 print_unwrapped(f"\n  File: {shown(filepath)}")
                 print(f"{_DETAIL}Scanned: {scanned} UTC")
                 print_unwrapped(f"{_DETAIL}Details: {shown((detail or '')[:200])}")
                 _note("›", _file_facts(filepath), label="Context", indent=len(_DETAIL))
+                # The hash of the content that was flagged: paste it into
+                # VirusTotal's search. A lookup sends only the hash, which
+                # can't be turned back into the file; uploading sends the file.
+                print(f"{_DETAIL}SHA-256: {digest}")
+                if _personal_folder(Path(filepath)):
+                    _note("›", "In a personal folder: look up the hash, don't upload the file.",
+                          indent=len(_DETAIL))
             elif i == files_per_threat:
                 print(f"\n  … and {len(group) - files_per_threat} more files with this "
                       f"threat (all are recorded in the database)")
             results.append({"filepath": filepath, "threat": threat, "scanned": scanned})
+        print()
+        _note("›", "Think it's a false positive? ensign-scan --clamav-report PATH checks the file "
+              "again and prepares a report for ClamAV (nothing is sent for you).")
     return results
 
 
