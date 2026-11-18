@@ -20,7 +20,9 @@ Checked here, with a small made-up signature database:
     next file gets a new child; the child leaves no core dump (it holds
     pieces of scanned files); a timeout is reported and marked, so the
     file isn't swept again every run;
-  * a different yara-x version rebuilds the rules.
+  * a different yara-x version rebuilds the rules;
+  * a run checks the rules before scanning but compiles them only when
+    the sweep has a file for them.
 
 Needs yara-x for most of it (skipped, with a note, without).
 
@@ -311,6 +313,8 @@ def check(engine: yaraengine.Engine) -> None:
                 with contextlib.redirect_stdout(io.StringIO()):
                     if with_rules:
                         assert s.prepare_big_rules().ok
+                        # Checked, but not compiled until a file needs them.
+                        assert s.big_rules is None and s._big_rules_available
                     s.scan_tree(tree)
                     s.sweep_huge([str(tree)])
                 with Session(s.engine) as session:
@@ -326,6 +330,12 @@ def check(engine: yaraengine.Engine) -> None:
             assert after["plain.img"][0] == "incomplete" and \
                 scanner_mod.SWEPT_YARA_MARK in after["plain.img"][2], after["plain.img"]
             assert run(with_rules=True)["plain.img"] == after["plain.img"], "not swept a third time"
+            # Nothing to sweep: the rules are never compiled.
+            idle = Scanner(config, clamd=clamd)
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert idle.prepare_big_rules().ok
+                idle.sweep_huge([str(tree)])
+            assert idle.big_rules is None, "compiled with nothing to sweep"
         finally:
             (scanner_mod.scan_fds_with_clamscan, scanner_mod.clamscan_cli_available,
              scanner_mod.clamscan_user, yaraengine.find) = saved
