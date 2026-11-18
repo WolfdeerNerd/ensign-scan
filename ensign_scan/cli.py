@@ -161,7 +161,25 @@ def greet(config: Config) -> None:
     print("-" * 71)
 
 
+# Every run ends with a blank line before the shell prompt, as the scan's
+# footer does. The footer prints its own; _end_gap() adds it for the rest.
+_ended_with_gap = False
+
+
+def _end_gap() -> None:
+    if not _ended_with_gap:
+        print()
+
+
 def main() -> int:
+    try:
+        return _main()
+    finally:
+        _end_gap()
+
+
+def _main() -> int:
+    global _ended_with_gap
     args = parse_args()
     # Absolute, normalized paths: the database, the excludes and the scoped
     # reports all work on absolute paths, so "cd ~ && ensign-scan Downloads"
@@ -207,6 +225,7 @@ def main() -> int:
     finally:
         if notice:
             _print_legacy(notice)
+            _ended_with_gap = False
 
 
 def _print_legacy(notice: str) -> None:
@@ -497,6 +516,8 @@ def run(args: argparse.Namespace, config: Config) -> int:
     print(" Feel free to call upon me again.")
     print("     — Ensign")
     print()
+    global _ended_with_gap
+    _ended_with_gap = True
     # Non-zero when something needs attention, so a script or a scheduled
     # run can act on it: infected files (in the database or unsaved) first,
     # then results missing from the database. An infected file that has
