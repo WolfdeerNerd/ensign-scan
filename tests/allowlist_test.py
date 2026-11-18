@@ -133,7 +133,9 @@ with tempfile.TemporaryDirectory() as d:
     summary, text = quiet(reports.scan_summary, engine)
     assert summary["allowed"] == 2 and summary["infected"] == 1 and "Allowed by you: 2" in text
     count, text = quiet(allowlist.allowed_report, engine)
-    assert count == 2 and "ALLOWED BY YOU (2 files)" in text and "Test.Evil" in text, text
+    # two copies of one allowed content: the --list-allowed layout, two files
+    assert count == 2 and "FILES YOU ALLOWED (2)" in text and "Test.Evil" in text, text
+    assert "ALLOWED BY YOU" not in text, "replaced by FILES YOU ALLOWED"
     count, _ = quiet(allowlist.allowed_report, engine, paths=[str(tree / "sub")])
     assert count == 1, "scoped like the other reports"
     count, text = quiet(allowlist.list_allowed, engine)

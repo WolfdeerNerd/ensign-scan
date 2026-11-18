@@ -97,4 +97,40 @@ with tempfile.TemporaryDirectory() as d:
     assert f"SHA-256: {'t' * 64}" in tool, tool
     assert "ALLOWED, BUT NOT ON DISK NOW (1)" in flat and "old/x.bin" in flat, flat
 
+    # --- --list-allowed-all: the folder's files, one level in ----------------------------------
+    out = ensign("--list-allowed-all")
+    folder_part = out[out.index("Folder:"):out.index("FILES YOU ALLOWED")]
+    for i in range(3):
+        assert f"\n      File: {d}/Games/foo/a{i}.js" in folder_part, folder_part
+    assert "\n          Js.Downloader.X  allowed 2026-11-01" in folder_part, folder_part
+    assert f"\n          SHA-256: {'0' * 64}" in folder_part, folder_part
+    assert f"\n  File: {d}/Downloads/tool.exe" in out, "files on their own stay at the top level"
+    assert "--list-allowed-all also lists" not in out
+
+    # --- the end of a run: the same layout, scoped to the run, files capped ---------------------
+    sys.path.insert(0, str(ROOT))
+    os.environ["HOME"] = d
+    import contextlib
+    import io
+
+    from ensign_scan import allowlist
+    from ensign_scan.config import Config
+    from ensign_scan.db import make_engine
+    engine = make_engine(Config.load().db_url)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        n = allowlist.allowed_report(engine, paths=[f"{d}/Downloads"])
+    flat = " ".join(buf.getvalue().split())
+    assert n == 1 and "FILES YOU ALLOWED (1)" in flat and "FOLDERS YOU ALLOWED" not in flat, flat
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        n = allowlist.allowed_report(engine, paths=[f"{d}/Games/foo/a0.js"])
+    flat = " ".join(buf.getvalue().split())
+    assert n == 1 and "FOLDERS YOU ALLOWED (1)" in flat, "a folder the scope is inside of shows"
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        allowlist.allowed_report(engine, top=0)
+    assert "and 1 more: ensign-scan --list-allowed" in buf.getvalue(), buf.getvalue()
+
+    # --- the false-positive pointer sits in line with the file's details ----------------------
+    out = ensign("--list-infected")
+    assert "\n      › Think it's a false positive?" in out, out
+
 print("list views test passed ✓")

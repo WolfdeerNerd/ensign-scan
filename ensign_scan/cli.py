@@ -110,6 +110,8 @@ def parse_args() -> argparse.Namespace:
                              "in the infected list")
     parser.add_argument("--list-allowed", action="store_true",
                         help="List the folders and files you've allowed, then exit")
+    parser.add_argument("--list-allowed-all", action="store_true",
+                        help="Like --list-allowed, but also list the files inside each allowed folder")
     parser.add_argument("--list-infected", action="store_true",
                         help="List the infected files from the last scans (all of them, or only "
                              "under the paths given), with their SHA-256, then exit. Doesn't scan")
@@ -226,7 +228,8 @@ def _after_config(args, config: Config) -> int:
     writes = (args.purge_missing or args.rescan_errors or args.allow or args.unallow
               or args.allow_folder or args.unallow_folder or args.acknowledge or args.acknowledge_all
               or args.update_rules)
-    readonly = (args.verify_packages or args.suggest_fixes or args.list_allowed or args.list_infected
+    readonly = (args.verify_packages or args.suggest_fixes or args.list_allowed or args.list_allowed_all
+                or args.list_infected
                 or args.clamav_report
                 or args.persistence)
     if readonly and not writes:
@@ -356,8 +359,8 @@ def run(args: argparse.Namespace, config: Config) -> int:
         if args.allow_folder:
             allowlist.allow_folder(scanner.engine, args.allow_folder, args.signature, _confirm(args.yes))
         return 0
-    if args.list_allowed:
-        allowlist.list_allowed(scanner.engine)
+    if args.list_allowed or args.list_allowed_all:
+        allowlist.list_allowed(scanner.engine, expand=args.list_allowed_all)
         return 0
     if args.list_infected:
         list_infected(scanner.engine, paths=args.targets or None, files_per_threat=None)
