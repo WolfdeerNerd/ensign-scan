@@ -4,7 +4,8 @@ yara-x is where YARA is developed now; the original C library (libyara,
 and yara-python on top of it) only gets bug fixes. It is also memory-safe,
 which matters here: the engine parses untrusted files inside Ensign's own
 process, which runs as root under sudo. It scans a file of any size in one
-pass. Optional: pip install yara-x.
+pass. Optional: `pipx inject ensign-scan yara-x`, or install it into the
+virtual environment Ensign runs from.
 
 Callers only use the Engine interface below, so another engine can be
 added later without changing them.
@@ -94,4 +95,8 @@ def find() -> Engine | None:
     return YaraX(yara_x)
 
 
-MISSING = "yara-x isn't installed (pip install yara-x)"
+# Where yara-x goes depends on how Ensign was installed; a plain
+# `pip install` is refused on Arch and other distributions that mark the
+# system Python as externally managed.
+MISSING = ("yara-x isn't installed for the Python that runs Ensign. Installed with pipx: "
+           "pipx inject ensign-scan yara-x. In a virtual environment: <venv>/bin/pip install yara-x")

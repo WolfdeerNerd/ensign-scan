@@ -178,7 +178,12 @@ def main() -> int:
         return 0
     if not args.config:
         ensure_default_config()
-    config = Config.load(args.config)
+    try:
+        config = Config.load(args.config)
+    except ValueError as exc:   # a malformed config, TOML syntax errors included
+        print(f"[bold red]✗ Config error:[/bold red] {shown(str(exc))}")
+        print("Nothing was scanned. Fix the setting named above and run again.")
+        return 1
     secrets.load_custom(config)
     explanations.load_custom(config)
     pkgdb.configure(config.package_verification)
