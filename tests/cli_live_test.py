@@ -222,6 +222,11 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
     assert "INFECTED FILES" in flat and "eicar-caf\\xe9.com" in flat, \
         "listed with its byte as \\xe9, so it can be found"
     assert "SCANNED BUT NOT SAVED" not in flat, out
+    # --list-infected: the same list from the database, with the hash, and no scan
+    listed = " ".join(run("--config", str(config), "--list-infected", str(odd_tree), cwd=work).split())
+    assert "INFECTED FILES" in listed and "eicar-caf\\xe9.com" in listed, listed
+    assert "SHA-256: 275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f" in listed, listed
+    assert "--clamav-report PATH" in listed and "Scanning" not in listed, listed
     first = rows(db)[odd]
     assert first[0] == "infected", first
     run("--config", str(config), str(odd_tree), expect=3, cwd=work)
@@ -286,7 +291,7 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
             in flat), flat
     assert "ALLOWED BY YOU (2 files)" in flat, flat
     flat = " ".join(run("--config", str(config), "--list-allowed", cwd=work).split())
-    assert "FOLDERS YOU RAN --allow-folder ON (1)" in flat and "training data" in flat, flat
+    assert "FOLDERS YOU ALLOWED (1)" in flat and "training data" in flat, flat
     # undo: everything there is infected again, and the folder is forgotten
     run("--config", str(config), "--unallow-folder", str(batch), "--signature", signature, cwd=work)
     assert all(rows(db)[str(p)][0] == "infected" for p in [*texts, pickle, newer])

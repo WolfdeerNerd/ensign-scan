@@ -137,7 +137,9 @@ with tempfile.TemporaryDirectory() as d:
     count, _ = quiet(allowlist.allowed_report, engine, paths=[str(tree / "sub")])
     assert count == 1, "scoped like the other reports"
     count, text = quiet(allowlist.list_allowed, engine)
-    assert count == 1 and "game-asset.dat" in text and "copy.dat" in text, text
+    # One allowance, two copies of the content: each file listed once, with its hash.
+    assert count == 2 and "game-asset.dat" in text and "copy.dat" in text, text
+    assert text.count("SHA-256:") == 2 and "FILES YOU ALLOWED (2)" in text, text
     print("allowed reports test passed ✓")
 
     # --- later runs: allowed stays allowed; not rechecked every run like infections -------------

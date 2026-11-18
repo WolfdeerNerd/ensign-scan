@@ -201,8 +201,13 @@ with tempfile.TemporaryDirectory() as d:
 
     # --- --list-allowed shows the folder ---------------------------------------------------------
     count, out = quiet(allowlist.list_allowed, engine)
-    assert "FOLDERS YOU RAN --allow-folder ON (1)" in out and "training data" in out, out
-    assert "Files allowed there now: 6" in out, out
+    flat = " ".join(out.split())
+    assert "FOLDERS YOU ALLOWED (1)" in flat and "training data" in flat, flat
+    assert "Test.Phish 6 files allowed" in flat, flat
+    # the files the folder covers are counted there, not listed again
+    assert "training data/a.jsonl" not in flat and "copy-of-a.jsonl" in flat, flat
+    # the infected file in the folder that isn't allowed is pointed out
+    assert "1 file here is infected now and not allowed" in flat and "--list-infected" in flat, flat
     print("list-allowed folders test passed ✓")
 
     # --- only a folder allow of pickles: nothing happens, nothing is remembered -------------------

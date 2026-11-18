@@ -209,7 +209,8 @@ These run one job and exit — no full scan.
 | `python3 main.py --unallow PATH` | Undo `--allow`: the file counts as infected again |
 | `python3 main.py --allow-folder FOLDER --signature NAME` | Allow every file under a folder that one signature flags right now (see A note on infected results). Asks once to confirm; `--yes` skips the question |
 | `python3 main.py --unallow-folder FOLDER --signature NAME` | Undo `--allow-folder`: those files count as infected again |
-| `python3 main.py --list-allowed` | List every file you've allowed, and the folders you ran `--allow-folder` on |
+| `python3 main.py --list-allowed` | List what you've allowed: each folder once (its signatures, how many files each allowed, and any file there that's infected now and not allowed), then each file once with its signatures and SHA-256 |
+| `python3 main.py --list-infected [PATH ...]` | List the infected files from past scans, all of them or only under the paths given, without scanning. Each shows the SHA-256 of the flagged content, to look up on VirusTotal (a lookup sends only the hash; don't upload files from your personal folders) |
 | `python3 main.py --update-rules` | Rebuild the YARA rules the sweep uses from ClamAV's current signatures (see Large files). Runs by itself before a sweep when freshclam has changed the signatures |
 | `python3 main.py --persistence` | List startup entries that are new, changed or gone since you acknowledged them (see Persistence Audit). Changes nothing |
 | `python3 main.py --acknowledge PATH` | Accept one startup entry the persistence audit lists, as it is now. Asks to confirm; `--yes` skips the question |

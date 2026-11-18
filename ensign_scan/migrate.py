@@ -39,10 +39,14 @@ from .runlock import AlreadyRunning, RunLock
 
 # What Ensign creates in each folder. Anything else means "not only ours".
 _CONFIG_NAMES = ("config.toml",)
+# tests/legacy_paths_test.py checks this against every name the code puts in
+# the data folder, so a new one can't be forgotten here.
 _DATA_NAMES = {"system.db", "system.db-wal", "system.db-shm", "system.db-journal", "logs", "yara",
-               "persistence_acknowledged.log", "alert_state.json", "ensign.lock", "error_logs.txt"}
+               "persistence_acknowledged.log", "alert_state.json", "ensign.lock", "error_logs.txt",
+               "clamav-reports"}
 # Created only by Ensign; at least one must be there besides the database.
-_DATA_MARKERS = ("ensign.lock", "logs", "yara", "persistence_acknowledged.log", "alert_state.json")
+_DATA_MARKERS = ("ensign.lock", "logs", "yara", "persistence_acknowledged.log", "alert_state.json",
+                 "clamav-reports")
 
 
 def _config_is_ensigns(folder: Path) -> bool:

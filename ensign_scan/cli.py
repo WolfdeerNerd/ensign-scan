@@ -109,7 +109,10 @@ def parse_args() -> argparse.Namespace:
                         help="The signature name for --allow-folder / --unallow-folder, as shown "
                              "in the infected list")
     parser.add_argument("--list-allowed", action="store_true",
-                        help="List the files you've allowed, then exit")
+                        help="List the folders and files you've allowed, then exit")
+    parser.add_argument("--list-infected", action="store_true",
+                        help="List the infected files from the last scans (all of them, or only "
+                             "under the paths given), with their SHA-256, then exit. Doesn't scan")
     parser.add_argument("--clamav-report", metavar="PATH", action="append", default=[],
                         help="Prepare a false-positive report for ClamAV about a file it flagged, "
                              "then exit. Checks the file again first. Nothing is sent: you submit "
@@ -223,7 +226,8 @@ def _after_config(args, config: Config) -> int:
     writes = (args.purge_missing or args.rescan_errors or args.allow or args.unallow
               or args.allow_folder or args.unallow_folder or args.acknowledge or args.acknowledge_all
               or args.update_rules)
-    readonly = (args.verify_packages or args.suggest_fixes or args.list_allowed or args.clamav_report
+    readonly = (args.verify_packages or args.suggest_fixes or args.list_allowed or args.list_infected
+                or args.clamav_report
                 or args.persistence)
     if readonly and not writes:
         return run(args, config)
@@ -354,6 +358,9 @@ def run(args: argparse.Namespace, config: Config) -> int:
         return 0
     if args.list_allowed:
         allowlist.list_allowed(scanner.engine)
+        return 0
+    if args.list_infected:
+        list_infected(scanner.engine, paths=args.targets or None, files_per_threat=None)
         return 0
     if args.persistence or args.acknowledge or args.acknowledge_all:
         return run_persistence(args, config, scanner)

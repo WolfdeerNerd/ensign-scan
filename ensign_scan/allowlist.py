@@ -417,46 +417,103 @@ def allowed_report(engine: Engine, paths: list[str] | None = None, top: int = 10
     return len(rows)
 
 
+def _under(path: str, folder: str) -> bool:
+    folder = _folder_text(folder)
+    return path == folder or path.startswith(folder.rstrip("/") + "/")
+
+
 def list_allowed(engine: Engine) -> int:
-    """Every allowance, with where its content is now."""
+    """Everything you've allowed: each folder once, with its signatures, and
+    each file once, with its signatures. A file that a folder entry covers
+    (same signature, inside the folder) is counted under the folder, not
+    listed again. Returns how many folders and files were listed."""
     with Session(engine) as session:
-        allowances = session.query(Allowance).order_by(Allowance.allowed_at).all()
-        where = {}
-        for a in allowances:
-            where[a.id] = [r.filepath for r in session.query(FileRecord.filepath).filter(
-                FileRecord.file_hash == a.file_hash, FileRecord.threat_name == a.threat_name,
-                FileRecord.scan_status == ScanStatus.ALLOWED.value)]
-        rows = [(a.id, a.filepath, a.threat_name, a.file_hash, a.allowed_at) for a in allowances]
-        folders = []
-        for f in session.query(AllowedFolder).order_by(AllowedFolder.folder, AllowedFolder.threat_name):
+        folder_rows = session.query(AllowedFolder).order_by(AllowedFolder.folder,
+                                                            AllowedFolder.threat_name).all()
+        folder_rules = [(f.folder, f.threat_name) for f in folder_rows]
+        folders: dict[str, dict] = {}
+        for f in folder_rows:
+            entry = folders.setdefault(f.folder, {"signatures": [], "infected": 0})
             now_allowed = session.query(FileRecord).filter(
                 FileRecord.scan_status == ScanStatus.ALLOWED.value,
                 FileRecord.threat_name == f.threat_name,
                 path_under(FileRecord.filepath, f.folder)).count()
-            folders.append((f.folder, f.threat_name, f.allowed_at, f.last_allowed_at, now_allowed))
-    if not rows and not folders:
+            entry["signatures"].append((f.threat_name, f.allowed_at, f.last_allowed_at, now_allowed))
+        for folder, entry in folders.items():
+            # Flagged now and not allowed: a new or changed file in a folder you trusted.
+            entry["infected"] = session.query(FileRecord).filter(
+                FileRecord.scan_status == ScanStatus.INFECTED.value,
+                path_under(FileRecord.filepath, folder)).count()
+
+        allowances = session.query(Allowance).all()
+        # Every tracked file with allowed content, whatever its status now: one
+        # flagged since by a new signature is still that content, on disk.
+        hashes = {a.file_hash for a in allowances}
+        tracked = [(p, h) for p, h in session.query(FileRecord.filepath, FileRecord.file_hash)
+                   if h in hashes]
+
+    def covered(path: str, threat: str) -> bool:
+        return any(threat == t and _under(path, folder) for folder, t in folder_rules)
+
+    # One entry per file: its content's hash and every signature allowed on
+    # it. The database keeps one signature per file (the latest match), so
+    # the others allowed on the same content are found by its hash.
+    files: dict[str, dict] = {}
+    paths_of: dict[str, list[str]] = {}
+    for path, digest in tracked:
+        paths_of.setdefault(digest, []).append(path)
+    for a in sorted(allowances, key=lambda a: a.threat_name):
+        for path in paths_of.get(a.file_hash, []):
+            if not covered(path, a.threat_name):
+                files.setdefault(path, {"hash": a.file_hash, "signatures": []})["signatures"].append(
+                    (a.threat_name, a.allowed_at))
+    # Allowed content with no tracked file right now: shown where it was.
+    gone: dict[tuple[str, str], dict] = {}
+    for a in allowances:
+        if a.file_hash in paths_of or covered(a.filepath, a.threat_name):
+            continue
+        gone.setdefault((a.filepath, a.file_hash), {"hash": a.file_hash, "signatures": []})[
+            "signatures"].append((a.threat_name, a.allowed_at))
+
+    if not folders and not files and not gone:
         print("Nothing is allowed. (ensign-scan --allow PATH marks a flagged file as a false positive.)")
         return 0
+
+    detail = " " * 6
     if folders:
-        print(f"\n=== FOLDERS YOU RAN --allow-folder ON ({len(folders)}) ===")
-        print("A folder allows nothing by itself: each file below it is allowed by its own content.")
-        for folder, threat, first, last, now_allowed in folders:
-            print_unwrapped(f"\n  Folder:    {shown(folder)}")
-            print(f"  Signature: {shown(threat)}")
-            again = f", last run {last:%Y-%m-%d %H:%M} UTC" if last != first else ""
-            print(f"  Allowed:   {first:%Y-%m-%d %H:%M} UTC{again}")
-            print(f"  Files allowed there now: {now_allowed}")
-    if not rows:
-        return 0
-    print(f"\n=== ALLOWED BY YOU ({len(rows)}) ===")
-    for row_id, filepath, threat, digest, allowed_at in rows:
-        print(f"\n  Signature: {shown(threat)}")
-        print_unwrapped(f"  Allowed:   {allowed_at:%Y-%m-%d %H:%M} UTC, from {shown(filepath)}")
-        print(f"  SHA-256:   {digest}")
-        found = where[row_id]
-        if found:
-            for p in found:
-                print_unwrapped(f"  [cyan]○[/cyan] {shown(p)}")
-        else:
-            print("  [dim](no file with this content is tracked right now)[/dim]")
-    return len(rows)
+        print(f"\n=== FOLDERS YOU ALLOWED ({len(folders)}) ===")
+        print("A folder allows nothing by itself: each file in it is allowed by its own content. "
+              "Undo one with --unallow-folder FOLDER --signature NAME.")
+        for folder, entry in folders.items():
+            print_unwrapped(f"\n  Folder: {shown(folder)}")
+            width = max(len(shown(t)) for t, *_ in entry["signatures"])
+            for threat, first, last, now_allowed in entry["signatures"]:
+                again = f", last run {last:%Y-%m-%d}" if last.date() != first.date() else ""
+                plural = "s" if now_allowed != 1 else ""
+                print(f"{detail}{shown(threat):<{width}}  {now_allowed} file{plural} allowed · "
+                      f"since {first:%Y-%m-%d}{again}")
+            if entry["infected"]:
+                n = entry["infected"]
+                print_unwrapped(f"{detail}[red]●[/red] {n} file{'s' if n != 1 else ''} here "
+                                f"{'are' if n != 1 else 'is'} infected now and not allowed: "
+                                f"{_command('--list-infected', folder)}")
+
+    def print_files(title: str, entries: dict, note: str) -> None:
+        print(f"\n=== {title} ({len(entries)}) ===")
+        print(note)
+        for key, entry in sorted(entries.items()):
+            path = key if isinstance(key, str) else key[0]
+            print_unwrapped(f"\n  File: {shown(path)}")
+            width = max(len(shown(t)) for t, _ in entry["signatures"])
+            for threat, at in sorted(entry["signatures"], key=lambda s: s[0]):
+                on = f"allowed {at:%Y-%m-%d}"
+                print(f"{detail}{shown(threat):<{width}}  {on}")
+            print(f"{detail}SHA-256: {entry['hash']}")
+
+    if files:
+        print_files("FILES YOU ALLOWED", files, "Undo one with --unallow PATH.")
+    if gone:
+        print_files("ALLOWED, BUT NOT ON DISK NOW", gone,
+                    "No tracked file has this content right now; shown where it was when you "
+                    "allowed it. If it comes back unchanged, it's still allowed.")
+    return len(folders) + len(files) + len(gone)

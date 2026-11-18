@@ -283,4 +283,24 @@ with tempfile.TemporaryDirectory() as d:
     assert "Moved Ensign's folders" in text and "now named ensign-scan" not in text, text
     assert (home / ".local/share/ensign-scan/system.db").exists() and not (home / ".local/share/ensign").exists()
 
+# --- every name the code puts in the data folder is one the move knows -----------------------
+import re  # noqa: E402
+
+sys.path.insert(0, str(ROOT))
+from ensign_scan import bigrules, migrate  # noqa: E402
+
+source = "\n".join(p.read_text() for p in (ROOT / "ensign_scan").rglob("*.py"))
+written = set(re.findall(r'data_dir\)?\s*/\s*["\']([^"\'/]+)["\']', source))
+written |= {bigrules.RULES_DIRNAME, "logs", "system.db"}
+assert written, "the pattern found nothing: it's out of date"
+missing = written - migrate._DATA_NAMES
+assert not missing, f"Ensign writes these to the data folder, but the move doesn't know them: {missing}"
+
+with tempfile.TemporaryDirectory() as d:   # and a folder with reports in it still moves
+    home = Path(d)
+    ensign_tree(home)
+    (home / ".local/share/ensign/clamav-reports").mkdir()
+    moved, not_moved = move(home)
+    assert len(moved) == 2 and not not_moved, (moved, not_moved)
+
 print("automatic move test passed ✓")
