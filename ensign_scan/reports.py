@@ -537,6 +537,40 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
     return results
 
 
+def format_mismatch_report(engine: Engine, paths: list[str] | None = None) -> int:
+    """Print files named like a credential format (a .kdbx, a .ppk, an SSH
+    key...) whose first bytes say they aren't one. Returns how many.
+
+    A borrowed name is how a payload hides (MITRE ATT&CK T1036.008): until
+    0.8.5 these names weren't even opened. clamd's verdict is shown with
+    each, since it's still the verdict; this is a reason to look closer,
+    not a detection. Every run lists them, until the file changes."""
+    with Session(engine) as session:
+        query = session.query(
+            FileRecord.filepath, FileRecord.format_mismatch, FileRecord.scan_status, FileRecord.file_hash,
+        ).filter(FileRecord.format_mismatch.isnot(None))
+        scope = _scope_filter(paths)
+        if scope is not None:
+            query = query.filter(scope)
+        rows = sorted(query.all())
+    if not rows:
+        return 0
+    print(f"\n=== NAMED LIKE A CREDENTIAL FILE, BUT ISN'T ONE ({len(rows)} "
+          f"file{'s' if len(rows) != 1 else ''}) ===")
+    print("Each file below has the name of a credential format (a password vault, a key, a\n"
+          "browser's password store) but doesn't start the way that format always does.\n"
+          "Malware borrows names like these to look harmless. Check where each came from;\n"
+          "if you know it, it may just be misnamed.")
+    for filepath, why, status, digest in rows:
+        print_unwrapped(f"\n  File: {shown(filepath)}")
+        print_unwrapped(f"{_DETAIL}Why: {shown(why)}")
+        print(f"{_DETAIL}clamd's verdict: {status}")
+        _note("›", _file_facts(filepath), label="Context", indent=len(_DETAIL))
+        if digest:
+            print(f"{_DETAIL}SHA-256: {digest}")
+    return len(rows)
+
+
 def unsaved_report(unsaved) -> list[dict]:
     """Results Ensign got but couldn't save (scanner.UnsavedResult).
 

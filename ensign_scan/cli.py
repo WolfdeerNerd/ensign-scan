@@ -31,6 +31,7 @@ from ensign_scan.fsutil import print_unwrapped, shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
 from ensign_scan.reports import (
     error_summary,
+    format_mismatch_report,
     incomplete_report,
     integrity_report,
     list_infected,
@@ -508,6 +509,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
     unsaved_infected = [u for u in scanner.unsaved if u.status == "infected"]
     infected = list_infected(scanner.engine, paths=args.targets or None,
                              more_elsewhere=bool(unsaved_infected))
+    format_mismatch_report(scanner.engine, paths=args.targets or None)
     allowlist.new_in_allowed_folders(scanner.engine, paths=args.targets or None)
     allowlist.allowed_report(scanner.engine, paths=args.targets or None)
     # Results the database refused are reported (and alerted on) from memory,

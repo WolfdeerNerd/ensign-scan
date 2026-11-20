@@ -203,6 +203,7 @@ class _Oversized:
     fd: int          # -1 once closed
     digest: str
     real_path: str = ""  # what the kernel says was opened (secrets.hash_not_stored)
+    mismatch: str | None = None  # secrets.format_mismatch, worked out when it was opened
     fd_was: int = -1  # the number it had, to look up its clamscan result
 
     def __post_init__(self) -> None:
@@ -962,32 +963,44 @@ class Scanner:
                 digest = sha256_fd(fd)
             except OSError as exc:  # opened, but reading failed (an I/O error, say)
                 return self._record_unreadable(path, st, exc)
+            # Named like a credential format with a fixed start? Then its
+            # first bytes say whether it is one. pread: the offset clamd
+            # reads from is left alone. Those bytes hold nothing secret.
+            mismatch = None
+            if secrets.has_expected_format(str(path), opened):
+                try:
+                    head = os.pread(fd, secrets.HEADER_BYTES, 0)
+                except OSError:
+                    head = b""   # unreadable now: checked by the scan itself
+                mismatch = secrets.format_mismatch(str(path), opened, head)
             if not scan:
                 outcome = None
             elif st.st_size >= self._scan_limit():
                 # clamd would skip this file and still answer "OK". Not sent
                 # to clamd at all: queued, still open, for clamscan.
-                self._queue_oversized(_Oversized(path, st, fd, digest, opened))
+                self._queue_oversized(_Oversized(path, st, fd, digest, opened, mismatch))
                 fd = -1  # the queue owns the descriptor now
                 return digest, "queued"
             else:
                 outcome = (self.clamd.scan(path) if self._transport == "path"
                            else self.clamd.scan_fd(fd, label=str(path)))
                 if _clamd_skipped(outcome):  # a limit Ensign didn't know about
-                    self._queue_oversized(_Oversized(path, st, fd, digest, opened))
+                    self._queue_oversized(_Oversized(path, st, fd, digest, opened, mismatch))
                     fd = -1
                     return digest, "queued"
         finally:
             if fd >= 0:
                 os.close(fd)
-        return self._finish(path, st, digest, outcome, opened)
+        return self._finish(path, st, digest, outcome, opened, mismatch, checked=True)
 
     def _finish(
         self, path: Path, st: os.stat_result, digest: str, outcome: ScanOutcome | None,
-        real_path: str | None = None,
+        real_path: str | None = None, mismatch: str | None = None, checked: bool = False,
     ) -> tuple[str | None, str]:
         """Record a hashed (and maybe scanned) file, note SSH-file changes,
-        and print its line."""
+        and print its line. checked: its first bytes were just checked
+        against its name, and `mismatch` is the answer to store (a sweep
+        result arrives without one, and leaves the stored answer alone)."""
         if (outcome is not None and outcome.status == ScanStatus.INFECTED and digest
                 and (digest, outcome.threat_name or "Unknown") in self._allowed()):
             # You marked this exact content, flagged by this exact signature,
@@ -1000,11 +1013,14 @@ class Scanner:
         # run doesn't read the missing hash as a change.
         stored = digest
         real_path = real_path or os.path.realpath(path)
-        if digest and secrets.hash_not_stored(str(path), real_path) and not (
+        # A file named like a credential that doesn't start like one isn't
+        # that credential, so its hash is kept like any file's.
+        if digest and mismatch is None and secrets.hash_not_stored(str(path), real_path) and not (
                 outcome is not None and outcome.status in (ScanStatus.INFECTED, ScanStatus.ALLOWED)):
             stored = ""
         try:
-            previous_hash = self._upsert_file(path, st, stored, outcome)
+            previous_hash = self._upsert_file(path, st, stored, outcome,
+                                              mismatch=mismatch, checked=checked)
         except Exception as exc:
             self._remember_unsaved(path, outcome, exc)
             return None, "failed"
@@ -1114,7 +1130,8 @@ class Scanner:
             recorded.add(fd)
             status = ScanStatus.ERROR.value
             try:
-                status = self._finish(item.path, item.st, item.digest, outcome, item.real_path or None)[1]
+                status = self._finish(item.path, item.st, item.digest, outcome, item.real_path or None,
+                                      item.mismatch, checked=True)[1]
             except Exception:  # one file failing to record must not drop the rest
                 log.exception("could not record the clamscan result for %s", item.path)
             if advance is not None:
@@ -1477,7 +1494,8 @@ class Scanner:
         return None, status
 
     def _upsert_file(
-        self, path: Path, st: os.stat_result, digest: str | None, outcome: ScanOutcome | None
+        self, path: Path, st: os.stat_result, digest: str | None, outcome: ScanOutcome | None,
+        mismatch: str | None = None, checked: bool = False,
     ) -> str | None:
         """Insert or update the file's row. Returns the hash the row held
         before this update, or None if the file wasn't in the database.
@@ -1504,6 +1522,8 @@ class Scanner:
                 record.file_size = st.st_size
                 record.mtime_ns = st.st_mtime_ns
                 record.ctime_ns = st.st_ctime_ns
+                if checked:   # see _finish
+                    record.format_mismatch = mismatch
                 if outcome is not None:
                     record.scan_status = outcome.status.value
                     record.scan_result = outcome.raw

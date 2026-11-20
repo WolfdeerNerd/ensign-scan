@@ -43,7 +43,7 @@ from ensign_scan.config import Config
 from ensign_scan.db import DATA_VERSION, make_engine
 from ensign_scan.fsutil import NotScannable, open_for_scan, sha256_fd
 from ensign_scan.models import FileRecord, ScanStatus, utcnow
-from ensign_scan.reports import integrity_report
+from ensign_scan.reports import format_mismatch_report, integrity_report
 from ensign_scan.scanner import ClamdRunsAsRoot, Scanner
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -123,6 +123,33 @@ assert secrets.skip_reason(f"{H}/docs/innocent.txt", f"{H}/.ssh/id_rsa", REG), \
 assert secrets.is_integrity_watched(f"{H}/.ssh/config")
 assert not secrets.is_integrity_watched(f"{H}/.aws/config")
 print("skip_reason test passed ✓")
+
+# format_mismatch: a credential name whose format has a fixed start
+fm = secrets.format_mismatch
+KDBX, KDB = bytes.fromhex("03d9a29a67fb4bb5"), bytes.fromhex("03d9a29a65fb4bb5")
+SQLITE = b"SQLite format 3\0"
+for name, good, bad in (
+    ("vault.kdbx", KDBX + b"\x01\x00\x04\x00", KDB + b"\x00\x00"),
+    ("old.kdb", KDB + b"\x00\x00", KDBX),
+    ("server.ppk", b"PuTTY-User-Key-File-3: ssh-ed25519\n", b"#!/bin/sh\n"),
+    ("id_rsa", b"-----BEGIN RSA PRIVATE KEY-----\n", b"MZ\x90\x00"),
+    ("id_ed25519", b"-----BEGIN OPENSSH PRIVATE KEY-----\n", b"\x7fELF"),
+    ("krb5.keytab", b"\x05\x02\x00\x00\x00\x40", b"\x05\x03"),
+    ("http.keytab", b"\x05\x01", b"PK\x03\x04"),
+    ("Login Data", SQLITE, b"import os\n"),
+    ("key4.db", SQLITE, b"\x00" * 16),
+):
+    path = f"/h/x/{name}"
+    assert fm(path, path, good) is None, f"a real {name} is not flagged"
+    assert fm(path, path, bad), f"a fake {name} is flagged"
+assert fm("/h/x/vault.kdbx", "/h/x/vault.kdbx", b"") is None, "an empty file isn't checked"
+assert fm("/h/x/notes.txt", "/h/x/notes.txt", b"anything") is None, "no format claimed"
+assert fm("/h/x/identity", "/h/x/identity", b"anything") is None, "an everyday word claims nothing"
+assert fm("/h/x/.netrc", "/h/x/.netrc", b"machine x") is None, "plaintext formats aren't checked"
+assert fm("/h/readme.txt", "/h/.ssh/id_rsa", b"MZ"), "the name a symlink resolves to counts too"
+assert secrets.has_expected_format("/h/x/a.ppk", "/h/x/a.ppk")
+assert not secrets.has_expected_format("/h/x/wallet.dat", "/h/x/wallet.dat"), "layout unconfirmed: not checked"
+print("format_mismatch test passed ✓")
 
 # ----------------------------------------------------------------------
 # 3. A fake clamd that speaks FILDES
@@ -278,6 +305,12 @@ clean_key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nnot really\n")
 (home / "Downloads").mkdir()
 disguised = home / "Downloads" / "invoice.kdbx"
 disguised.write_text("PAYLOAD dressed up as a KeePass database")
+# Named like a credential format, but doesn't start like one: flagged
+# even when clamd finds nothing (T1036.008), and its hash is kept.
+fake_ppk = home / "Downloads" / "notes.ppk"
+fake_ppk.write_text("#!/bin/sh\necho runs fine as: sh notes.ppk\n")
+real_vault = home / "Downloads" / "real.kdbx"
+real_vault.write_bytes(bytes.fromhex("03d9a29a67fb4bb5") + b"\x01\x00\x04\x00 ciphertext...")
 auth = home / ".ssh" / "authorized_keys"
 auth.write_text("ssh-ed25519 AAAA mine\n")
 planted = home / ".ssh" / "helper"
@@ -301,6 +334,17 @@ assert rows[str(key)].scan_status == "infected" and rows[str(key)].file_hash, \
     "a credential-named file found infected keeps its hash: --allow needs it"
 assert rows[str(clean_key)].scan_status == "clean" and rows[str(clean_key)].file_hash == "", \
     "a clean credential file is scanned, and no hash of it is stored"
+assert rows[str(clean_key)].format_mismatch is None, "a real key isn't flagged"
+assert rows[str(real_vault)].format_mismatch is None and rows[str(real_vault)].file_hash == "", \
+    "a real KeePass header: not flagged, no hash kept"
+assert rows[str(fake_ppk)].scan_status == "clean" and "PuTTY key" in (rows[str(fake_ppk)].format_mismatch or "")
+assert rows[str(fake_ppk)].file_hash, "a file that isn't the credential its name claims keeps its hash"
+assert "KeePass" in (rows[str(disguised)].format_mismatch or ""), "the disguised payload is flagged too"
+assert rows[str(planted)].format_mismatch is None and rows[str(private)].format_mismatch is None
+n, out = quietly(format_mismatch_report, sc.engine, [str(home)])
+# id_ed25519 here holds "fake key with PAYLOAD": no key starts like that.
+assert n == 3 and all(str(f) in flat(out) for f in (fake_ppk, disguised, key)), out
+assert str(real_vault) not in flat(out) and "clamd's verdict: clean" in flat(out), out
 assert rows[str(planted)].scan_status == "infected", "an executable in .ssh is scanned"
 assert rows[str(private)].scan_status == "infected"
 assert rows[str(auth)].scan_status == "clean"
