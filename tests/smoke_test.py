@@ -466,7 +466,7 @@ def main():
     finally:
         os.environ["PATH"] = old_path
 
-    print("\n--- credential files: never opened, never sent to clamd ---")
+    print("\n--- credential files: scanned, no hash kept ---")
 
     class PathOnlyDenyHandler(FakeClamdHandler):
         """A clamd without FILDES whose clamav user can read nothing:
@@ -510,9 +510,9 @@ def main():
     SEEN_BY_CLAMD.clear()
     scanner3.prepare_clamd()
     assert scanner3._transport == "path", "a clamd without FILDES falls back to path SCAN"
-    assert scanner3.process_file(wallet_file, scan=True) == "", "a credential file is recorded without a hash"
+    scanner3.process_file(wallet_file, scan=True)
     scanner3.process_file(normal_file, scan=True)
-    assert str(wallet_file) not in SEEN_BY_CLAMD, "a credential file must never be sent to clamd"
+    assert str(wallet_file) in SEEN_BY_CLAMD, "a credential name never stops a scan"
     assert str(normal_file) in SEEN_BY_CLAMD
 
     from ensign_scan.models import FileRecord as _FR
@@ -521,9 +521,8 @@ def main():
     with _S2(scanner3.engine) as session:
         wrec = session.query(_FR).filter(_FR.filepath == str(wallet_file)).first()
         nrec = session.query(_FR).filter(_FR.filepath == str(normal_file)).first()
-        assert wrec.scan_status == ScanStatus.CLASSIFIED.value
+        assert wrec.scan_status == ScanStatus.ERROR.value, "scanned, and refused like any file here"
         assert wrec.file_hash == "", "no hash of a credential file is stored"
-        assert "contents never read" in wrec.scan_result
         assert nrec.scan_status == ScanStatus.ERROR.value, \
             "permission-denied on an ordinary path is a real error"
 
@@ -533,9 +532,12 @@ def main():
         _sf(scanner3.engine)
         _ss(scanner3.engine)
     combined = " ".join(_strip_ansi(buf2.getvalue()).split())
-    assert "kwalletd" not in combined, "classified path must not appear in error_summary or suggest_fixes"
+    # Scanned, so a credential file clamd can't read is a gap like any
+    # other, and is reported as one: hiding it would read as scanned.
+    assert str(wallet_dir) in combined, "an unscanned credential file is reported, not hidden"
     assert str(normal_dir) in combined, "the real error must still be reported"
-    assert "Classified: 1" in combined
+    assert "Classified: 0" in combined
+    assert "setfacl" not in combined, "no permission change is ever suggested"
 
     server3.shutdown()
 

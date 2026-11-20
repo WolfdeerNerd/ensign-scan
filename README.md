@@ -124,7 +124,6 @@ Ensign never changes permissions, and never asks you to. It also never deletes, 
 
 ### What Ensign can't see
 
-- **Credential files, on purpose.** Keys, keyrings, wallets and password vaults are recorded as `classified` and never opened (see How clamd Reads Your Files).
 - **Files you can't read.** Ensign opens each file as you, so a file your user can't open isn't scanned.
 - **Directories Ensign can't enter.** They are skipped, and each run ends with an "UNREADABLE DIRECTORIES" section listing them. The list is rebuilt every run, so nothing about it is stored in the database.
 - **Symlinked directories.** They are never walked into (see the Proton note below). Symlinks to individual files are followed and scanned.
@@ -142,11 +141,11 @@ clamd runs as its own unprivileged user, `clamav`, not as you. Ensign doesn't as
 - **Ensign refuses a clamd running as root.** clamd parses untrusted files, and ClamAV advises against running it as root. If yours does, Ensign stops before scanning anything and tells you how to fix it (`User clamav` in `clamd.conf`).
 - **A clamd without `FILDES`** (rare; it needs a local socket and a build with descriptor passing) makes Ensign fall back to asking clamd to open files itself. The run warns you, and files the `clamav` user can't read are recorded as errors.
 
-**Credential files are never opened.** A file whose path matches a high-confidence credential pattern (SSH and GPG private keys, password-manager vaults, crypto wallets, cloud credentials; see `ensign_scan/secrets.py`) is recorded as `classified` without being read, hashed or sent to clamd. Malware *steals* those files; it rarely hides in them. So scanning them finds almost nothing, while reading them and storing their hash is exposure for no gain. Three exceptions keep this from becoming a hiding place:
+**Credential files are scanned, and no hash of them is stored.** A file whose path matches a high-confidence credential pattern (SSH and GPG private keys, password-manager vaults, crypto wallets, cloud credentials; see `ensign_scan/secrets.py`) is scanned like any other file. A name is whatever the file's creator picked, so it can't decide whether a file is scanned: until 0.8.5 these files were never opened, and a payload named `invoice.kdbx` or `wallet.dat` anywhere on disk went unscanned. What the match changes is what Ensign keeps: the database holds the file's path, verdict and threat name, and no hash of it, since a hash of a short secret (a `.netrc` password, say) can be confirmed by guessing. A file found infected does get its hash stored, because it's malware then and `--allow` needs it. The hash is still worked out in memory for each scan. clamd reads the file through the handle Ensign passes it, on this machine, and by default writes nothing about clean files to its log.
 
-- **Executables are always scanned**, even in `~/.ssh`. Credential files are never executable, so an executable there is exactly what an intruder would plant.
-- **`~/.ssh/authorized_keys`, `authorized_keys2`, `config` and `rc` are scanned and watched.** They hold no secrets, but they decide who can log in and what runs, so an intruder edits them to get back in. If one changes between runs, or appears where it didn't exist before, the run ends with an "SSH FILES CHANGED SINCE LAST RUN" section. A change you made yourself shows up there too; it's there so no change goes unnoticed.
-- **A file ClamAV already found infected is always rescanned**, even if its name looks like a credential file, so a found infection can't quietly turn into "classified".
+- **`~/.ssh/authorized_keys`, `authorized_keys2`, `config` and `rc` are scanned and watched**, and keep their hash. They hold no secrets, but they decide who can log in and what runs, so an intruder edits them to get back in. If one changes between runs, or appears where it didn't exist before, the run ends with an "SSH FILES CHANGED SINCE LAST RUN" section. A change you made yourself shows up there too; it's there so no change goes unnoticed.
+
+The first run of 0.8.5 scans, once, the files earlier versions recorded as `classified` without opening them.
 
 The first run of 0.3.0, after upgrading from 0.2.x or earlier, removes the hashes older versions stored for credential files (overwriting them on disk, not just deleting the rows) and rescans files that were permission errors before. A backup or filesystem snapshot of the database taken earlier still holds the old hashes. Don't run an older Ensign against the same database afterwards: it hashes every file it scans, credential files included, and would store those hashes again.
 
@@ -305,7 +304,7 @@ Malware that wants to come back after a reboot has to leave something in a place
 | `ld.so.preload` | `/etc/ld.so.preload`, which normally doesn't exist |
 | pacman hooks | `/etc/pacman.d/hooks`, `/usr/share/libalpm/hooks` |
 
-Ensign doesn't judge these entries. It compares each one with how it was when you acknowledged it, and lists what is new, changed or gone. An entry is its content (a SHA-256 hash), or the target of a symlink, plus its permissions and owner. Only the hash is stored. Credential-looking files are never opened here either; their size and modification time stand in for the hash.
+Ensign doesn't judge these entries. It compares each one with how it was when you acknowledged it, and lists what is new, changed or gone. An entry is its content (a SHA-256 hash), or the target of a symlink, plus its permissions and owner. Only the hash is stored. Credential-looking files aren't opened here: the audit only fingerprints entries, it doesn't scan them. Their size, modification time and change time stand in for the hash, so editing one and setting its modification time back still shows as a change. (From 0.8.5, the first audit lists such entries as changed once, because the change time is new to their fingerprint.)
 
 **The first run** lists everything, since nothing is acknowledged yet. To keep that list readable, entries a package installed that still match what the package installed are counted per folder ("319 in /usr/lib/systemd/system came from packages and match what the package installed"). Ensign asks your package manager about them. Everything else is listed one by one: entries no package owns (the `.wants` links `systemctl enable` creates are among them), entries that differ from their package, and everything in your home folder. Read through it, then set the baseline:
 
@@ -376,7 +375,7 @@ high_prefixes = [["mywallet_", "wallets"]]
 
 - **`[custom_threats]`** adds a note for a threat name. The name must match exactly, including the numbers.
 - **`[custom_pacman_reasons]`** adds a note for a `pacman -Qkk` mismatch reason.
-- **`[custom_secrets]`** adds paths that look like secrets stores. The keys are `high_dirs`, `high_dir_paths`, `high_filenames`, `high_extensions`, `high_scoped_filenames`, `high_prefixes`, `medium_prefixes` and `medium_extensions`. Folder entries match whole folder names, in order (`myapp/keys` matches `~/myapp/keys/`, not `~/myapp-old/keys/`). A HIGH match means the file is recorded as `classified` and never opened (see How clamd Reads Your Files); a MEDIUM match is still scanned. See `ensign_scan/secrets.py` for what the tiers mean.
+- **`[custom_secrets]`** adds paths that look like secrets stores. The keys are `high_dirs`, `high_dir_paths`, `high_filenames`, `high_extensions`, `high_scoped_filenames`, `high_prefixes`, `medium_prefixes` and `medium_extensions`. Folder entries match whole folder names, in order (`myapp/keys` matches `~/myapp/keys/`, not `~/myapp-old/keys/`). A HIGH match means the file is scanned but no hash of it is stored (see How clamd Reads Your Files); a MEDIUM match changes nothing yet. See `ensign_scan/secrets.py` for what the tiers mean.
 
 The first time you run Ensign it writes a starter `config.toml` with all of these documented as comments. `config.example.toml` in the repo has the same content.
 
@@ -384,19 +383,19 @@ The first time you run Ensign it writes a starter `config.toml` with all of thes
 
 Most day-to-day questions are covered by the commands above. But the database is just SQLite, kept locally at the path printed in the `Database:` line when Ensign starts (`~/.local/share/ensign-scan/system.db` unless you've set a custom `data_dir`) — for anything the built-in reports don't cover, `sqlite3` gets you there directly.
 
-The `files` table's `scan_status` column is one of: `clean`, `infected`, `error`, `pending`, `classified`.
+The `files` table's `scan_status` column is one of: `clean`, `infected`, `error`, `pending`, `classified` (from earlier versions, until that file is scanned).
 
 See the details behind current errors:
 ```
 sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='error';"
 ```
 
-See what's been classified (credential files Ensign deliberately never opened):
+See which clean files Ensign treats as credential files (scanned, no hash kept):
 ```
-sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='classified';"
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath FROM files WHERE scan_status='clean' AND file_hash='';"
 ```
 
-The list of paths/filenames/extensions used to make that call isn't arbitrary — see `docs/Classified_Paths_Research.md` for the sourcing behind each entry, and `ensign_scan/secrets.py` for the confidence tiers and how `skip_reason()` uses them.
+The list of paths/filenames/extensions used to make that call isn't arbitrary — see `docs/Classified_Paths_Research.md` for the sourcing behind each entry, and `ensign_scan/secrets.py` for the confidence tiers and how `hash_not_stored()` uses them.
 
 See infected files and what triggered them:
 ```

@@ -35,12 +35,11 @@ class ScanStatus(str, Enum):
     INFECTED = "infected"
     ERROR = "error"
     PENDING = "pending"
-    # The path matches a high-confidence credential pattern (wallets,
-    # SSH/GPG keys, password vaults, ...), so Ensign deliberately never
-    # opened it: no hash (file_hash is ""), no clamd verdict. Decided from
-    # the path and stat() alone -- see secrets.skip_reason(). Distinct from
-    # ERROR so it naturally drops out of error_summary() and
-    # suggest_fixes() without either needing to special-case it.
+    # Recorded without being opened: no hash (file_hash is ""), no clamd
+    # verdict. Until 0.8.5, every file whose path matched a high-confidence
+    # credential pattern; those are scanned now, and db.py sends rows left
+    # from then to be scanned once. Distinct from ERROR so it drops out of
+    # error_summary() and suggest_fixes() without either special-casing it.
     CLASSIFIED = "classified"
     # ClamAV did not scan all of this file: it is past a scan limit ClamAV
     # can't lift -- most often larger than ~2 GiB, which no ClamAV tool can

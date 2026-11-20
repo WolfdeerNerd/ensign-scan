@@ -229,8 +229,12 @@ def fingerprint(path: str, category: str, personal: bool, place: str = "") -> En
             return exc.strerror or type(exc).__name__
     elif kind == "file":
         if secrets.skip_reason(path, path, st.st_mode):
-            # Looks like a credential file: never opened, same as in a scan.
-            digest = f"metadata size={st.st_size} mtime_ns={st.st_mtime_ns}"
+            # Looks like a credential file: fingerprinted without being
+            # opened, so no hash of it is stored. ctime as well as size and
+            # mtime: mtime can be set back after an edit (touch -d), ctime
+            # can't, and setting mtime changes it.
+            digest = (f"metadata size={st.st_size} mtime_ns={st.st_mtime_ns} "
+                      f"ctime_ns={st.st_ctime_ns}")
         else:
             try:
                 sha, opened = _sha256_nofollow(path)

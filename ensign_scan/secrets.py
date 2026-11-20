@@ -15,29 +15,25 @@ Design: three confidence tiers, not one flat list.
   source of most false positives under the old substring-matching
   approach and add negligible real coverage.)
 
-How it's used: skip_reason() decides, BEFORE a file is opened, whether
-Ensign should leave its contents alone entirely -- no hash, no scan.
-That uses HIGH only. Skipping is a coverage loss, so it is reserved for
-names that are essentially never anything but credential material;
-a MEDIUM match (a bare .pem, a custom-named id_* key) is still opened
-and scanned. (MEDIUM currently has no other consumer; it is kept for
-the planned folder-level aggregation.)
+How it's used: every file is scanned, credential files included. A
+name is something malware chooses, so a file was never safe to skip
+for its name alone: until 0.8.5, a payload called invoice.kdbx or
+wallet.dat anywhere on disk was never opened. What a
+HIGH match changes now is what Ensign STORES: hash_not_stored() says to
+keep no hash for the file, since a hash of a short secret (a .netrc
+password, say) can be confirmed by guessing. Its path, verdict and
+threat name are kept like any file's. A found infection does get its
+hash stored: it is malware then, not a secret, and --allow needs it.
+MEDIUM (a bare .pem, a custom-named id_* key) changes nothing yet; it
+is kept for the planned folder-level aggregation.
 
-Why skip at all: a key, keyring, wallet or vault is what malware
-*steals*, not where it hides, so scanning its contents finds almost
-nothing -- and reading it, and storing its hash, is exposure for no
-gain (a hash of a short secret, like a .netrc password, can be
-brute-forced offline). Theft of these files is caught by watching who
-opens them, not by reading them.
+skip_reason() is still the never-open decision where Ensign only
+fingerprints a file without scanning it (the persistence audit).
 
-Two deliberate exceptions, so the skip can't become a hiding place:
-  - Executables. Credential files are never executable; an executable
-    in a secrets location is exactly what an attacker would plant
-    there, so it is scanned like anything else.
-  - INTEGRITY_WATCHED files (authorized_keys, ~/.ssh/config, ~/.ssh/rc).
-    These hold no secrets but are classic persistence points: an added
-    key or a ProxyCommand runs the attacker's code. They are hashed,
-    scanned, and reported when they change.
+INTEGRITY_WATCHED files (authorized_keys, ~/.ssh/config, ~/.ssh/rc) are
+an exception: they hold no secrets but are classic persistence points
+(an added key or a ProxyCommand runs the attacker's code), so their hash
+is stored, and a change is reported.
 
 Deliberately conservative: this is a deny-list, not a guarantee. It
 will miss a secrets store whose name doesn't match anything here (a
@@ -211,7 +207,7 @@ def is_likely_secrets_path(path: str) -> bool:
 
 
 def is_high_confidence_secrets_path(path: str) -> bool:
-    """HIGH confidence only -- the tier skip_reason() acts on."""
+    """HIGH confidence only -- the tier hash_not_stored() and skip_reason() act on."""
     return classify(path) == Confidence.HIGH
 
 
@@ -231,6 +227,16 @@ def is_integrity_watched(path: str) -> bool:
     """True for an INTEGRITY_WATCHED file whose parent directory is .ssh."""
     parts = _parts(path)
     return len(parts) >= 2 and parts[-2] == ".ssh" and parts[-1] in INTEGRITY_WATCHED
+
+
+def hash_not_stored(path: str, real_path: str) -> bool:
+    """True if a scanned file's hash must not be stored: its path, or the
+    path a symlink to it resolves to, matches a HIGH credential pattern.
+    INTEGRITY_WATCHED files keep theirs: it's what a change is checked
+    against. (The caller keeps the hash of a file found infected.)"""
+    if is_integrity_watched(path) or is_integrity_watched(real_path):
+        return False
+    return classify(path) == Confidence.HIGH or classify(real_path) == Confidence.HIGH
 
 
 def skip_reason(path: str, real_path: str, st_mode: int) -> str | None:

@@ -10,7 +10,8 @@ read. Checked here:
   * --acknowledge PATH accepts one entry and no other, and says so for a
     path the audit doesn't check;
   * a FIFO where a startup file should be is reported, without hanging;
-  * a credential-looking file is never opened (its size and time stand in);
+  * a credential-looking file is never opened (its size and times stand in,
+    ctime included, so setting mtime back doesn't hide an edit);
   * a folder that can't be read is "couldn't check", and the entries
     acknowledged inside it are not reported as gone;
   * a file that can be listed but not read (a root-only cron job without
@@ -123,6 +124,17 @@ with tempfile.TemporaryDirectory() as d:
     lines = log.read_text().splitlines()
     assert len(lines) == n and all(line.split("\t")[1] == "acknowledged" for line in lines)
     assert any(line.split("\t")[2] == str(unit) and line.split("\t")[6] == "0644" for line in lines)
+
+    # A credential-looking entry is never opened, so its size and times
+    # stand in for its contents. Edit it to the same size and set its mtime
+    # back (touch -d): its ctime still moves, and gives the edit away.
+    before = wallet.stat()
+    wallet.write_text("NOT really a wallet")              # same length
+    os.utime(wallet, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert wallet.stat().st_size == before.st_size and wallet.stat().st_mtime_ns == before.st_mtime_ns
+    edited = audit()
+    assert [e.path for _, e in edited.changed] == [str(wallet)], (edited.new, edited.changed)
+    quiet(persistence.acknowledge_all, engine, edited, log)
     print("persistence acknowledge-all test passed ✓")
 
     # --- every kind of change ------------------------------------------------------------------------

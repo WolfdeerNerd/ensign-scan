@@ -6,10 +6,12 @@
         walk -> prune unchanged snapshot subtrees -> stat each file
             -> skip files whose (size, mtime, ctime) match the DB
             -> for the rest, in a thread pool:
-                 credential file? -> record as CLASSIFIED, never opened
-                 otherwise        -> open once as the user -> hash it
-                                     -> pass that same descriptor to clamd
-                                     -> upsert
+                 open once as the user -> hash it
+                 -> pass that same descriptor to clamd -> upsert
+                 (credential files too: a name is the attacker's choice,
+                 so it never decides whether a file is scanned. For a
+                 credential file, the hash is kept in memory only;
+                 see secrets.hash_not_stored)
                  larger than clamd scans? -> hash it, then queue the open
                                      descriptor for clamscan, run in
                                      batches with the limits switched off
@@ -200,6 +202,7 @@ class _Oversized:
     st: os.stat_result
     fd: int          # -1 once closed
     digest: str
+    real_path: str = ""  # what the kernel says was opened (secrets.hash_not_stored)
     fd_was: int = -1  # the number it had, to look up its clamscan result
 
     def __post_init__(self) -> None:
@@ -932,12 +935,6 @@ class Scanner:
         if not is_scannable(st):
             return None, "skipped"
 
-        # Credential files are decided on the path and stat() alone, before
-        # anything opens them: no hash is taken and clamd never sees them.
-        reason = secrets.skip_reason(str(path), os.path.realpath(path), st.st_mode)
-        if reason is not None and not self._known_infected(path):
-            return self._record_classified(path, st, reason)
-
         if scan:
             self.prepare_clamd()  # no-op after the first call; raises if clamd is root
 
@@ -954,17 +951,13 @@ class Scanner:
             # would stay in place for a file nobody can check any more.
             return self._record_unreadable(path, st, exc)
         try:
-            # The link could have been re-pointed between realpath() above
-            # and open(). Ask the kernel what was actually opened, and
-            # re-check before reading a single byte of it.
-            if reason is None:
-                try:
-                    opened = os.readlink(f"/proc/self/fd/{fd}")
-                except OSError:
-                    opened = os.path.realpath(path)
-                late = secrets.skip_reason(str(path), opened, st.st_mode)
-                if late is not None and not self._known_infected(path):
-                    return self._record_classified(path, st, late)
+            # What was actually opened, from the kernel: a symlink could have
+            # been re-pointed (at a key, say) since the walk saw it, and this
+            # decides whether the hash is stored.
+            try:
+                opened = os.readlink(f"/proc/self/fd/{fd}")
+            except OSError:
+                opened = os.path.realpath(path)
             try:
                 digest = sha256_fd(fd)
             except OSError as exc:  # opened, but reading failed (an I/O error, say)
@@ -974,23 +967,24 @@ class Scanner:
             elif st.st_size >= self._scan_limit():
                 # clamd would skip this file and still answer "OK". Not sent
                 # to clamd at all: queued, still open, for clamscan.
-                self._queue_oversized(_Oversized(path, st, fd, digest))
+                self._queue_oversized(_Oversized(path, st, fd, digest, opened))
                 fd = -1  # the queue owns the descriptor now
                 return digest, "queued"
             else:
                 outcome = (self.clamd.scan(path) if self._transport == "path"
                            else self.clamd.scan_fd(fd, label=str(path)))
                 if _clamd_skipped(outcome):  # a limit Ensign didn't know about
-                    self._queue_oversized(_Oversized(path, st, fd, digest))
+                    self._queue_oversized(_Oversized(path, st, fd, digest, opened))
                     fd = -1
                     return digest, "queued"
         finally:
             if fd >= 0:
                 os.close(fd)
-        return self._finish(path, st, digest, outcome)
+        return self._finish(path, st, digest, outcome, opened)
 
     def _finish(
-        self, path: Path, st: os.stat_result, digest: str, outcome: ScanOutcome | None
+        self, path: Path, st: os.stat_result, digest: str, outcome: ScanOutcome | None,
+        real_path: str | None = None,
     ) -> tuple[str | None, str]:
         """Record a hashed (and maybe scanned) file, note SSH-file changes,
         and print its line."""
@@ -999,8 +993,18 @@ class Scanner:
             # You marked this exact content, flagged by this exact signature,
             # as a false positive (allowlist.py). Anything else stays infected.
             outcome = ScanOutcome(ScanStatus.ALLOWED, outcome.raw, outcome.threat_name)
+        # A credential file's hash is used above, in memory, and not kept:
+        # stored, a hash of a short secret can be confirmed by guessing.
+        # Kept once the file is found infected: it's malware then, and
+        # --allow matches on it. Stored as "" every time, so a --no-scan
+        # run doesn't read the missing hash as a change.
+        stored = digest
+        real_path = real_path or os.path.realpath(path)
+        if digest and secrets.hash_not_stored(str(path), real_path) and not (
+                outcome is not None and outcome.status in (ScanStatus.INFECTED, ScanStatus.ALLOWED)):
+            stored = ""
         try:
-            previous_hash = self._upsert_file(path, st, digest, outcome)
+            previous_hash = self._upsert_file(path, st, stored, outcome)
         except Exception as exc:
             self._remember_unsaved(path, outcome, exc)
             return None, "failed"
@@ -1020,7 +1024,8 @@ class Scanner:
         symbol = _STATUS_SYMBOLS.get(status, "?")
         if outcome is not None and outcome.status == ScanStatus.ALLOWED:
             symbol = f"{symbol} [dim](allowed by you)[/dim]"
-        print(f"{symbol} {shown(path.name):.<50} {digest[:16]}… {status}")
+        shown_hash = f"{stored[:16]}…" if stored else f"{'hash not kept':<17}"
+        print(f"{symbol} {shown(path.name):.<50} {shown_hash} {status}")
         return digest, status
 
     # ------------------------------------------------------------------
@@ -1109,7 +1114,7 @@ class Scanner:
             recorded.add(fd)
             status = ScanStatus.ERROR.value
             try:
-                status = self._finish(item.path, item.st, item.digest, outcome)[1]
+                status = self._finish(item.path, item.st, item.digest, outcome, item.real_path or None)[1]
             except Exception:  # one file failing to record must not drop the rest
                 log.exception("could not record the clamscan result for %s", item.path)
             if advance is not None:

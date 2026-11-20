@@ -45,7 +45,7 @@ def _migrate(engine: Engine) -> None:
 # SQLite keeps a free integer in every database file (PRAGMA user_version)
 # for exactly this: recording which one-time upgrades have run. 0 is the
 # value every existing Ensign database has.
-DATA_VERSION = 1
+DATA_VERSION = 2
 
 
 def _upgrade_data(engine: Engine) -> None:
@@ -53,15 +53,30 @@ def _upgrade_data(engine: Engine) -> None:
         version = conn.exec_driver_sql("PRAGMA user_version").scalar() or 0
         if version < 1:
             _upgrade_to_fd_passing(conn)
+        if version < 2:
+            _upgrade_to_scanning_credential_files(conn)
+        if version < DATA_VERSION:
             conn.exec_driver_sql(f"PRAGMA user_version = {DATA_VERSION}")
             conn.commit()
+
+
+def _upgrade_to_scanning_credential_files(conn) -> None:
+    """Version 2: credential files are scanned (0.8.5).
+
+    Before, a file whose name matched a credential pattern was recorded
+    as CLASSIFIED and never opened, so it has no verdict. Clearing
+    ctime_ns sends each one through the scanner's existing "ctime
+    unknown -> rescan once" rule, which scans it and replaces the
+    status. Their stored hash is already "" and stays that way."""
+    conn.exec_driver_sql("UPDATE files SET ctime_ns = NULL WHERE scan_status = 'classified'")
 
 
 def _upgrade_to_fd_passing(conn) -> None:
     """Version 1: the switch to passing open files to clamd.
 
     Older versions hashed every file, credential files included, and
-    stored those hashes. Now credential files are never read, so:
+    stored those hashes. From 0.3.0 credential files were never read
+    (from 0.8.5 they're scanned, still with no hash stored), so:
 
       * credential files (HIGH secrets patterns): the stored hash is wiped,
         and ctime_ns is cleared so the next run re-decides them -- normally
