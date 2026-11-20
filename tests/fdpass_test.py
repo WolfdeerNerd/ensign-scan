@@ -274,7 +274,7 @@ key.write_text("fake key with PAYLOAD")
 clean_key = home / ".ssh" / "id_rsa"
 clean_key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nnot really\n")
 # The evasion this replaces: a payload named like a credential store,
-# anywhere on disk, was never opened (until 0.8.5).
+# anywhere on disk, was never opened (before 0.8.6).
 (home / "Downloads").mkdir()
 disguised = home / "Downloads" / "invoice.kdbx"
 disguised.write_text("PAYLOAD dressed up as a KeePass database")
@@ -396,7 +396,7 @@ assert "One-time" not in out, "the upgrade runs once"
 with sqlite3.connect(db_path) as raw:
     assert raw.execute("PRAGMA user_version").fetchone()[0] == DATA_VERSION
 
-# Version 1 -> 2 (0.8.5): credential files used to be CLASSIFIED without
+# Version 1 -> 2 (0.8.6): credential files used to be CLASSIFIED without
 # being opened, so they have no verdict. Each gets scanned once.
 v1_path = tmp / "v1.db"
 engine = make_engine(f"sqlite:///{v1_path}")
