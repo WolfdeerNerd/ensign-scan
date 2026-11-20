@@ -276,9 +276,13 @@ def main():
     print("\n--- legacy rows (ctime_ns NULL) are rescanned once ---")
     from sqlalchemy import text as _sqltext
     with scanner.engine.begin() as _conn:
+        _rows = _conn.execute(_sqltext("SELECT COUNT(*) FROM files")).scalar()
         _conn.execute(_sqltext("UPDATE files SET ctime_ns = NULL"))
     stats_leg = scanner.scan_tree(tree)
-    assert stats_leg.processed == 3, f"every row without a ctime must be rescanned, got {stats_leg}"
+    # Every row, those in unchanged snapshot folders included: those folders'
+    # files aren't stat-ed, but their records still say they need a scan.
+    assert stats_leg.unchanged_snapshot_dirs >= 1 and stats_leg.processed == _rows, \
+        f"every row without a ctime must be rescanned ({_rows}), got {stats_leg}"
     stats_leg2 = scanner.scan_tree(tree)
     assert stats_leg2.processed == 0, "and settle again once ctime is recorded"
     print("legacy ctime rescan test passed ✓")
@@ -288,25 +292,32 @@ def main():
     assert scanner.clamd.signature_version() == 27455, scanner.clamd.signature_version()
     assert scanner.scan_tree(tree).processed == 0, "same database: nothing to redo"
 
+    with scanner.engine.begin() as _conn:
+        _clean = _conn.execute(_sqltext("SELECT COUNT(*) FROM files WHERE scan_status = 'clean'")).scalar()
+        _snap_clean = _conn.execute(_sqltext(
+            "SELECT COUNT(*) FROM files WHERE scan_status = 'clean' AND filepath LIKE :p"),
+            {"p": f"{tree / 'snapshots'}/%"}).scalar()
     FAKE_SIG_VERSION[0] = 27456
     stats_sig = scanner.scan_tree(tree)
-    # a.txt and link_to_real.txt are clean; evil.bin is infected, which the
-    # rescan_infected pass already covers, so the walk leaves it alone.
-    assert stats_sig.sig_rescan == 2 and stats_sig.processed == 2, stats_sig
+    # Every clean file, snapshot files in unchanged folders included (those
+    # aren't stat-ed, but newer signatures still reach them). evil.bin is
+    # infected, which the rescan_infected pass already covers.
+    assert _snap_clean >= 1 and stats_sig.unchanged_snapshot_dirs >= 1, (_snap_clean, stats_sig)
+    assert stats_sig.sig_rescan == _clean and stats_sig.processed == _clean, (_clean, stats_sig)
     assert scanner.scan_tree(tree).processed == 0, "stamped with the new version, settles again"
 
     relaxed = Scanner(dataclasses.replace(config, rescan_after_signature_updates=3), clamd=scanner.clamd)
     FAKE_SIG_VERSION[0] = 27458   # 2 updates behind: under the threshold of 3
     assert relaxed.scan_tree(tree).processed == 0, "threshold 3 ignores a 2-update gap"
     FAKE_SIG_VERSION[0] = 27459   # exactly 3 behind
-    assert relaxed.scan_tree(tree).processed == 2, "threshold 3 triggers at a 3-update gap"
+    assert relaxed.scan_tree(tree).processed == _clean, "threshold 3 triggers at a 3-update gap"
 
     off = Scanner(dataclasses.replace(config, rescan_after_signature_updates=0), clamd=scanner.clamd)
     FAKE_SIG_VERSION[0] = 27999
     assert off.scan_tree(tree).processed == 0, "0 disables signature-triggered rescans"
 
     FAKE_SIG_VERSION[0] = 27000   # database went backwards (restored backup, other machine)
-    assert scanner.scan_tree(tree).processed == 2, "an older database than the stamp counts as stale"
+    assert scanner.scan_tree(tree).processed == _clean, "an older database than the stamp counts as stale"
     FAKE_SIG_VERSION[0] = 27455
     scanner.scan_tree(tree)       # leave the stamps as later tests expect
     print("signature-triggered rescan test passed ✓")

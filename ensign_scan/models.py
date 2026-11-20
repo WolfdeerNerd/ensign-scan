@@ -243,7 +243,7 @@ class DirectoryRecord(Base):
     directory_path = Column(FsPath, unique=True, nullable=False)
     directory_name = Column(FsPath, nullable=False)
     mtime_ns = Column(Integer)
-    # NULL for folders recorded before 0.8.5: treated as changed once.
+    # NULL for folders recorded before 0.8.6: treated as changed once.
     ctime_ns = Column(Integer)
     last_scanned = Column(DateTime)
 
