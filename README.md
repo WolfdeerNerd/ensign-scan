@@ -315,7 +315,7 @@ python3 main.py --acknowledge-all
 
 After that, a run lists only what changed. Accept an entry you recognize with `--acknowledge PATH`, or everything listed with `--acknowledge-all`. A package update changes the units it ships, so expect a short list after one.
 
-**Without root,** a few places can't be read (`/var/spool/cron`, root's own startup files). They are listed under "COULDN'T CHECK", and entries you acknowledged inside them aren't reported as gone. `sudo python3 main.py --persistence` includes them.
+**Without root,** a few places can't be read (`/var/spool/cron`, root's own startup files). They are listed under "COULDN'T CHECK", and entries you acknowledged inside them aren't reported as gone. `sudo python3 main.py --persistence` includes them. Runs with sudo keep their own baseline, in root's data folder (see Running with `sudo`), so the first one lists every entry as new, including ones you already acknowledged as yourself; acknowledge them again with `sudo`.
 
 **Every acknowledgment is logged** to `persistence_acknowledged.log` in your data directory: one line per entry, with the time, the path, and the hash or link target, separated by tabs.
 
@@ -420,7 +420,7 @@ ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match 
   - it hashes the file again, so the report is about the exact content that was flagged;
   - it scans the file again with your current signatures. If ClamAV no longer flags it, the false positive has already been fixed and there's nothing to report;
   - a signature whose name ends in `.UNOFFICIAL` doesn't come from ClamAV but from a third-party signature set, so Ensign tells you to report it to whoever provides that set instead;
-  - otherwise it writes a short report to `clamav-reports/` in your data directory: the signature name, SHA-256 and MD5, size, file type and ClamAV versions. It contains no file name, path, username or hostname;
+  - otherwise it writes a short report to `clamav-reports/` in your data directory (under `sudo`, root's: `/var/lib/ensign-scan/clamav-reports/`, readable only with `sudo`): the signature name, SHA-256 and MD5, size, file type and ClamAV versions. It contains no file name, path, username or hostname;
   - it then tells you how to submit it, through ClamAV's form at <https://www.clamav.net/reports/fp> or with ClamAV's `clamsubmit` tool. ClamAV needs the file itself, so the file to attach is named on screen. It's never copied anywhere, because if the detection were real, the copy would be a second piece of malware.
 
   Ensign never submits anything itself. Submitting sends the whole file to Cisco (ClamAV's owner), so don't submit anything private; Ensign warns you if the file is in a personal folder like Documents or Downloads. A file the sweep flagged can't be reported this way: ClamAV can't scan a file that large, so it can't reproduce the detection.
