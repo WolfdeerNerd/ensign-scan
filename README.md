@@ -164,7 +164,9 @@ If clamd can't be reached to ask, Ensign falls back to a safe default of 5 worke
 
 The examples below are written as `python3 main.py` (running from a checkout). If you installed Ensign, use `ensign-scan` instead: `ensign-scan --help`, `ensign-scan ~/Downloads`, and so on.
 
-**First run: don't use `sudo`.** Run Ensign under your own username the first time. Ensign creates its config, database and log files on first run, and whoever runs it owns them. If the first run is as root, those files end up owned by root and your username can't use them afterwards. If that happens, delete the root-created files (the database in `~/.local/share/ensign-scan/` and the config in `~/.config/ensign-scan/`) and run Ensign once under your own username to recreate them.
+**Running with `sudo`:** runs as root keep their own config and database, which only root can change: `/etc/ensign-scan/config.toml` and `/var/lib/ensign-scan/`. They never read your config or write into your folders. If they did, anything running as you (malware included) could edit the config to hide from the root scan, or plant a symlink that root would follow and overwrite a system file. The first run as root copies your config there once, and says so; after that the two are independent, so to change a setting for sudo runs, edit the copy with `sudo`. Check the copy after that first run, its `excludes` in particular, since it holds whatever your config said at that moment. As root, Ensign refuses to start if its config file or data folder (including a custom `data_dir` or `--config`) is owned by another user or can be changed by one.
+
+Files Ensign creates (the data folder, database, logs, config and reports) are readable only by their owner, since the database lists every file it has seen, including where your credential files are. Folders and files that already exist keep the permissions they have.
 
 **First quick scan:** Before scanning everything, test your setup on one folder.
 
@@ -191,7 +193,7 @@ While it runs, the bottom line of the terminal shows live progress: files done o
 | `python3 main.py --no-scan` | Hash and record files, skip ClamAV entirely |
 | `python3 main.py --skip-rescans` | Skip the infected/error/stale rescan passes at the end |
 | `python3 main.py --sweep` | After the scan, sweep files too large for ClamAV in slices (see Large files) |
-| `python3 main.py --config PATH` | Use an alternate config file (default: `~/.config/ensign-scan/config.toml`) |
+| `python3 main.py --config PATH` | Use an alternate config file (default: `~/.config/ensign-scan/config.toml`; as root, `/etc/ensign-scan/config.toml`) |
 | `ENSIGN_CONFIG=PATH python3 main.py` | The same as `--config`, set through an environment variable. If both are given, `--config` wins |
 
 ### Standalone maintenance commands

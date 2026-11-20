@@ -180,6 +180,12 @@ def main() -> int:
 
 def _main() -> int:
     global _ended_with_gap
+    # Everything Ensign creates (data folder, database and its -wal/-shm
+    # files, logs, config, reports) is readable by its owner only: the
+    # database maps every file on the machine, including where secrets
+    # live. Only new files are affected; existing ones keep the permissions
+    # they have, so a folder you opened up on purpose stays that way.
+    os.umask(0o077)
     args = parse_args()
     # Absolute, normalized paths: the database, the excludes and the scoped
     # reports all work on absolute paths, so "cd ~ && ensign-scan Downloads"
@@ -207,9 +213,9 @@ def _main() -> int:
         for line in moved:
             print(shown(line))
         print("If a script or timer names an old path, update it.")
-    if not args.config:
-        ensure_default_config()
     try:
+        if not args.config:
+            ensure_default_config()
         config = Config.load(args.config)
     except ValueError as exc:   # a malformed config, TOML syntax errors included
         print(f"[bold red]✗ Config error:[/bold red] {shown(str(exc))}")
@@ -262,6 +268,11 @@ def _after_config(args, config: Config) -> int:
         print(f"[yellow]Ensign is already running ({who}). Not starting a second one.[/yellow]")
         print(f"  Lock: {shown(busy.path)}")
         return EXIT_BUSY
+    except OSError as exc:   # e.g. ELOOP: the lock file is a symlink (runlock.py)
+        print(f"[bold red]✗ Couldn't take the run lock:[/bold red] {shown(lock.path)}: "
+              f"{shown(exc.strerror or str(exc))}")
+        print("  If it's a symlink, something other than Ensign put it there. Nothing was scanned.")
+        return 1
     try:
         return run(args, config)
     finally:

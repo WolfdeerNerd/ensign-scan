@@ -6,7 +6,9 @@ Design for multi-machine use:
     TOML file, so any user on any box gets sane defaults out of the box.
   * Config search order: --config flag > $ENSIGN_CONFIG >
     ~/.config/ensign-scan/config.toml > built-in defaults. (Before 0.8.1
-    the folders were named "ensign"; see legacy_notice().)
+    the folders were named "ensign"; see legacy_notice().) As root, the
+    default is /etc/ensign-scan/config.toml, and the data folder is
+    /var/lib/ensign-scan: see ROOT_CONFIG_PATH and trust.py.
   * Per-machine differences go in [hosts.<hostname>] sections of the
     SAME file, so you can sync one config across all your machines and
     each one picks up its own overrides.
@@ -19,10 +21,12 @@ from __future__ import annotations
 import os
 import pwd
 import socket
+import stat
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import trust
 from .pkgdb import CHOICES as PACKAGE_VERIFICATION_CHOICES
 
 
@@ -49,8 +53,20 @@ def real_home() -> Path:
 HOME = real_home()
 HOSTNAME = socket.gethostname()
 
-DEFAULT_DATA_DIR = HOME / ".local" / "share" / "ensign-scan"
-DEFAULT_CONFIG_PATH = HOME / ".config" / "ensign-scan" / "config.toml"
+# Your own config and data, in your home.
+USER_DATA_DIR = HOME / ".local" / "share" / "ensign-scan"
+USER_CONFIG_PATH = HOME / ".config" / "ensign-scan" / "config.toml"
+
+# Root's (runs with sudo): its own config and data, which only root can
+# change. Root never reads your config or writes into your folders -- see
+# trust.py for why. On the first run as root, your config is copied here
+# once (ensure_default_config); after that the two are independent.
+ROOT_DATA_DIR = Path("/var/lib/ensign-scan")
+ROOT_CONFIG_PATH = Path("/etc/ensign-scan/config.toml")
+
+AS_ROOT = os.geteuid() == 0
+DEFAULT_DATA_DIR = ROOT_DATA_DIR if AS_ROOT else USER_DATA_DIR
+DEFAULT_CONFIG_PATH = ROOT_CONFIG_PATH if AS_ROOT else USER_CONFIG_PATH
 
 # Before 0.8.1 the folders were named just "ensign": generic enough that some
 # other program could pick the same name and share a folder with Ensign's
@@ -64,7 +80,9 @@ LEGACY_CONFIG_PATH = HOME / ".config" / "ensign" / "config.toml"
 
 def default_config_path() -> Path:
     """The config file to use when none is named: the new place, unless only
-    the old one has a file."""
+    the old one has a file. Root has no old place."""
+    if AS_ROOT:
+        return DEFAULT_CONFIG_PATH
     if not DEFAULT_CONFIG_PATH.exists() and LEGACY_CONFIG_PATH.is_file():
         return LEGACY_CONFIG_PATH
     return DEFAULT_CONFIG_PATH
@@ -72,7 +90,9 @@ def default_config_path() -> Path:
 
 def default_data_dir() -> Path:
     """The data folder to use when data_dir isn't set: the new place, unless
-    only the old one exists."""
+    only the old one exists. Root has no old place."""
+    if AS_ROOT:
+        return DEFAULT_DATA_DIR
     if not DEFAULT_DATA_DIR.exists() and LEGACY_DATA_DIR.is_dir():
         return LEGACY_DATA_DIR
     return DEFAULT_DATA_DIR
@@ -117,6 +137,18 @@ _INT_SETTINGS = ("max_workers", "cpu_share", "max_clamscans", "clamscan_memory_p
                  "resweep_after_signature_updates", "resweep_after_days", "rescan_after_days",
                  "rescan_after_signature_updates", "infected_alert_seconds", "log_keep_days",
                  "log_max_total_mb", "signature_max_age_days")
+
+
+def _require_root_only(what: str, place: Path) -> None:
+    """As root, refuse a config file or data folder another user could change."""
+    if not AS_ROOT:
+        return
+    why = trust.untrusted_reason(place)
+    if why:
+        raise ValueError(
+            f"running as root, but the {what} {place} isn't safe to use: {why}. As root, "
+            f"Ensign only uses a config and data folder no other user can change "
+            f"(by default {ROOT_CONFIG_PATH} and {ROOT_DATA_DIR}).")
 
 
 def _check_paths(raw: dict, source: str) -> None:
@@ -260,7 +292,16 @@ class Config:
         """
         explicit = path or os.environ.get("ENSIGN_CONFIG")
         cfg_path = Path(explicit) if explicit else default_config_path()
+        # As root, both the config file (before it's parsed) and the data
+        # folder (before anything is written to it) must be root-only.
+        # See trust.py for why.
+        _require_root_only("config file", cfg_path)
+        config = cls._load_file(cfg_path, explicit)
+        _require_root_only("data_dir", config.data_dir)
+        return config
 
+    @classmethod
+    def _load_file(cls, cfg_path: Path, explicit: str | Path | None) -> "Config":
         if not cfg_path.is_file():
             if explicit:
                 raise FileNotFoundError(f"Config file not found: {cfg_path}")
@@ -540,6 +581,9 @@ excludes = [
 def ensure_default_config() -> None:
     """Write the commented template on first run so users have something
     to edit instead of reading source code to learn the options."""
+    if AS_ROOT:
+        _ensure_root_config()
+        return
     # An old-location config counts: a fresh template at the new place
     # would win over it and quietly drop every setting in it.
     if DEFAULT_CONFIG_PATH.exists() or LEGACY_CONFIG_PATH.exists():
@@ -547,6 +591,60 @@ def ensure_default_config() -> None:
     DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     DEFAULT_CONFIG_PATH.write_text(EXAMPLE_CONFIG)
     print(f"[ensign] Wrote starter config to {DEFAULT_CONFIG_PATH}")
+
+
+_MAX_COPIED_CONFIG = 1024 * 1024
+
+
+def _ensure_root_config() -> None:
+    """First run as root: copy the sudo user's config to root's place, once.
+
+    After this the two are independent: editing your own config no longer
+    changes what sudo runs do, so malware running as you can't either. Only
+    a regular file the sudo user owns is copied, opened without following a
+    symlink (a link to /etc/shadow would otherwise be copied as root). With
+    nothing to copy, root gets the starter template.
+    """
+    if DEFAULT_CONFIG_PATH.exists() or DEFAULT_CONFIG_PATH.is_symlink():
+        return
+    _require_root_only("config file", DEFAULT_CONFIG_PATH)
+    copied_from, text = _user_config_to_copy()
+    DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(DEFAULT_CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text if copied_from else EXAMPLE_CONFIG)
+    if copied_from:
+        print(f"[ensign] First run as root: copied your config {_tilde(copied_from)} to "
+              f"{DEFAULT_CONFIG_PATH}.\n"
+              f"[ensign] Runs with sudo use that copy from now on; changing your own config "
+              f"no longer affects them. Check it, its excludes in particular: it holds "
+              f"whatever your config said at this moment.")
+    else:
+        print(f"[ensign] Wrote starter config for runs as root to {DEFAULT_CONFIG_PATH}")
+
+
+def _user_config_to_copy() -> tuple[Path | None, str]:
+    """(path, text) of the sudo user's config, or (None, "") if there's none
+    to copy safely."""
+    try:
+        uid = int(os.environ["SUDO_UID"])
+    except (KeyError, ValueError):
+        return None, ""   # root logged in directly: no user to copy from
+    for path in (USER_CONFIG_PATH, LEGACY_CONFIG_PATH):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError:
+            continue   # missing, or a symlink (ELOOP)
+        with os.fdopen(fd, "rb") as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != uid or st.st_size > _MAX_COPIED_CONFIG:
+                continue
+            raw = f.read(_MAX_COPIED_CONFIG + 1)
+        try:
+            return path, raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    return None, ""
 
 
 def _tilde(path: Path) -> str:

@@ -40,14 +40,19 @@ class RunLock:
     def acquire(self) -> None:
         """Take the lock without waiting. Raises AlreadyRunning if it's held."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # O_NOFOLLOW: the lock is truncated and written below, so a symlink
+        # planted here would aim that write at whatever it points to. As
+        # root, config.py already refuses a data folder anyone else can
+        # write to; this is a second line of defence. A symlink fails with
+        # ELOOP (an OSError) instead of being followed.
         try:
-            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             writable = True
         except PermissionError:
             # e.g. the file was created by an earlier `sudo` run and is
             # root-owned. flock works on a read-only descriptor, so the
             # lock still holds; we just can't record our pid in it.
-            fd = os.open(self.path, os.O_RDONLY)
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
             writable = False
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

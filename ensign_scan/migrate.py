@@ -127,6 +127,10 @@ def move_legacy_folders(explicit_config: str | None) -> tuple[list[str], list[st
     old folder that's still there, why it wasn't. Both are empty when there
     are no old folders.
     """
+    if cfg.AS_ROOT:
+        # The old folders are the user's, and root doesn't touch the user's
+        # folders (trust.py). Root's own folders never had an old name.
+        return [], []
     explicit = explicit_config or os.environ.get("ENSIGN_CONFIG")
     old_cfg_dir, new_cfg_dir = cfg.LEGACY_CONFIG_PATH.parent, cfg.DEFAULT_CONFIG_PATH.parent
     old_data, new_data = cfg.LEGACY_DATA_DIR, cfg.DEFAULT_DATA_DIR
