@@ -395,6 +395,19 @@ assert str(clean_key) in SEEN, "scanned, through the link"
 with Session(sc.engine) as s:
     stored = s.query(FileRecord.file_hash).filter(FileRecord.filepath == str(bait)).scalar()
 assert stored == "", "a link re-pointed at a key mustn't get the key's hash stored"
+# A clean credential file keeps no hash, so a --no-scan run can't compare
+# hashes to see that it changed. Its size and times must do it, or the old
+# "clean" would stick to new content and no later scan would look again.
+clean_key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nPAYLOAD swapped in\n")
+quietly(sc.scan_tree, home, scan=False)
+with Session(sc.engine) as s:
+    assert s.query(FileRecord.scan_status).filter(FileRecord.filepath == str(clean_key)).scalar() == "pending", \
+        "a changed credential file seen by --no-scan goes back to pending"
+SEEN.clear()
+quietly(sc.scan_tree, home)
+assert str(clean_key) in SEEN, "and the next real scan scans it"
+with Session(sc.engine) as s:
+    assert s.query(FileRecord.scan_status).filter(FileRecord.filepath == str(clean_key)).scalar() == "infected"
 print("pipeline test passed ✓")
 
 # ----------------------------------------------------------------------
