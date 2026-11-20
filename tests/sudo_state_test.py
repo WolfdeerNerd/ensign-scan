@@ -149,6 +149,13 @@ try:
     assert "could create it first" in (trust.untrusted_reason(sticky / "missing") or ""), \
         "a missing name in a sticky folder can be claimed by anyone"
     assert "shared" in (trust.untrusted_reason(sticky) or ""), "a shared folder as the place itself"
+    # A path Ensign can't check is refused with a reason, never a traceback.
+    # (A traceback still meant no run, but read as a crash, not a refusal.)
+    a_file = safe / "a-file"
+    a_file.write_text("")
+    assert "couldn't check" in (trust.untrusted_reason(a_file / "below-a-file") or ""), \
+        "a path through a regular file"
+    assert "couldn't check" in (trust.untrusted_reason(safe / ("x" * 300)) or ""), "a name too long"
     print("trust check test passed ✓")
 
     # ------------------------------------------------------------------

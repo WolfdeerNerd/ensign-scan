@@ -51,7 +51,7 @@ def _walk(path: str, followed: int) -> str | None:
             # Lexical is right here: `current` has no symlinks in it (each
             # one was replaced by its target), so its parent is the real one.
             current = os.path.dirname(current)
-            shared = _is_shared(os.lstat(current))
+            shared = _is_shared(os.lstat(current))   # an ancestor already checked: it exists
             continue
         candidate = os.path.join(current, part)
         try:
@@ -61,10 +61,18 @@ def _walk(path: str, followed: int) -> str | None:
                 # In /tmp, say, anyone could create this name before root does.
                 return f"{candidate} doesn't exist yet, and another user could create it first in {current}"
             return None   # the rest gets created by root, inside a root-only folder
+        except OSError as exc:
+            # Not a directory, permission denied (even root, in some
+            # containers or on /proc), a name too long: refuse, don't crash.
+            return f"couldn't check {candidate}: {exc.strerror or exc}"
         if stat.S_ISLNK(st.st_mode):
             if st.st_uid != 0:
                 return f"{candidate} is a symlink owned by uid {st.st_uid}, not root"
-            target = os.path.join(current, os.readlink(candidate))   # absolute target wins
+            try:
+                link = os.readlink(candidate)
+            except OSError as exc:
+                return f"couldn't read the symlink {candidate}: {exc.strerror or exc}"
+            target = os.path.join(current, link)   # an absolute target replaces `current`
             return _walk(os.path.join(target, *parts[i + 1:]), followed + 1)
         why = _not_root_only(candidate, st)
         if why:
