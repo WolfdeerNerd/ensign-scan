@@ -117,6 +117,7 @@ KNOWN_SETTINGS = frozenset({
     "resweep_after_signature_updates", "resweep_after_days",
     "rescan_after_days", "rescan_after_signature_updates",
     "infected_alert_seconds", "infected_alert_only_while_gaming",
+    "never_open_credentials",
     "log_keep_days", "log_max_total_mb",
     "scan_targets", "snapshot_roots",
     "excludes", "signature_max_age_days", "package_verification",
@@ -132,7 +133,7 @@ KNOWN_SETTINGS = frozenset({
 # of the wrong type fails loudly: "no" in quotes is a non-empty string, which
 # Python treats as true, so sweep_huge_files = "no" would quietly mean yes,
 # and a quoted number crashed the run hours in, when it was first compared.
-_BOOL_SETTINGS = ("sweep_huge_files", "infected_alert_only_while_gaming")
+_BOOL_SETTINGS = ("sweep_huge_files", "infected_alert_only_while_gaming", "never_open_credentials")
 _INT_SETTINGS = ("max_workers", "cpu_share", "max_clamscans", "clamscan_memory_percent",
                  "resweep_after_signature_updates", "resweep_after_days", "rescan_after_days",
                  "rescan_after_signature_updates", "infected_alert_seconds", "log_keep_days",
@@ -257,6 +258,10 @@ class Config:
     # Apply infected_alert_seconds only while a Steam game is running;
     # otherwise the alert stays until dismissed.
     infected_alert_only_while_gaming: bool = True
+    # Opt-in: leave an application's own credential files unscanned when
+    # their header confirms the format (secrets.never_open_reason). Off:
+    # every file is scanned, credential files keeping no hash.
+    never_open_credentials: bool = False
     # Warn (not block) if the loaded virus-signature database is older
     # than this. Usually means freshclam has silently stopped running.
     signature_max_age_days: int = 3
@@ -348,7 +353,7 @@ class Config:
         for key in ("clamd_socket", "max_workers", "cpu_share", "max_clamscans", "clamscan_memory_percent",
                     "rescan_after_days",
                     "rescan_after_signature_updates", "infected_alert_seconds",
-                    "infected_alert_only_while_gaming", "log_keep_days",
+                    "infected_alert_only_while_gaming", "never_open_credentials", "log_keep_days",
                     "log_max_total_mb", "signature_max_age_days", "sweep_huge_files",
                     "resweep_after_signature_updates", "resweep_after_days"):
             if key in raw:
@@ -492,6 +497,15 @@ infected_alert_seconds = 60
 # as gaming.) Runs with no terminal (a service or cron job) always auto-close,
 # and each new infected alert replaces the previous one instead of stacking.
 infected_alert_only_while_gaming = true
+
+# Credential files are scanned like everything else, and no hash of them is
+# stored. true = leave some unscanned: only an application's own credential
+# file in its usual place (SSH keys in ~/.ssh, a browser's saved-password
+# database, gcloud's credential databases, /etc/krb5.keytab), owned by you,
+# not executable, and starting with that format's header. Only those first
+# bytes are read. Anything running as you can write to those places, so a
+# file left unscanned there could be malware wearing the right header.
+never_open_credentials = false
 
 # Error logs: one file per run in <data_dir>/logs/, created only when a run
 # has errors. Runs older than log_keep_days are deleted; if the folder is

@@ -398,6 +398,61 @@ assert stored == "", "a link re-pointed at a key mustn't get the key's hash stor
 print("pipeline test passed ✓")
 
 # ----------------------------------------------------------------------
+# 5b. never_open_credentials (opt-in): only an application's own file,
+#     confirmed by its header, is left unscanned
+# ----------------------------------------------------------------------
+shome = tmp / "strict-home"
+(shome / ".ssh").mkdir(parents=True)
+(shome / ".config/google-chrome/Default").mkdir(parents=True)
+(shome / "Downloads").mkdir()
+real_key = shome / ".ssh" / "id_ed25519"
+real_key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n")
+fake_key = shome / ".ssh" / "id_rsa"                       # right place, wrong header
+fake_key.write_text("PAYLOAD\n")
+exec_key = shome / ".ssh" / "id_ecdsa"                     # right header, but executable
+exec_key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nPAYLOAD\n")
+exec_key.chmod(0o755)
+logins = shome / ".config/google-chrome/Default/Login Data"
+logins.write_bytes(b"SQLite format 3\0" + b"\0" * 84)
+vault = shome / "Downloads" / "vault.kdbx"                  # real header, but no fixed place
+vault.write_bytes(bytes.fromhex("03d9a29a67fb4bb5") + b"\x01\x00\x04\x00")
+elsewhere = shome / "Downloads" / "id_ed25519"              # real header, wrong place
+elsewhere.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nPAYLOAD\n")
+
+
+def strict_scanner(on):
+    return Scanner(Config(db_url=f"sqlite:///{tmp / 'strict'}.db", log_file=tmp / "strict.log",
+                          clamd_socket=fake_sock, max_workers=1, never_open_credentials=on))
+
+
+real_home = scanner_mod.HOME
+scanner_mod.HOME = shome   # the canonical places are relative to the home folder
+try:
+    SEEN.clear()
+    st_sc = strict_scanner(True)
+    quietly(st_sc.scan_tree, shome)
+    with Session(st_sc.engine) as s:
+        got = {r.filepath: r for r in s.query(FileRecord)}
+    for f in (real_key, logins):
+        assert str(f) not in SEEN, f"{f.name} in its usual place with its header: not scanned"
+        assert got[str(f)].scan_status == "classified" and got[str(f)].file_hash == ""
+    for f in (fake_key, exec_key, vault, elsewhere):
+        assert str(f) in SEEN, f"{f} must still be scanned"
+    assert got[str(fake_key)].scan_status == "infected", "a wrong header in ~/.ssh is scanned and caught"
+    assert got[str(elsewhere)].scan_status == "infected", "a key's header outside ~/.ssh doesn't help"
+
+    # Turned off again: what it left unscanned is scanned once, unchanged or not.
+    SEEN.clear()
+    off_sc = strict_scanner(False)
+    quietly(off_sc.scan_tree, shome)
+    assert str(real_key) in SEEN and str(logins) in SEEN, "turning it off scans what it skipped"
+    with Session(off_sc.engine) as s:
+        assert s.query(FileRecord).filter(FileRecord.scan_status == "classified").count() == 0
+finally:
+    scanner_mod.HOME = real_home
+print("never_open_credentials test passed ✓")
+
+# ----------------------------------------------------------------------
 # 6. One-time upgrade of an old database
 # ----------------------------------------------------------------------
 db_path = tmp / "old.db"

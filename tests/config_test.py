@@ -23,6 +23,7 @@ assert cfg.sweep_huge_files is True  # the sweep is on by default
 assert (cfg.resweep_after_signature_updates, cfg.resweep_after_days) == (30, 30)
 assert cfg.infected_alert_seconds == 60
 assert cfg.infected_alert_only_while_gaming is True
+assert cfg.never_open_credentials is False  # every file is scanned by default
 assert cfg.log_keep_days == 90 and cfg.log_max_total_mb == 2048
 assert cfg.log_dir == cfg.data_dir / 'logs'
 assert "ensign-scan/system.db" in cfg.db_url
@@ -137,6 +138,7 @@ print("resweep settings test passed ✓")
 
 # Wrong types fail loudly, before anything runs
 for raw, needle in (({"sweep_huge_files": "no"}, "true or false"),
+                    ({"never_open_credentials": "yes"}, "true or false"),
                     ({"resweep_after_days": "30"}, "remove the quotes"),
                     ({"max_workers": True}, "whole number"),
                     ({"rescan_after_signature_updates": 7.5}, "whole number"),
