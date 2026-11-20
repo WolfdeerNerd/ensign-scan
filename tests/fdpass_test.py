@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session
 from ensign_scan import secrets
 from ensign_scan.clamd import ClamdClient, ScanOutcome, _effective_uid, _pids_named
 from ensign_scan.config import Config
-from ensign_scan.db import make_engine
+from ensign_scan.db import DATA_VERSION, make_engine
 from ensign_scan.fsutil import NotScannable, open_for_scan, sha256_fd
 from ensign_scan.models import FileRecord, ScanStatus, utcnow
 from ensign_scan.reports import integrity_report
@@ -264,13 +264,20 @@ assert "Couldn't confirm which user clamd runs as" in flat(out), "unknown UID: w
 print("root-clamd refusal test passed ✓")
 
 # ----------------------------------------------------------------------
-# 5. Pipeline: credential files never reach clamd; SSH changes reported
+# 5. Pipeline: credential files are scanned but keep no hash; SSH changes reported
 # ----------------------------------------------------------------------
 home = tmp / "home"
 (home / ".ssh").mkdir(parents=True)
 os.chmod(home / ".ssh", 0o700)
 key = home / ".ssh" / "id_ed25519"
 key.write_text("fake key with PAYLOAD")
+clean_key = home / ".ssh" / "id_rsa"
+clean_key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nnot really\n")
+# The evasion this replaces: a payload named like a credential store,
+# anywhere on disk, was never opened (before 0.8.6).
+(home / "Downloads").mkdir()
+disguised = home / "Downloads" / "invoice.kdbx"
+disguised.write_text("PAYLOAD dressed up as a KeePass database")
 auth = home / ".ssh" / "authorized_keys"
 auth.write_text("ssh-ed25519 AAAA mine\n")
 planted = home / ".ssh" / "helper"
@@ -284,12 +291,16 @@ SEEN.clear()
 sc = scanner_with(None, "pipeline")  # None: a real ClamdClient on the fake socket
 quietly(sc.scan_tree, home)
 assert sc._transport == "fd"
-assert str(key) not in SEEN, "a credential file must never reach clamd"
+assert {str(key), str(clean_key), str(disguised)} <= set(SEEN), "a credential name never stops a scan"
 assert str(planted) in SEEN and str(private) in SEEN
 assert sc.integrity_changes == [], "the first sighting is the baseline, not a change"
 with Session(sc.engine) as s:
     rows = {r.filepath: r for r in s.query(FileRecord)}
-assert rows[str(key)].scan_status == "classified" and rows[str(key)].file_hash == ""
+assert rows[str(disguised)].scan_status == "infected", "a payload named invoice.kdbx is caught"
+assert rows[str(key)].scan_status == "infected" and rows[str(key)].file_hash, \
+    "a credential-named file found infected keeps its hash: --allow needs it"
+assert rows[str(clean_key)].scan_status == "clean" and rows[str(clean_key)].file_hash == "", \
+    "a clean credential file is scanned, and no hash of it is stored"
 assert rows[str(planted)].scan_status == "infected", "an executable in .ssh is scanned"
 assert rows[str(private)].scan_status == "infected"
 assert rows[str(auth)].scan_status == "clean"
@@ -323,10 +334,11 @@ assert str(npmrc) in SEEN, "a known infection is rescanned, not classified"
 with Session(sc.engine) as s:
     assert s.query(FileRecord.scan_status).filter(FileRecord.filepath == str(npmrc)).scalar() == "infected"
 
-# The symlink is re-pointed at a key between the check and the open: the
-# check after open() (what the kernel says was opened) must catch it.
+# The symlink is re-pointed at a key after the walk saw it. The file is
+# scanned either way; whether its hash is stored must follow what the
+# kernel says was opened, not a realpath() taken earlier.
 bait = home / "readme.txt"
-bait.symlink_to(key)
+bait.symlink_to(clean_key)
 import ensign_scan.scanner as scanner_mod
 real_realpath = scanner_mod.os.path.realpath
 scanner_mod.os.path.realpath = lambda p: str(private)   # the pre-open check is fooled
@@ -335,7 +347,10 @@ try:
     digest, _ = quietly(sc.process_file, bait)
 finally:
     scanner_mod.os.path.realpath = real_realpath
-assert digest == "" and str(key) not in SEEN, "caught after open, before reading"
+assert str(clean_key) in SEEN, "scanned, through the link"
+with Session(sc.engine) as s:
+    stored = s.query(FileRecord.file_hash).filter(FileRecord.filepath == str(bait)).scalar()
+assert stored == "", "a link re-pointed at a key mustn't get the key's hash stored"
 print("pipeline test passed ✓")
 
 # ----------------------------------------------------------------------
@@ -379,7 +394,26 @@ assert OLD_KEY_HASH.encode() not in blob, "the old hash must be gone from the fi
 _, out = quietly(make_engine, f"sqlite:///{db_path}")
 assert "One-time" not in out, "the upgrade runs once"
 with sqlite3.connect(db_path) as raw:
-    assert raw.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == DATA_VERSION
+
+# Version 1 -> 2 (0.8.6): credential files used to be CLASSIFIED without
+# being opened, so they have no verdict. Each gets scanned once.
+v1_path = tmp / "v1.db"
+engine = make_engine(f"sqlite:///{v1_path}")
+with Session(engine) as s:
+    for path, status in ((f"{H}/Downloads/invoice.kdbx", "classified"), (f"{H}/docs/b.txt", "clean")):
+        s.add(FileRecord(filepath=path, filename=os.path.basename(path), file_hash="",
+                         scan_status=status, mtime_ns=1, ctime_ns=1, last_scanned=utcnow()))
+    s.commit()
+engine.dispose()
+with sqlite3.connect(v1_path) as raw:
+    raw.execute("PRAGMA user_version = 1")
+engine, _ = quietly(make_engine, f"sqlite:///{v1_path}")
+with Session(engine) as s:
+    got = {r.filepath: r.ctime_ns for r in s.query(FileRecord)}
+assert got[f"{H}/Downloads/invoice.kdbx"] is None, "a classified file is sent to be scanned once"
+assert got[f"{H}/docs/b.txt"] == 1, "other rows are untouched"
+engine.dispose()
 print("database upgrade test passed ✓")
 
 # ----------------------------------------------------------------------
