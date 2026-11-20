@@ -236,6 +236,10 @@ jobs:
       # they must come back scanned, through stdin, never "Access denied".
       - name: Scan files the clamav user can't read, under sudo
         run: sudo "$(command -v python)" tests/clamscan_sudo_test.py
+      # As root, Ensign must never read a config or write into a folder
+      # another user can change (symlink and config-tampering attacks).
+      - name: Root keeps its own config and data, under sudo
+        run: sudo "$(command -v python)" tests/sudo_state_test.py
       - name: Show the clamd log and any AppArmor denials
         if: failure()
         run: |
