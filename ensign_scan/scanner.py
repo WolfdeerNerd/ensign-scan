@@ -1539,13 +1539,17 @@ class Scanner:
         differs from the stored one, the stored verdict was for other
         content, so it is cleared and the file goes back to "pending":
         otherwise the new size and times would sit beside the old "clean",
-        and every later scan would take the file for unchanged and checked."""
+        and every later scan would take the file for unchanged and checked.
+        A credential file has no stored hash to compare (digest ""), so for
+        it a changed size, mtime or ctime counts as changed content."""
         with Session(self.engine) as session:
             try:
                 record = session.query(FileRecord).filter(
                     FileRecord.filepath == str(path)
                 ).first()
                 previous_hash = record.file_hash if record is not None else None
+                previous_stat = ((record.file_size, record.mtime_ns, record.ctime_ns)
+                                 if record is not None else None)
                 if record is None:
                     record = FileRecord(filepath=str(path), filename=path.name, file_hash=digest or "")
                     session.add(record)
@@ -1563,7 +1567,10 @@ class Scanner:
                     record.last_scanned = utcnow()
                     if outcome.status in (ScanStatus.CLEAN, ScanStatus.INFECTED, ScanStatus.ALLOWED):
                         record.sig_version = self._sig_version
-                elif previous_hash is not None and digest is not None and digest != previous_hash:
+                elif previous_hash is not None and digest is not None and (
+                        digest != previous_hash
+                        or (not digest and previous_stat
+                            != (st.st_size, st.st_mtime_ns, st.st_ctime_ns))):
                     record.scan_status = ScanStatus.PENDING.value
                     record.scan_result = None
                     record.threat_name = None
