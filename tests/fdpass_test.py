@@ -418,6 +418,8 @@ vault = shome / "Downloads" / "vault.kdbx"                  # real header, but n
 vault.write_bytes(bytes.fromhex("03d9a29a67fb4bb5") + b"\x01\x00\x04\x00")
 elsewhere = shome / "Downloads" / "id_ed25519"              # real header, wrong place
 elsewhere.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nPAYLOAD\n")
+misnamed = shome / ".ssh" / "id_dsa"                        # clean, but not a key (yet)
+misnamed.write_text("notes, not a key\n")
 
 
 def strict_scanner(on):
@@ -430,7 +432,12 @@ scanner_mod.HOME = shome   # the canonical places are relative to the home folde
 try:
     SEEN.clear()
     st_sc = strict_scanner(True)
+    lookups = []
+    _real_known = st_sc._known_infected
+    st_sc._known_infected = lambda p: (lookups.append(p), _real_known(p))[1]
     quietly(st_sc.scan_tree, shome)
+    assert sorted(lookups) == sorted([real_key, logins]), \
+        f"the database is asked only about files that would be skipped, got {lookups}"
     with Session(st_sc.engine) as s:
         got = {r.filepath: r for r in s.query(FileRecord)}
     for f in (real_key, logins):
@@ -440,6 +447,16 @@ try:
         assert str(f) in SEEN, f"{f} must still be scanned"
     assert got[str(fake_key)].scan_status == "infected", "a wrong header in ~/.ssh is scanned and caught"
     assert got[str(elsewhere)].scan_status == "infected", "a key's header outside ~/.ssh doesn't help"
+    assert got[str(misnamed)].scan_status == "clean" and got[str(misnamed)].format_mismatch
+
+    # Made a real key: now skipped, and the old "doesn't start like one" goes.
+    time.sleep(0.01)
+    misnamed.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE=\n")
+    quietly(st_sc.scan_tree, shome)
+    with Session(st_sc.engine) as s:
+        fixed = s.query(FileRecord).filter(FileRecord.filepath == str(misnamed)).one()
+        assert fixed.scan_status == "classified" and fixed.format_mismatch is None, \
+            (fixed.scan_status, fixed.format_mismatch)
 
     # Turned off again: what it left unscanned is scanned once, unchanged or not.
     SEEN.clear()
