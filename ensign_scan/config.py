@@ -522,7 +522,9 @@ scan_targets = [
 ]
 
 # Directory trees whose contents never change in place (e.g. proton
-# prefix snapshots). Unchanged subtrees under these are skipped by mtime.
+# prefix snapshots). Every folder under these is still checked, but the
+# files in a folder nothing was added to, removed from or renamed in
+# (same mtime and ctime as last run) aren't looked at again.
 snapshot_roots = []
 
 # Trees to skip entirely. High-churn temp/cache directories mostly

@@ -230,7 +230,9 @@ class AllowedFolder(Base):
 
 
 class DirectoryRecord(Base):
-    """Tracked only for snapshot roots, to allow whole-subtree pruning."""
+    """Tracked only for folders under snapshot_roots. A folder whose mtime and
+    ctime both match its record has had no entry added, removed or renamed
+    since, so its files aren't stat-ed again (scanner.py)."""
 
     __tablename__ = "directories"
 
@@ -238,6 +240,8 @@ class DirectoryRecord(Base):
     directory_path = Column(FsPath, unique=True, nullable=False)
     directory_name = Column(FsPath, nullable=False)
     mtime_ns = Column(Integer)
+    # NULL for folders recorded before 0.8.5: treated as changed once.
+    ctime_ns = Column(Integer)
     last_scanned = Column(DateTime)
 
     created_at = Column(DateTime, default=utcnow)

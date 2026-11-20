@@ -212,7 +212,7 @@ def main():
     stats2 = scanner.scan_tree(tree)
     assert stats2.processed == 0, f"expected 0 processed, got {stats2}"
     assert stats2.unchanged >= 2, f"expected unchanged files, got {stats2}"
-    assert stats2.pruned_dirs >= 1, f"expected snapshot pruning, got {stats2}"
+    assert stats2.unchanged_snapshot_dirs >= 1, f"expected unchanged snapshot folders, got {stats2}"
 
     print("\n--- Third run (one file modified) ---")
     time.sleep(0.01)
@@ -238,6 +238,39 @@ def main():
     assert stats_ct.processed == 1, f"ctime change must trigger a rescan, got {stats_ct}"
     stats_ct2 = scanner.scan_tree(tree)
     assert stats_ct2.processed == 0, "and settle again afterwards"
+
+    # Snapshot folders: a new file anywhere inside an existing snapshot must
+    # be found. The old check skipped the whole snapshot while the ROOT's
+    # mtime was unchanged, so a file added deeper was never seen, and
+    # neither was one whose folder had its mtime set back (touch -d).
+    print("\n--- snapshot folders: new files at any depth, and mtime set back ---")
+    snap = tree / "snapshots" / "snap1"
+    (snap / "deep" / "deeper").mkdir(parents=True)
+    scanner.scan_tree(tree)                      # records the new folders
+    assert scanner.scan_tree(tree).processed == 0
+    time.sleep(0.01)
+    (snap / "deep" / "deeper" / "dropped.bin").write_text("dropped deep inside a snapshot")
+    stats_sd = scanner.scan_tree(tree)
+    assert stats_sd.processed == 1, f"a new file deep in a snapshot must be scanned, got {stats_sd}"
+
+    _dir_before = snap.stat()
+    time.sleep(0.01)
+    (snap / "hidden.bin").write_text("dropped, then the folder's mtime put back")
+    os.utime(snap, ns=(_dir_before.st_atime_ns, _dir_before.st_mtime_ns))
+    assert snap.stat().st_mtime_ns == _dir_before.st_mtime_ns
+    stats_sm = scanner.scan_tree(tree)
+    assert stats_sm.processed == 1, f"the folder's ctime gives the touch -d trick away, got {stats_sm}"
+    stats_s2 = scanner.scan_tree(tree)
+    assert stats_s2.processed == 0 and stats_s2.unchanged_snapshot_dirs >= 3, \
+        f"and the folders settle as unchanged again, got {stats_s2}"
+
+    # A --no-scan run records files without a verdict. It must not mark
+    # their folder unchanged, or the next real scan would never reach them.
+    time.sleep(0.01)
+    (snap / "deep" / "noscan.bin").write_text("seen first by a --no-scan run")
+    scanner.scan_tree(tree, scan=False)
+    stats_ns = scanner.scan_tree(tree)
+    assert stats_ns.processed == 1, f"a file first seen by --no-scan must still be scanned, got {stats_ns}"
     print("ctime catches mtime-restored edit test passed ✓")
 
     print("\n--- legacy rows (ctime_ns NULL) are rescanned once ---")
