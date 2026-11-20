@@ -1463,7 +1463,7 @@ class Scanner:
     def _unclassify(self) -> None:
         """With never_open_credentials off, nothing stays unscanned: a file
         recorded as CLASSIFIED (while it was on, or by a version before
-        0.8.5) is sent to be scanned once, through the "ctime unknown ->
+        0.8.6) is sent to be scanned once, through the "ctime unknown ->
         rescan" rule. Otherwise an unchanged one would never be reopened."""
         with self.engine.begin() as conn:
             conn.exec_driver_sql("UPDATE files SET ctime_ns = NULL "
