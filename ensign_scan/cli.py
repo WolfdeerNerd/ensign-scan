@@ -452,6 +452,11 @@ def run(args: argparse.Namespace, config: Config) -> int:
         # The fallback, said out loud: a quiet 5 looked like a real answer.
         auto = " (auto; couldn't read clamd's MaxThreads, so a safe default)"
     print(f" Workers:  {workers}{auto}")
+    if config.never_open_credentials:
+        print("[yellow]! never_open_credentials is on: SSH keys in ~/.ssh, saved-password "
+              "databases and gcloud's credential databases in their usual places aren't "
+              "scanned when their header checks out. Anything running as you can write "
+              "there.[/yellow]")
     scan = not args.no_scan
     hint = scanner.thread_hint() if scan else None  # --no-scan doesn't use clamd
     if hint:

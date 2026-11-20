@@ -63,6 +63,15 @@ infected_alert_seconds = 60
 # and each new infected alert replaces the previous one instead of stacking.
 infected_alert_only_while_gaming = true
 
+# Credential files are scanned like everything else, and no hash of them is
+# stored. true = leave some unscanned: only an application's own credential
+# file in its usual place (SSH keys in ~/.ssh, a browser's saved-password
+# database, gcloud's credential databases, /etc/krb5.keytab), owned by you,
+# not executable, and starting with that format's header. Only those first
+# bytes are read. Anything running as you can write to those places, so a
+# file left unscanned there could be malware wearing the right header.
+never_open_credentials = false
+
 # Error logs: one file per run in <data_dir>/logs/, created only when a run
 # has errors. Runs older than log_keep_days are deleted; if the folder is
 # still over log_max_total_mb, the oldest go first (so the size limit wins).

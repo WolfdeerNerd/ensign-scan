@@ -48,6 +48,7 @@ for how each entry was sourced.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from enum import Enum
 
@@ -297,6 +298,44 @@ def format_mismatch(path: str, real_path: str, head: bytes) -> str | None:
         if expected and not expected[1](head):
             return f"named like {expected[0]} ({os.path.basename(p)}), but doesn't start like one"
     return None
+
+
+# ----------------------------------------------------------------------
+# never_open_credentials (off by default): the opt-in "don't scan these"
+# ----------------------------------------------------------------------
+# Only where an application keeps its own credential file, relative to the
+# home folder, and only for formats _expected_format() can confirm from
+# their first bytes. KeePass vaults and PuTTY keys have no fixed place, so
+# they are always scanned.
+_CANONICAL = [re.compile(p) for p in (
+    r"\.ssh/(id_rsa|id_dsa|id_ecdsa|id_ed25519|id_ecdsa_sk|id_ed25519_sk)",
+    r"\.config/(chromium|google-chrome(-beta|-unstable)?|BraveSoftware/Brave-Browser)/[^/]+/Login Data",
+    r"\.mozilla/firefox/[^/]+/key4\.db",
+    r"\.config/gcloud/(credentials|access_tokens)\.db",
+)]
+_CANONICAL_ABSOLUTE = ("/etc/krb5.keytab",)
+NEVER_OPENED_REASON = ("Not scanned (never_open_credentials): a credential file in its usual "
+                       "place, with that format's header; only its first bytes were read")
+
+
+def never_open_reason(real_path: str, home: str, st_mode: int, st_uid: int, euid: int,
+                      head: bytes) -> str | None:
+    """With never_open_credentials on: NEVER_OPENED_REASON if this file is
+    left unscanned, else None. All must hold: it's at an application's own
+    credential path (the real path, after symlinks), it isn't executable,
+    the user running Ensign owns it, and its first bytes are that format's
+    fixed start. Anything else is scanned."""
+    if st_mode & 0o111 or st_uid != euid:
+        return None
+    rel = os.path.relpath(real_path, home)
+    canonical = real_path in _CANONICAL_ABSOLUTE or (
+        not rel.startswith("..") and any(c.fullmatch(rel) for c in _CANONICAL))
+    if not canonical or not head:
+        return None
+    expected = _expected_format(os.path.basename(real_path))
+    if expected is None or not expected[1](head):
+        return None
+    return NEVER_OPENED_REASON
 
 
 def skip_reason(path: str, real_path: str, st_mode: int) -> str | None:

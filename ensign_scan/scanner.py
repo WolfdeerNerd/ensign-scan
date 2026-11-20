@@ -62,7 +62,7 @@ from .clamd import (
     memory_available,
     scan_fds_with_clamscan,
 )
-from .config import Config
+from .config import HOME, Config
 from .db import make_engine
 from .fsutil import NotScannable, human_size, is_scannable, open_for_scan, safe_lstat, sha256_fd, shown, stat_or_error
 from .models import DirectoryRecord, FileRecord, ScanStatus, open_failed_result, path_under, utcnow
@@ -415,6 +415,8 @@ class Scanner:
     def __init__(self, config: Config, clamd: ClamdClient | None = None):
         self.config = config
         self.engine = make_engine(config.db_url)
+        if not config.never_open_credentials:
+            self._unclassify()
         self.clamd = clamd or ClamdClient(config.clamd_socket)
         self._workers: int | None = None
         # Signature DB version for the current scan_tree run; None = unknown
@@ -968,6 +970,18 @@ class Scanner:
                 opened = os.readlink(f"/proc/self/fd/{fd}")
             except OSError:
                 opened = os.path.realpath(path)
+            # never_open_credentials (opt-in): an application's own
+            # credential file, confirmed by its first bytes, is recorded
+            # without being hashed or scanned. Decided on what was opened.
+            if self.config.never_open_credentials and not self._known_infected(path):
+                try:
+                    head = os.pread(fd, secrets.HEADER_BYTES, 0)
+                except OSError:
+                    head = b""
+                reason = secrets.never_open_reason(opened, str(HOME), st.st_mode, st.st_uid,
+                                                   os.geteuid(), head)
+                if reason is not None:
+                    return self._record_classified(path, st, reason)
             try:
                 digest = sha256_fd(fd)
             except OSError as exc:  # opened, but reading failed (an I/O error, say)
@@ -1454,6 +1468,15 @@ class Scanner:
         else:
             print(f"[red]✗ Couldn't save the result for {shown(path.name)} ({status}): "
                   f"{shown(exc)}[/red]")
+
+    def _unclassify(self) -> None:
+        """With never_open_credentials off, nothing stays unscanned: a file
+        recorded as CLASSIFIED (while it was on, or by a version before
+        0.8.6) is sent to be scanned once, through the "ctime unknown ->
+        rescan" rule. Otherwise an unchanged one would never be reopened."""
+        with self.engine.begin() as conn:
+            conn.exec_driver_sql("UPDATE files SET ctime_ns = NULL "
+                                 "WHERE scan_status = 'classified' AND ctime_ns IS NOT NULL")
 
     def _known_infected(self, path: Path) -> bool:
         """True if the database already has this file as INFECTED. Such a
