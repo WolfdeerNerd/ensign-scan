@@ -382,9 +382,11 @@ class TreeStats:
     unchanged: int = 0
     processed: int = 0
     failed: int = 0
-    pruned_dirs: int = 0
+    unchanged_snapshot_dirs: int = 0
     excluded_dirs: int = 0
-    snapshot_dirs: list[tuple[str, int]] = field(default_factory=list)
+    # (path, mtime_ns, ctime_ns) for each snapshot folder that changed (or is
+    # new), to record once the tree finishes.
+    snapshot_dirs: list[tuple[str, int, int]] = field(default_factory=list)
     # Directories Ensign could not look inside, so nothing in them was
     # scanned: path -> reason. A dict so a directory reached twice (by
     # overlapping scan targets) is recorded once.
@@ -606,7 +608,7 @@ class Scanner:
         print(
             f"  {stats.seen} files seen · "
             f"{stats.unchanged} unchanged · "
-            f"{stats.pruned_dirs} snapshot subtrees pruned · "
+            f"{stats.unchanged_snapshot_dirs} unchanged snapshot folders · "
             f"{stats.excluded_dirs} excluded · "
             f"[bold]{len(candidates)} to process[/bold]"
             + (f" ({stats.sig_rescan} because signatures updated)" if stats.sig_rescan else "")
@@ -619,9 +621,12 @@ class Scanner:
             stats.failed = len(results) - stats.processed
             print(f"  Completed: {stats.processed}/{len(candidates)} files processed")
 
-        # Only record snapshot mtimes once the tree finished, so a crash
-        # mid-run can't mark an unscanned subtree as done.
-        self._record_snapshot_dirs(stats.snapshot_dirs)
+        # Only record snapshot folders once the tree finished, so a crash
+        # mid-run can't mark an unscanned folder as done. Not on a --no-scan
+        # run: it records files without a verdict, and a folder marked
+        # unchanged would keep the next real scan from ever reaching them.
+        if scan:
+            self._record_snapshot_dirs(stats.snapshot_dirs)
         return stats
 
     def _is_excluded(self, path: Path) -> bool:
@@ -643,25 +648,35 @@ class Scanner:
         # os.walk silently skips any directory it can't list unless it is
         # given an onerror callback -- without one, a directory Ensign has
         # no permission to read was never scanned and never mentioned.
+        # Snapshot folders whose files needn't be stat-ed this run: their
+        # mtime and ctime match the record, so nothing was added, removed
+        # or renamed in them. Every folder is still walked, so a change at
+        # any depth is found. Decided before os.walk lists a folder (for
+        # the root here, for the others in their parent's step below): a
+        # stat taken after the listing could record a file created in
+        # between as already seen, hiding it for good.
+        unchanged: set[str] = set()
+        self._note_snapshot_dir(Path(root), stats, unchanged)
         walk = os.walk(
             root, topdown=True, followlinks=False,
             onerror=lambda exc: self._on_walk_error(stats, exc),
         )
         for dirpath, dirnames, filenames in walk:
-            # Pruning dirnames in place stops os.walk from descending —
-            # excluded trees and unchanged snapshot subtrees are never
-            # entered at all. followlinks=False above also means a
-            # symlinked directory is never descended into, regardless.
+            # Pruning dirnames in place stops os.walk from descending:
+            # excluded trees are never entered at all. followlinks=False
+            # above also means a symlinked directory is never descended
+            # into, regardless.
             kept = []
             for name in dirnames:
                 subdir = Path(dirpath) / name
                 if self._is_excluded(subdir):
                     stats.excluded_dirs += 1
-                elif self._should_prune(subdir, stats):
-                    stats.pruned_dirs += 1
                 else:
+                    self._note_snapshot_dir(subdir, stats, unchanged)
                     kept.append(name)
             dirnames[:] = kept
+            if dirpath in unchanged:
+                continue   # its files are the ones already recorded
 
             for name in filenames:
                 path = Path(dirpath) / name
@@ -806,27 +821,37 @@ class Scanner:
             for root in (r.rstrip("/") for r in self.config.snapshot_roots)
         )
 
-    def _should_prune(self, path: Path, stats: TreeStats) -> bool:
+    def _note_snapshot_dir(self, path: Path, stats: TreeStats, unchanged: set[str]) -> None:
+        """For a folder under snapshot_roots: add it to `unchanged` if its
+        mtime AND ctime match the record, else queue it to be recorded.
+
+        Both, because mtime alone can be set back (touch -d) after a file is
+        dropped in; ctime can't be set by anyone but the kernel, and setting
+        mtime changes it. A file edited in place changes neither: that is
+        the "never changes in place" assumption snapshot_roots rests on, and
+        such a file is still re-read by the stale and signature rescans."""
         if not self._is_snapshot_dir(path):
-            return False
+            return
         st = safe_lstat(path)
         if st is None:
-            return False
+            return
         with Session(self.engine) as session:
             record = session.query(DirectoryRecord).filter(
                 DirectoryRecord.directory_path == str(path)
             ).first()
-            if record and record.mtime_ns == st.st_mtime_ns:
-                return True
-        stats.snapshot_dirs.append((str(path), st.st_mtime_ns))
-        return False
+            if (record and record.ctime_ns is not None
+                    and (record.mtime_ns, record.ctime_ns) == (st.st_mtime_ns, st.st_ctime_ns)):
+                unchanged.add(str(path))
+                stats.unchanged_snapshot_dirs += 1
+                return
+        stats.snapshot_dirs.append((str(path), st.st_mtime_ns, st.st_ctime_ns))
 
-    def _record_snapshot_dirs(self, entries: list[tuple[str, int]]) -> None:
+    def _record_snapshot_dirs(self, entries: list[tuple[str, int, int]]) -> None:
         if not entries:
             return
         with Session(self.engine) as session:
             try:
-                for path, mtime_ns in entries:
+                for path, mtime_ns, ctime_ns in entries:
                     record = session.query(DirectoryRecord).filter(
                         DirectoryRecord.directory_path == path
                     ).first()
@@ -837,6 +862,7 @@ class Scanner:
                         )
                         session.add(record)
                     record.mtime_ns = mtime_ns
+                    record.ctime_ns = ctime_ns
                     record.last_scanned = utcnow()
                 session.commit()
             except Exception as exc:
