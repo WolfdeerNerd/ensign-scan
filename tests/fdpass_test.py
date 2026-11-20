@@ -316,6 +316,9 @@ auth.write_text("ssh-ed25519 AAAA mine\n")
 planted = home / ".ssh" / "helper"
 planted.write_text("#!/bin/sh\n# PAYLOAD\n")
 planted.chmod(0o755)
+helper = home / ".ssh" / "askpass"                       # a clean executable in a credential folder
+helper.write_text("#!/bin/sh\necho hi\n")
+helper.chmod(0o755)
 private = home / "private.txt"
 private.write_text("PAYLOAD")
 private.chmod(0o600)
@@ -346,6 +349,8 @@ n, out = quietly(format_mismatch_report, sc.engine, [str(home)])
 assert n == 3 and all(str(f) in flat(out) for f in (fake_ppk, disguised, key)), out
 assert str(real_vault) not in flat(out) and "clamd's verdict: clean" in flat(out), out
 assert rows[str(planted)].scan_status == "infected", "an executable in .ssh is scanned"
+assert rows[str(helper)].scan_status == "clean" and rows[str(helper)].file_hash, \
+    "a clean executable in a credential folder keeps its hash: it's no secret"
 assert rows[str(private)].scan_status == "infected"
 assert rows[str(auth)].scan_status == "clean"
 
@@ -480,6 +485,14 @@ try:
         assert s.query(FileRecord).filter(FileRecord.scan_status == "classified").count() == 0
 finally:
     scanner_mod.HOME = real_home
+# Sending classified files to be scanned is a write at startup. A read-only
+# report can meet a scan holding the database; that must not stop it.
+class _Busy:
+    def begin(self):
+        raise sqlite3.OperationalError("database is locked")
+_busy = strict_scanner(True)
+_busy.engine = _Busy()
+quietly(Scanner._unclassify, _busy)   # logged, not raised
 print("never_open_credentials test passed ✓")
 
 # ----------------------------------------------------------------------

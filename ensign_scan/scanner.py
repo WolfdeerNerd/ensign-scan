@@ -691,7 +691,25 @@ class Scanner:
                     kept.append(name)
             dirnames[:] = kept
             if dirpath in unchanged:
-                continue   # its files are the ones already recorded
+                # Nothing was added, removed or renamed here, so these are
+                # the recorded files, and they aren't stat-ed. What their
+                # records alone say needs a scan still gets one: newer
+                # signatures, never actually scanned, or ctime unknown (a
+                # database upgrade, or never_open_credentials turned off).
+                for name in filenames:
+                    path = Path(dirpath) / name
+                    prev = known.get(str(path))
+                    if prev is None or self._is_excluded(path):
+                        continue
+                    if prev.ctime_ns is None:
+                        candidates.append(path)
+                    elif scan and prev.status in (None, ScanStatus.PENDING.value):
+                        stats.never_scanned += 1
+                        candidates.append(path)
+                    elif self._signatures_moved_on(prev):
+                        stats.sig_rescan += 1
+                        candidates.append(path)
+                continue
 
             for name in filenames:
                 path = Path(dirpath) / name
@@ -844,7 +862,8 @@ class Scanner:
         dropped in; ctime can't be set by anyone but the kernel, and setting
         mtime changes it. A file edited in place changes neither: that is
         the "never changes in place" assumption snapshot_roots rests on, and
-        such a file is still re-read by the stale and signature rescans."""
+        such a file is still re-read by the signature and stale rescans,
+        which reach the files of an unchanged folder too (scan_tree)."""
         if not self._is_snapshot_dir(path):
             return
         st = safe_lstat(path)
@@ -1042,7 +1061,10 @@ class Scanner:
         real_path = real_path or os.path.realpath(path)
         # A file named like a credential that doesn't start like one isn't
         # that credential, so its hash is kept like any file's.
-        if digest and mismatch is None and secrets.hash_not_stored(str(path), real_path) and not (
+        # An executable keeps its hash too: it isn't a secret, and before
+        # 0.8.6 credential folders' executables were the ones hashed.
+        if (digest and mismatch is None and not st.st_mode & 0o111
+                and secrets.hash_not_stored(str(path), real_path)) and not (
                 outcome is not None and outcome.status in (ScanStatus.INFECTED, ScanStatus.ALLOWED)):
             stored = ""
         try:
@@ -1478,9 +1500,15 @@ class Scanner:
         recorded as CLASSIFIED (while it was on, or by a version before
         0.8.6) is sent to be scanned once, through the "ctime unknown ->
         rescan" rule. Otherwise an unchanged one would never be reopened."""
-        with self.engine.begin() as conn:
-            conn.exec_driver_sql("UPDATE files SET ctime_ns = NULL "
-                                 "WHERE scan_status = 'classified' AND ctime_ns IS NOT NULL")
+        # Read-only reports (--suggest-fixes, --verify-pacman) build a
+        # Scanner without the run lock, so this can meet a scan holding the
+        # database. Never let it stop a run: the next one tries again.
+        try:
+            with self.engine.begin() as conn:
+                conn.exec_driver_sql("UPDATE files SET ctime_ns = NULL "
+                                     "WHERE scan_status = 'classified' AND ctime_ns IS NOT NULL")
+        except Exception as exc:
+            log.error("could not send classified files to be scanned: %s", exc)
 
     def _known_infected(self, path: Path) -> bool:
         """True if the database already has this file as INFECTED. Such a
