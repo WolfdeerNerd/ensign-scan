@@ -17,7 +17,7 @@ Design: three confidence tiers, not one flat list.
 
 How it's used: every file is scanned, credential files included. A
 name is something malware chooses, so a file was never safe to skip
-for its name alone: until 0.8.5, a payload called invoice.kdbx or
+for its name alone: before 0.8.6, a payload called invoice.kdbx or
 wallet.dat anywhere on disk was never opened. What a
 HIGH match changes now is what Ensign STORES: hash_not_stored() says to
 keep no hash for the file, since a hash of a short secret (a .netrc
