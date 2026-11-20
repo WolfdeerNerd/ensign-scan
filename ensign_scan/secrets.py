@@ -318,6 +318,17 @@ NEVER_OPENED_REASON = ("Not scanned (never_open_credentials): a credential file 
                        "place, with that format's header; only its first bytes were read")
 
 
+def never_open_candidate(real_path: str, home: str, st_mode: int, st_uid: int, euid: int) -> bool:
+    """never_open_reason()'s checks that need no read: the place, the
+    executable bit and the owner. False for nearly every file, so the
+    first bytes are read only for the few in a credential's usual place."""
+    if st_mode & 0o111 or st_uid != euid:
+        return False
+    rel = os.path.relpath(real_path, home)
+    return real_path in _CANONICAL_ABSOLUTE or (
+        not rel.startswith("..") and any(c.fullmatch(rel) for c in _CANONICAL))
+
+
 def never_open_reason(real_path: str, home: str, st_mode: int, st_uid: int, euid: int,
                       head: bytes) -> str | None:
     """With never_open_credentials on: NEVER_OPENED_REASON if this file is
@@ -325,12 +336,7 @@ def never_open_reason(real_path: str, home: str, st_mode: int, st_uid: int, euid
     credential path (the real path, after symlinks), it isn't executable,
     the user running Ensign owns it, and its first bytes are that format's
     fixed start. Anything else is scanned."""
-    if st_mode & 0o111 or st_uid != euid:
-        return None
-    rel = os.path.relpath(real_path, home)
-    canonical = real_path in _CANONICAL_ABSOLUTE or (
-        not rel.startswith("..") and any(c.fullmatch(rel) for c in _CANONICAL))
-    if not canonical or not head:
+    if not never_open_candidate(real_path, home, st_mode, st_uid, euid) or not head:
         return None
     expected = _expected_format(os.path.basename(real_path))
     if expected is None or not expected[1](head):

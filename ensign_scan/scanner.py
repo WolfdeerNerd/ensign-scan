@@ -973,14 +973,18 @@ class Scanner:
             # never_open_credentials (opt-in): an application's own
             # credential file, confirmed by its first bytes, is recorded
             # without being hashed or scanned. Decided on what was opened.
-            if self.config.never_open_credentials and not self._known_infected(path):
+            # The cheap checks first; the database is asked about a past
+            # infection only for a file that would otherwise be skipped,
+            # not for every file on the machine.
+            if self.config.never_open_credentials and secrets.never_open_candidate(
+                    opened, str(HOME), st.st_mode, st.st_uid, os.geteuid()):
                 try:
                     head = os.pread(fd, secrets.HEADER_BYTES, 0)
                 except OSError:
                     head = b""
                 reason = secrets.never_open_reason(opened, str(HOME), st.st_mode, st.st_uid,
                                                    os.geteuid(), head)
-                if reason is not None:
+                if reason is not None and not self._known_infected(path):
                     return self._record_classified(path, st, reason)
             try:
                 digest = sha256_fd(fd)
@@ -1496,7 +1500,9 @@ class Scanner:
         stored for it is overwritten."""
         outcome = ScanOutcome(ScanStatus.CLASSIFIED, reason)
         try:
-            self._upsert_file(path, st, "", outcome)
+            # Its header was just confirmed, so an old "doesn't start like
+            # one" (from before it was fixed or replaced) no longer holds.
+            self._upsert_file(path, st, "", outcome, mismatch=None, checked=True)
         except Exception as exc:
             self._remember_unsaved(path, outcome, exc)
             return None, "failed"
