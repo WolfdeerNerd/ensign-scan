@@ -62,7 +62,7 @@ def _upgrade_data(engine: Engine) -> None:
 
 
 def _upgrade_to_scanning_credential_files(conn) -> None:
-    """Version 2: credential files are scanned (0.8.5).
+    """Version 2: credential files are scanned (0.8.6).
 
     Before, a file whose name matched a credential pattern was recorded
     as CLASSIFIED and never opened, so it has no verdict. Clearing
@@ -77,7 +77,7 @@ def _upgrade_to_fd_passing(conn) -> None:
 
     Older versions hashed every file, credential files included, and
     stored those hashes. From 0.3.0 credential files were never read
-    (from 0.8.5 they're scanned, still with no hash stored), so:
+    (from 0.8.6 they're scanned, still with no hash stored), so:
 
       * credential files (HIGH secrets patterns): the stored hash is wiped,
         and ctime_ns is cleared so the next run re-decides them -- normally

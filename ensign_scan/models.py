@@ -36,7 +36,7 @@ class ScanStatus(str, Enum):
     ERROR = "error"
     PENDING = "pending"
     # Recorded without being opened: no hash (file_hash is ""), no clamd
-    # verdict. Until 0.8.5, every file whose path matched a high-confidence
+    # verdict. Before 0.8.6, every file whose path matched a high-confidence
     # credential pattern; those are scanned now, and db.py sends rows left
     # from then to be scanned once. Distinct from ERROR so it drops out of
     # error_summary() and suggest_fixes() without either special-casing it.

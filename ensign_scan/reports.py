@@ -541,8 +541,8 @@ def format_mismatch_report(engine: Engine, paths: list[str] | None = None) -> in
     """Print files named like a credential format (a .kdbx, a .ppk, an SSH
     key...) whose first bytes say they aren't one. Returns how many.
 
-    A borrowed name is how a payload hides (MITRE ATT&CK T1036.008): until
-    0.8.5 these names weren't even opened. clamd's verdict is shown with
+    A borrowed name is how a payload hides (MITRE ATT&CK T1036.008): before
+    0.8.6 these names weren't even opened. clamd's verdict is shown with
     each, since it's still the verdict; this is a reason to look closer,
     not a detection. Every run lists them, until the file changes."""
     with Session(engine) as session:
