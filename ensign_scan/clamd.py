@@ -114,6 +114,20 @@ _SIZE_RE = re.compile(r"^(\d+)([kKmMgG]?)$")
 _SIZE_UNITS = {"": 1, "k": 2**10, "m": 2**20, "g": 2**30}
 _CLAMSCAN_LINE_RE = re.compile(r"^/proc/self/fd/(\d+): (.*)$")
 
+# clamd.conf settings that make clamd keep what it reads somewhere it
+# outlives the scan. Ensign scans credential files too (keeping no hash of
+# them), so these are worth knowing about. All are off by default
+# (clamd.conf(5)); Ensign only reports them, it never edits clamd.conf.
+CONTENT_RISKS = {
+    "LeaveTemporaryFiles": "keeps the temporary files clamd unpacks from what it scans (archives, documents) on disk",
+    "ForceToDisk": "writes what it scans to a temporary file first, instead of scanning it in memory",
+    "GenerateMetadataJson": "writes a metadata.json describing each scanned file (kept with LeaveTemporaryFiles)",
+    "LogClean": "logs every file it scans, clean ones included",
+    "Debug": "writes debug output, which can include details of the files it scans",
+    "ExtendedDetectionInfo": "logs the size and hash of each file it finds infected",
+}
+_YES = ("yes", "true", "1")
+
 
 @dataclass(frozen=True)
 class ClamdLimits:
@@ -123,6 +137,7 @@ class ClamdLimits:
     alert_exceeds_max: bool
     source: str                  # the config file read, or why the defaults are in use
     pcre_max_file_size: int = DEFAULT_PCRE_MAX_FILE_SIZE  # bytes; 0 = no limit
+    content_risks: tuple[str, ...] = ()  # the CONTENT_RISKS settings that are on
 
     @property
     def scan_limit(self) -> int:
@@ -158,9 +173,10 @@ def parse_clamd_config(text: str, source: str) -> ClamdLimits:
         max_file_size=size("MaxFileSize", DEFAULT_MAX_FILE_SIZE),
         max_scan_size=size("MaxScanSize", DEFAULT_MAX_SCAN_SIZE),
         database_dir=values.get("databasedirectory", "").strip('"') or None,
-        alert_exceeds_max=values.get("alertexceedsmax", "").lower() in ("yes", "true", "1"),
+        alert_exceeds_max=values.get("alertexceedsmax", "").lower() in _YES,
         source=source,
         pcre_max_file_size=size("PCREMaxFileSize", DEFAULT_PCRE_MAX_FILE_SIZE),
+        content_risks=tuple(k for k in CONTENT_RISKS if values.get(k.lower(), "").lower() in _YES),
     )
 
 

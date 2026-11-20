@@ -94,6 +94,23 @@ assert conf.scan_limit == 300 * 2**20, "the smaller of the two limits"
 assert parse_clamd_config("MaxFileSize 512\nMaxScanSize 4k", "t").scan_limit == 512, "bytes and K"
 assert parse_clamd_config("MaxFileSize 2000M\nMaxScanSize 4000M", "t").scan_limit == 100 * 2**20, \
     "PCREMaxFileSize (default 100M) counts too: regex signatures skip files past it"
+# Settings that keep what clamd reads after the scan: reported, never edited.
+risky = parse_clamd_config("LeaveTemporaryFiles yes\nLogClean true\nDebug no\n"
+                           "# ForceToDisk yes\nExtendedDetectionInfo 1\n", "t")
+assert risky.content_risks == ("LeaveTemporaryFiles", "LogClean", "ExtendedDetectionInfo"), risky
+assert parse_clamd_config("LogFile /var/log/clamd.log\n", "t").content_risks == (), "defaults are all off"
+from types import SimpleNamespace as _NS  # noqa: E402
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    Scanner._read_limits(_NS(clamd=_NS(limits=lambda: risky)))
+_said = " ".join(_buf.getvalue().split())
+assert "LeaveTemporaryFiles yes" in _said and "LogClean yes" in _said and "Debug" not in _said, _said
+assert "credential files included" in _said and "set them to no" in _said, _said
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    Scanner._read_limits(_NS(clamd=_NS(limits=lambda: parse_clamd_config("", "t"))))
+assert "keep what clamd reads" not in _buf.getvalue(), "nothing to say when all are off"
+print("clamd.conf content-risk check test passed ✓")
 unlimited = parse_clamd_config("MaxFileSize 0\nMaxScanSize 0\nPCREMaxFileSize 0", "t")
 assert unlimited.scan_limit == 2000 * 2**20, "0 = no setting, but ClamAV's own ceiling still applies"
 assert parse_clamd_config("", "t").scan_limit == 100 * 2**20, "missing settings: ClamAV's defaults"

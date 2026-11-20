@@ -50,6 +50,7 @@ from sqlalchemy.orm import Session
 
 from . import allowlist, bigrules, secrets, yarachild, yaraengine
 from .clamd import (
+    CONTENT_RISKS,
     DEFAULT_LIMITS,
     LIMITS_EXCEEDED_PREFIX,
     ClamdClient,
@@ -485,6 +486,14 @@ class Scanner:
         if limits.source.startswith("ClamAV defaults") and reader is not None:
             print(f"[dim]Couldn't read clamd's config ({shown(limits.source)}): assuming files "
                   f"from {_mib(limits.scan_limit)} up are too large for clamd.[/dim]")
+        if limits.content_risks:
+            # Advice only: clamd.conf is yours, and Ensign never edits it.
+            print(f"[yellow]! {shown(limits.source)} has settings that keep what clamd reads "
+                  f"after the scan. Ensign sends it every file, credential files included:[/yellow]")
+            for key in limits.content_risks:
+                print(f"    {key} yes: clamd {CONTENT_RISKS[key]}")
+            print("  Unless you need them, set them to no and restart clamd: "
+                  "sudo systemctl restart clamav-daemon")
         return limits
 
     @staticmethod
