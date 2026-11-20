@@ -686,7 +686,7 @@ with tempfile.TemporaryDirectory() as d:
         def _clamscan_outcomes(self, batch, total, on_result=None):
             return {i.fd: ScanOutcome(ScanStatus.CLEAN, "clamscan: OK") for i in batch}
 
-        def _finish(self, path, st, digest, outcome, real_path=None):
+        def _finish(self, path, st, digest, outcome, real_path=None, mismatch=None, checked=False):
             held.setdefault("db", os.open(Path(d, "database.db"), os.O_RDWR | os.O_CREAT))
             held.setdefault("recorded", []).append(path.name)
             if path.name == "a.bin":

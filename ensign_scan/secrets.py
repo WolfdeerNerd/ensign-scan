@@ -48,6 +48,7 @@ for how each entry was sourced.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from enum import Enum
 
 # ----------------------------------------------------------------------
@@ -237,6 +238,65 @@ def hash_not_stored(path: str, real_path: str) -> bool:
     if is_integrity_watched(path) or is_integrity_watched(real_path):
         return False
     return classify(path) == Confidence.HIGH or classify(real_path) == Confidence.HIGH
+
+
+# ----------------------------------------------------------------------
+# Does a credential-named file start the way that format always does?
+# ----------------------------------------------------------------------
+# A name is the file creator's choice, so a payload can borrow one (MITRE
+# ATT&CK T1036.008, Masquerade File Type). For the formats below, the first
+# bytes are fixed by the format and give nothing secret away, so a file
+# named like one that doesn't start that way isn't one. Left out on
+# purpose: plaintext formats with no fixed start (.netrc, .git-credentials,
+# .npmrc, cloud config files), whose first bytes can be the secret itself;
+# formats whose layout couldn't be confirmed from a primary source
+# (wallet.dat, Electrum, KDE Wallet); and the bare name "identity", an
+# everyday word. A matching start doesn't prove a file is harmless (a
+# header can be copied): it only means the name isn't contradicted.
+_SSH_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk"}
+_SQLITE_NAMES = {"login data", "key4.db", "credentials.db", "access_tokens.db"}
+_SQLITE_MAGIC = b"SQLite format 3\0"                 # sqlite.org/fileformat.html
+_KDBX_MAGIC = bytes.fromhex("03d9a29a67fb4bb5")      # KeePass 2.x / KeePassXC (KDBX 2-4)
+_KDB_MAGIC = bytes.fromhex("03d9a29a65fb4bb5")       # KeePass 1.x
+HEADER_BYTES = 32  # enough for every check below
+
+
+def _expected_format(name: str) -> tuple[str, Callable[[bytes], bool]] | None:
+    """(what the name claims, check on the first bytes) for a name whose
+    format has a fixed start, else None."""
+    n = name.lower()
+    if n.endswith(".kdbx"):
+        return "a KeePass database", lambda h: h.startswith(_KDBX_MAGIC)
+    if n.endswith(".kdb"):
+        return "a KeePass 1 database", lambda h: h.startswith(_KDB_MAGIC)
+    if n.endswith(".ppk"):
+        return "a PuTTY key", lambda h: h.startswith(b"PuTTY-User-Key-File-")
+    if n in _SSH_KEY_NAMES:
+        # OpenSSH, and the older PEM and PKCS#8 forms, all open this way.
+        return "an SSH private key", lambda h: h.startswith(b"-----BEGIN ")
+    if n.endswith(".keytab"):
+        # A version byte 5 then 2 (or the obsolete 1), big-endian (MIT krb5 docs).
+        return "a Kerberos keytab", lambda h: h[:1] == b"\x05" and h[1:2] in (b"\x01", b"\x02")
+    if n in _SQLITE_NAMES:
+        return "an SQLite credential store", lambda h: h.startswith(_SQLITE_MAGIC)
+    return None
+
+
+def has_expected_format(path: str, real_path: str) -> bool:
+    """True if format_mismatch() has anything to check for this file."""
+    return any(_expected_format(os.path.basename(p)) for p in {path, real_path})
+
+
+def format_mismatch(path: str, real_path: str, head: bytes) -> str | None:
+    """Why the file isn't what its name says, or None. `head` is its first
+    HEADER_BYTES bytes; an empty file isn't checked (it holds nothing)."""
+    if not head:
+        return None
+    for p in dict.fromkeys((path, real_path)):   # each name once, the one seen first
+        expected = _expected_format(os.path.basename(p))
+        if expected and not expected[1](head):
+            return f"named like {expected[0]} ({os.path.basename(p)}), but doesn't start like one"
+    return None
 
 
 def skip_reason(path: str, real_path: str, st_mode: int) -> str | None:

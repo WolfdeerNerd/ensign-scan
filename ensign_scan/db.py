@@ -39,6 +39,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "files", "sig_version", "INTEGER")
     _ensure_column(engine, "directories", "mtime_ns", "INTEGER")
     _ensure_column(engine, "directories", "ctime_ns", "INTEGER")
+    _ensure_column(engine, "files", "format_mismatch", "TEXT")
     _upgrade_data(engine)
 
 

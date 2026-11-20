@@ -181,6 +181,10 @@ class FileRecord(Base):
     scan_status = Column(String, default=ScanStatus.PENDING.value, index=True)
     scan_result = Column(SafeText)
     threat_name = Column(SafeText)
+    # Set when the file is named like a credential format with a fixed start
+    # (a .kdbx, a .ppk, an SSH key...) but doesn't start that way: why
+    # (secrets.format_mismatch). NULL when it matches, or has no such name.
+    format_mismatch = Column(SafeText)
     last_scanned = Column(DateTime)
 
     created_at = Column(DateTime, default=utcnow)
