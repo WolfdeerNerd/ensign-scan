@@ -25,6 +25,7 @@ Decided, no order yet:
 
 - **More persistence checks.** udev rules, `modules-load.d`, `sudoers.d` and PAM, in the persistence audit (`--persistence`). Later, the audit as part of every run, once it's quiet.
 - **Reports for Ensign's own mistakes.** A scrubbed report for Ensign's GitHub detection form, like `--clamav-report` does for ClamAV.
+- **Evidence in `--clamav-report`.** Show which parts of the signature matched in the file and where, whether ClamAV's default size limits would reach the match, and who signed the file (for Windows programs). It gives ClamAV's analysts what they need to fix a loose signature, and helps you judge the hit yourself.
 - **clamd.conf suggestions.** One section with settings worth changing in clamd's config and why, such as `MaxThreads` or `TemporaryDirectory`. Advice only, as always.
 - **A steadier ETA.** The time estimate still swings a lot during large-file scanning.
 - **Scheduled scans.** A service that runs Ensign regularly, without a flood of alerts, especially while you're gaming.

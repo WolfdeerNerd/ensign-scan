@@ -229,9 +229,11 @@ def decode_threat_name(threat_name: str | None) -> ThreatExplanation | None:
     hint = None
     if platform in _NON_NATIVE_PLATFORMS and category != "Test":
         hint = ("Windows/DOS-targeted signature. That payload can't run natively on "
-                "Linux, so on Arch this is often a false positive or inert cargo "
-                "(installers, game assets, Wine prefixes). Still check where the "
-                "file came from.")
+                "Linux, so this is often a false positive or inert cargo (installers, "
+                "game assets). Wine and Steam's Proton are the exception: a Windows "
+                "program they start does run, with access to your home folder, so "
+                "take hits in game folders and Wine prefixes seriously. Still check "
+                "where the file came from.")
     return ThreatExplanation(" ".join(sentences), hint, decoded=True)
 
 

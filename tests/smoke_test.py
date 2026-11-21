@@ -558,6 +558,7 @@ def main():
     d = _ex.explain_threat("Win.Malware.Example-1234567-0")
     assert d and d.decoded and "Signature number 1234567, revision 0" in d.description
     assert "can't run natively" in d.false_positive_note
+    assert "Proton" in d.false_positive_note, "the hint says Wine/Proton can run Windows payloads"
     d = _ex.explain_threat("Win.Exploit.CVE_2020_1234-1")
     assert d and d.decoded and "CVE-2020-1234" in d.description
     for n in ("Win.Exploit.CVE_2015_2503-1", "Win.Malware.Aotera-10060486-0"):
