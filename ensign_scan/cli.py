@@ -15,6 +15,7 @@ if sys.version_info < (3, 11):
     raise SystemExit(1)
 
 import argparse
+import dataclasses
 import os
 import time
 from builtins import print as builtin_print
@@ -22,10 +23,10 @@ from importlib.metadata import PackageNotFoundError, version as dist_version
 
 from rich import print
 
-from ensign_scan.config import HOME, HOSTNAME, Config, ensure_default_config, legacy_notice
+from ensign_scan.config import AS_ROOT, HOME, HOSTNAME, Config, ensure_default_config, legacy_notice
 from ensign_scan import (
     allowlist, bigrules, diagnostics, explanations, fpreport, logsetup, migrate, notify, persistence, pkgdb,
-    secrets,
+    protect, secrets,
 )
 from ensign_scan.fsutil import print_unwrapped, shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
@@ -134,6 +135,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yes", action="store_true",
                         help="Don't ask to confirm --allow, --allow-folder, --acknowledge or "
                              "--acknowledge-all (for scripts)")
+    parser.add_argument("--protect", action="store_true",
+                        help="With sudo: keep your config and your decisions (allowances, "
+                             "acknowledged startup entries) where only root can change them, so "
+                             "nothing running as you can. Shows your config and asks first, then exit")
+    parser.add_argument("--unprotect", action="store_true",
+                        help="With sudo: undo --protect, so your runs use your own config and "
+                             "database again. Asks first, then exit")
     parser.add_argument("--suggest-fixes", action="store_true",
                         help="List files clamd could not read, grouped by directory, then exit (no full scan). "
                              "Scoped to any targets given.")
@@ -144,6 +152,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--unallow-folder needs --signature NAME")
     if args.allow_folder and args.unallow_folder:
         parser.error("--allow-folder and --unallow-folder can't be used together")
+    if args.protect and args.unprotect:
+        parser.error("--protect and --unprotect can't be used together")
     return args
 
 
@@ -206,6 +216,22 @@ def _main() -> int:
     if args.diagnostics:
         builtin_print(diagnostics.report(args.config))
         return 0
+    if args.protect or args.unprotect:
+        return _run_protect(args)
+    # Protected mode (protect.py): before anything reads your own config.
+    protected = None
+    if not AS_ROOT:
+        try:
+            protected = protect.status()
+        except protect.Unsafe as exc:
+            print(f"[bold red]✗ Protected mode:[/bold red] {shown(str(exc))}")
+            print("Nothing was scanned. Your own config isn't used instead: in protected mode it never is.")
+            return 1
+        if protected:
+            refusal = _protected_refusal(args)
+            if refusal:
+                print(f"[bold red]✗[/bold red] {refusal}")
+                return 1
     # Before the starter config: it must never be written next to an old
     # config that's about to move into the new place.
     moved, not_moved = migrate.move_legacy_folders(args.config)
@@ -215,13 +241,19 @@ def _main() -> int:
             print(shown(line))
         print("If a script or timer names an old path, update it.")
     try:
-        if not args.config:
-            ensure_default_config()
-        config = Config.load(args.config)
+        if protected:
+            config = dataclasses.replace(Config.load(protected.config), decisions_db=protected.decisions)
+        else:
+            if not args.config:
+                ensure_default_config()
+            config = Config.load(args.config)
     except ValueError as exc:   # a malformed config, TOML syntax errors included
         print(f"[bold red]✗ Config error:[/bold red] {shown(str(exc))}")
         print("Nothing was scanned. Fix the setting named above and run again.")
         return 1
+    if protected:
+        print(f"[ensign] Protected: your config and decisions are root's copies. Change the "
+              f"config with: sudoedit {shown(str(protected.config))}")
     # Still on the pre-0.8.1 folders: say so before the run and again after
     # it, where it isn't scrolled away under the scan.
     notice = legacy_notice(config, not_moved)
@@ -233,6 +265,45 @@ def _main() -> int:
         if notice:
             _print_legacy(notice)
             _ended_with_gap = False
+
+
+def _protected_refusal(args) -> str | None:
+    """Why this run can't go ahead in protected mode, or None."""
+    if args.config or os.environ.get("ENSIGN_CONFIG"):
+        return ("You are protected, so your runs only use root's copy of your config: "
+                "--config and $ENSIGN_CONFIG aren't used. If you didn't set ENSIGN_CONFIG "
+                "yourself, find out what did (your shell's startup files, for a start).")
+    if (args.allow or args.unallow or args.allow_folder or args.unallow_folder
+            or args.acknowledge or args.acknowledge_all):
+        return ("You are protected, so your allowances and acknowledged startup entries are "
+                "root's, and your user can't change them. (Changing them with sudo comes in a "
+                "later version.) Nothing was changed.")
+    return None
+
+
+def _run_protect(args) -> int:
+    """sudo ensign-scan --protect / --unprotect (protect.py)."""
+    from ensign_scan.config import EXAMPLE_CONFIG, _user_config_to_copy
+    try:
+        uid = protect.target_uid()
+        if args.unprotect:
+            if protect.unprotect(uid, _confirm(args.yes)):
+                print("[green]✓ Unprotected.[/green] Your next run uses your own config and database.")
+            return 0
+        copied_from, text = _user_config_to_copy()
+        found = protect.protect(uid, text if copied_from else EXAMPLE_CONFIG, copied_from,
+                                _confirm(args.yes))
+    except protect.CantProtect as exc:
+        print(f"[bold red]✗ {shown(str(exc))}[/bold red]")
+        return 1
+    if found:
+        print("[green]✓ Protected.[/green] Your own runs now use:")
+        print(f"  config:    {shown(str(found.config))}")
+        print(f"  decisions: {shown(str(found.decisions))} (empty)")
+        print(f"Change the config with: sudoedit {shown(str(found.config))}")
+        print("Your own ~/.config/ensign-scan/config.toml isn't read any more. "
+              "Undo all this with: sudo ensign-scan --unprotect")
+    return 0
 
 
 def _print_legacy(notice: str) -> None:

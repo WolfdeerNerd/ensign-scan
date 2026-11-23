@@ -90,6 +90,16 @@ def _config_section(args_config: str | None) -> tuple[list[str], Config]:
         if default_config_path() != DEFAULT_CONFIG_PATH:
             origin = "default location, old (before 0.8.1)"
     path = Path(explicit) if explicit else default_config_path()
+    if os.geteuid() != 0:
+        from . import protect
+        try:
+            protected = protect.status()
+        except protect.Unsafe:
+            return ["  source:              protected mode, but root's copies can't be used "
+                    "(a run says why)"], Config()
+        if protected:
+            # What the runs use: root's copy (they refuse --config and $ENSIGN_CONFIG).
+            origin, path, explicit = "protected mode (root's copy)", protected.config, None
 
     if not path.is_file():
         if explicit:

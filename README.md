@@ -138,14 +138,38 @@ Your config and your database belong to you, so only you (and root) can change t
 
 | It changes | Effect | What notices |
 |---|---|---|
-| `excludes` or `scan_targets` in your config | Its folder is never scanned, and nothing says so | Nothing in your own runs |
-| `clamd_socket` in your config, pointed at a fake clamd it runs itself | Every file is reported clean | Nothing in your own runs |
-| An allowance (its file's hash and signature name) | That hit is reported as "allowed by you" for as long as the file stays the same | The "Allowed by you" count at the end of each run, and `--list-allowed` |
-| An acknowledged startup entry | The persistence audit stops listing its entry | `persistence_acknowledged.log`, which sits in the same folder, so it could edit that too |
+| `excludes` or `scan_targets` in your config | Its folder is never scanned, and nothing says so | Nothing in your own runs. In protected mode it can't change your config |
+| `clamd_socket` in your config, pointed at a fake clamd it runs itself | Every file is reported clean | Ensign refuses a clamd running as you (see How clamd Reads Your Files). In protected mode it can't change your config |
+| An allowance (its file's hash and signature name) | That hit is reported as "allowed by you" for as long as the file stays the same | The "Allowed by you" count at the end of each run, and `--list-allowed`. In protected mode it can't add one |
+| An acknowledged startup entry | The persistence audit stops listing its entry | `persistence_acknowledged.log`, which sits in the same folder, so it could edit that too. In protected mode it can't acknowledge one |
 | A file's record, set to clean | The file isn't sent to ClamAV again until the next signature rescan (`rescan_after_signature_updates`) | The signature rescan, unless your config was also changed to switch it off. A record claiming a newer signature version than clamd has is rescanned at once |
 | Ensign itself, if it's installed where you can write (a checkout, a venv in your home, `pip install --user`) | Anything. Under `sudo`, the changed code runs as root | Nothing Ensign can do. Install it where only root can write if this matters to you |
 
 **The independent check is a run with `sudo`.** Root keeps its own config, database and persistence baseline, which only root can change (see Running with `sudo`), so none of the changes to your config or database reach it. It only helps if Ensign itself is installed where only root can write: a copy you can change runs your changes as root. A run with `sudo` now and then scans everything by its own record, and its persistence audit compares against its own baseline.
+
+### Protected mode
+
+Protected mode keeps your config and your decisions (allowances, folder allowances and acknowledged startup entries) where only root can write them, so nothing running as you can change them. It's optional, and nothing changes until you turn it on:
+
+```bash
+sudo ensign-scan --protect
+```
+
+It shows your config and asks before changing anything. Then:
+
+- **Your config** is copied to `/etc/ensign-scan/users/<your uid>/config.toml`. Your runs use that copy from then on, and never read `~/.config/ensign-scan/config.toml`. Change it with `sudoedit /etc/ensign-scan/users/<your uid>/config.toml`. `--config` and `$ENSIGN_CONFIG` are refused: if a run says one was set and you didn't set it, find out what did.
+- **Your decisions** are kept in `/var/lib/ensign-scan/users/<your uid>/decisions.db`. It **starts empty**: the allowances and acknowledgments in your own database aren't carried over, since root never reads a file you can write, and anything running as you could have added to them. Your user can't change them: `--allow`, `--allow-folder`, `--acknowledge` and the rest are refused. (Changing them with `sudo` comes in a later version.)
+- **Your verdicts** (each file's last scan result) stay in your own database. Something running as you could still mark a file clean there, but only until the next signature rescan checks it again.
+- **Only you can read root's copies.** Each file is root's (mode 600), with an ACL entry that lets your user read it and nothing else. This needs a filesystem with ACL support, as ext4, btrfs and xfs have. Without it, `--protect` refuses and changes nothing. The folders above are mode 711: anyone can pass through, nobody can list them.
+- **Every run checks root's copies first,** the way runs with `sudo` check their own: owned by root, and in folders only root can change. If a check fails (a file replaced, made writable by others, or unreadable because its ACL was lost in a restore), the run stops and says why. It never falls back to your own config.
+
+**Undo it** with `sudo ensign-scan --unprotect`. Your runs then use your own config and database again, as they are at that moment, so check them.
+
+**What it doesn't cover:**
+- A copy of Ensign you can write to (see the table above).
+- Root's own runs. They keep their own config and decisions, as before, so a run with `sudo` stays an independent check.
+- `sudo`'s remembered password. By default sudo remembers it for a few minutes in the terminal you used, and a program started from that terminal in that time can use it without asking you. Run `sudo -k` after changing settings to make sudo forget it.
+
 
 ## How clamd Reads Your Files
 
@@ -237,6 +261,8 @@ These run one job and exit — no full scan.
 | `python3 main.py --persistence` | List startup entries that are new, changed or gone since you acknowledged them (see Persistence Audit). Changes nothing |
 | `python3 main.py --acknowledge PATH` | Accept one startup entry the persistence audit lists, as it is now. Asks to confirm; `--yes` skips the question |
 | `python3 main.py --acknowledge-all` | Show the persistence audit, then accept everything it lists. Asks to confirm |
+| `sudo python3 main.py --protect` | Keep your config and decisions where only root can change them (see Protected mode). Shows your config and asks first |
+| `sudo python3 main.py --unprotect` | Undo `--protect`: your runs use your own config and database again. Asks first |
 | `python3 main.py --clamav-report PATH` | Prepare a false-positive report for ClamAV about a flagged file (see A note on infected results). Nothing is sent: you submit it |
 
 ### Only one run at a time

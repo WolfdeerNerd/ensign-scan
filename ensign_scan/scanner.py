@@ -448,7 +448,7 @@ class TreeStats:
 class Scanner:
     def __init__(self, config: Config, clamd: ClamdClient | None = None):
         self.config = config
-        self.engine = make_engine(config.db_url)
+        self.engine = make_engine(config.db_url, config.decisions_db)
         if not config.never_open_credentials:
             self._unclassify()
         self.clamd = clamd or ClamdClient(config.clamd_socket)

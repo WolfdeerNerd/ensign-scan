@@ -286,6 +286,12 @@ class Config:
     # Where this config came from, for the startup banner. Not a setting.
     source: str = field(default="built-in defaults", compare=False)
 
+    # Protected mode (protect.py): root's decisions file, which the run reads
+    # allowances and acknowledgments from instead of its own database. Set by
+    # the run after loading root's copy of the config, never from a file: a
+    # config can't name it (it isn't in KNOWN_SETTINGS).
+    decisions_db: Path | None = None
+
     # -- loading ------------------------------------------------------
 
     @classmethod
