@@ -152,7 +152,15 @@ def _clamav_section(config: Config) -> list[str]:
         reply = "unknown"
     age = client.signature_age_days()
     uid = client.daemon_uid()
-    runs_as = "unknown" if uid is None else ("root (Ensign refuses to scan)" if uid == 0 else "unprivileged user")
+    from .scanner import _own_uids
+    if uid is None:
+        runs_as = "unknown"
+    elif uid == 0:
+        runs_as = "root (Ensign refuses to scan)"
+    elif uid in _own_uids():
+        runs_as = "your own user (Ensign refuses to scan)"
+    else:
+        runs_as = "unprivileged user"
     return [
         "  clamd:               answering",
         f"  version:             {reply}",

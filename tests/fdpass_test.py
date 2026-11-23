@@ -44,7 +44,7 @@ from ensign_scan.db import DATA_VERSION, make_engine
 from ensign_scan.fsutil import NotScannable, open_for_scan, sha256_fd
 from ensign_scan.models import FileRecord, ScanStatus, utcnow
 from ensign_scan.reports import format_mismatch_report, integrity_report
-from ensign_scan.scanner import ClamdRunsAsRoot, Scanner
+from ensign_scan.scanner import ClamdRunsAsRoot, ClamdRunsAsYou, Scanner
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -289,6 +289,53 @@ assert root_stub.calls == [], "nothing may be sent to a root clamd"
 _, out = quietly(scanner_with(Stub(uid=None), "unknown").process_file, regular)
 assert "Couldn't confirm which user clamd runs as" in flat(out), "unknown UID: warn, continue"
 print("root-clamd refusal test passed ✓")
+
+# ----------------------------------------------------------------------
+# 4b. Fail closed: a clamd running as you is refused too
+# ----------------------------------------------------------------------
+# A real clamd runs as its own account. Anything running as you could
+# start a stand-in that answers OK for every file and point clamd_socket
+# at it, so Ensign refuses one that runs as the user running it, and under
+# sudo as the user who ran sudo.
+me = os.geteuid()
+assert me not in (0, 990), "this test runs as an ordinary user other than uid 990"
+for uid, sudo_uid in ((me, None), (4242, "4242")):
+    stub = Stub(uid=uid)
+    saved = os.environ.pop("SUDO_UID", None)
+    if sudo_uid:
+        os.environ["SUDO_UID"] = sudo_uid
+    try:
+        for attempt in (lambda s=stub, u=uid: scanner_with(s, f"own{u}").scan_tree(tmp / "adir"),
+                        lambda s=stub, u=uid: scanner_with(s, f"own{u}b").process_file(regular)):
+            try:
+                quietly(attempt)
+                raise AssertionError(f"a clamd running as uid {uid} must be refused")
+            except ClamdRunsAsYou as exc:
+                assert f"uid {uid}" in str(exc) and fake_sock in str(exc), str(exc)
+    finally:
+        os.environ.pop("SUDO_UID", None)
+        if saved is not None:
+            os.environ["SUDO_UID"] = saved
+    assert stub.calls == [], "nothing may be sent to a clamd running as you"
+# Another unprivileged account (clamav's, say) is fine.
+other = Stub(uid=990)
+quietly(scanner_with(other, "clamavuid").process_file, regular)
+assert other.calls, "a clamd running as another unprivileged user is used"
+
+# The real check, end to end: the fake clamd above is a thread of this
+# process, so the kernel reports it as running as you.
+real = Scanner(Config(db_url=f"sqlite:///{tmp / 'realpeer'}.db", log_file=tmp / "realpeer.log",
+                      clamd_socket=fake_sock, max_workers=2))
+try:
+    quietly(real.process_file, regular)
+    raise AssertionError("the in-process fake clamd runs as you and must be refused")
+except ClamdRunsAsYou:
+    pass
+print("own-user clamd refusal test passed ✓")
+
+# From here on the in-process fake stands in for a real clamd, which runs
+# as its own account: report it as one (uid 990).
+ClamdClient.daemon_uid = lambda self: 990
 
 # ----------------------------------------------------------------------
 # 5. Pipeline: credential files are scanned but keep no hash; SSH changes reported

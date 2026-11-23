@@ -268,7 +268,7 @@ def check(engine: yaraengine.Engine) -> None:
         class FakeClamd:
             """64 KiB limit; finds nothing in any slice."""
             def daemon_uid(self):
-                return 1000
+                return 990   # not your uid: Ensign refuses a clamd running as you
 
             def supports_fildes(self):
                 return True

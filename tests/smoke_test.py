@@ -25,6 +25,13 @@ from ensign_scan.config import Config
 from ensign_scan.models import ScanStatus
 from ensign_scan.reports import scan_summary
 from ensign_scan.scanner import Scanner
+from ensign_scan.clamd import ClamdClient
+
+# The fake clamd below is a thread of this process, so it runs as you, and
+# Ensign refuses a clamd that runs as you (fdpass_test.py tests that). Here
+# it stands in for a real clamd, which runs as its own account: report it
+# as one (uid 990).
+ClamdClient.daemon_uid = lambda self: 990
 
 import re
 

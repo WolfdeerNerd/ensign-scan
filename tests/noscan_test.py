@@ -44,7 +44,7 @@ class FakeClamd:
         self.scanned = 0
 
     def daemon_uid(self):
-        return 1000
+        return 990   # not your uid: Ensign refuses a clamd running as you
 
     def supports_fildes(self):
         return True

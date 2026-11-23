@@ -71,8 +71,20 @@ from .progress import RunProgress
 log = logging.getLogger(__name__)
 
 
-class ClamdRunsAsRoot(RuntimeError):
+class ClamdUnsafe(RuntimeError):
+    """Ensign refuses to send clamd anything (see the subclasses)."""
+
+
+class ClamdRunsAsRoot(ClamdUnsafe):
     """clamd is running as root; Ensign refuses to send it anything."""
+
+
+class ClamdRunsAsYou(ClamdUnsafe):
+    """What answers on clamd's socket runs as the user running Ensign
+    (under sudo: the user who ran sudo). A real clamd runs as its own
+    account ('clamav'). One running as you is most likely a stand-in:
+    any program running as you could start one that answers "OK" for
+    every file, and point clamd_socket at it. Ensign refuses it."""
 
 
 ROOT_CLAMD_MESSAGE = (
@@ -81,6 +93,28 @@ ROOT_CLAMD_MESSAGE = (
     "machine, and ClamAV itself advises against running it as root. Set "
     "'User clamav' in clamd.conf, then: sudo systemctl restart clamav-daemon"
 )
+
+
+def own_clamd_message(uid: int, socket_path: str) -> str:
+    return (
+        f"What answers on clamd's socket ({socket_path}) runs as your own user "
+        f"(uid {uid}). A real clamd runs as its own account ('clamav'), so this is "
+        "most likely something else: a program running as you could start one that "
+        "reports every file clean. Ensign won't send it any files. See what owns the "
+        f"socket with: ss -xlp | grep -F '{socket_path}', and check clamd_socket "
+        "in your config."
+    )
+
+
+def _own_uids() -> set[int]:
+    """The accounts a clamd must not run as, besides root: the one running
+    Ensign, and under sudo the one who ran sudo."""
+    uids = {os.geteuid()}
+    sudo_uid = os.environ.get("SUDO_UID", "")
+    if sudo_uid.isdigit():
+        uids.add(int(sudo_uid))
+    uids.discard(0)   # root has its own refusal and message
+    return uids
 
 
 @dataclass(frozen=True)
@@ -469,8 +503,9 @@ class Scanner:
     def prepare_clamd(self) -> None:
         """Check clamd once, before the first file is sent to it.
 
-        Raises ClamdRunsAsRoot if clamd runs as root (fail closed: no
-        fallback, nothing is scanned). Otherwise picks the transport:
+        Raises ClamdRunsAsRoot if clamd runs as root, and ClamdRunsAsYou
+        if it runs as the user running Ensign (fail closed: no fallback,
+        nothing is scanned). Otherwise picks the transport:
         FILDES when the daemon offers it, else path SCAN with a warning,
         since then clamd can only scan what the clamav user can read.
         """
@@ -524,6 +559,8 @@ class Scanner:
         uid = self.clamd.daemon_uid()
         if uid == 0:
             raise ClamdRunsAsRoot(ROOT_CLAMD_MESSAGE)
+        if uid is not None and uid in _own_uids():
+            raise ClamdRunsAsYou(own_clamd_message(uid, self.config.clamd_socket))
         if uid is None:
             print("[yellow]! Couldn't confirm which user clamd runs as (no access to "
                   "its /proc entry). Continuing; check with: ps -o user= -C clamd[/yellow]")
@@ -967,7 +1004,7 @@ class Scanner:
             return None, "skipped"
 
         if scan:
-            self.prepare_clamd()  # no-op after the first call; raises if clamd is root
+            self.prepare_clamd()  # no-op after the first call; raises if clamd is unsafe
 
         try:
             fd, st = open_for_scan(path)
