@@ -151,7 +151,7 @@ with engine.begin() as c:
     c.exec_driver_sql("INSERT INTO allowances (file_hash, threat_name, filepath, allowed_at) "
                       "VALUES (?, 'Test.Evil', ?, '2026-11-23 10:00:00')", (forged_digest, str(tree / "forged.dat")))
     c.exec_driver_sql("INSERT INTO persistence_entries (path, category, kind, digest, acknowledged_at) "
-                      "VALUES ('/home/x/.bashrc', 'shell', 'file', 'forged', '2026-11-23 10:00:00')")
+                      "VALUES ('/home/user/.bashrc', 'shell', 'file', 'forged', '2026-11-23 10:00:00')")
 engine.dispose()
 
 # Root's decisions: the real false positive only.
