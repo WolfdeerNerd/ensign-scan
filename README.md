@@ -139,6 +139,7 @@ Your config and your database belong to you, so only you (and root) can change t
 | It changes | Effect | What notices |
 |---|---|---|
 | `excludes` or `scan_targets` in your config | Its folder is never scanned, and nothing says so | Nothing in your own runs |
+| `clamd_socket` in your config, pointed at a fake clamd it runs itself | Every file is reported clean | Nothing in your own runs |
 | An allowance (its file's hash and signature name) | That hit is reported as "allowed by you" for as long as the file stays the same | The "Allowed by you" count at the end of each run, and `--list-allowed` |
 | An acknowledged startup entry | The persistence audit stops listing its entry | `persistence_acknowledged.log`, which sits in the same folder, so it could edit that too |
 | A file's record, set to clean | The file isn't sent to ClamAV again until the next signature rescan (`rescan_after_signature_updates`) | The signature rescan, unless your config was also changed to switch it off. A record claiming a newer signature version than clamd has is rescanned at once |
