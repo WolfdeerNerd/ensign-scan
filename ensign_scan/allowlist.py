@@ -68,6 +68,19 @@ class _Candidate:
     threat: str
 
 
+def orphaned(engine: Engine) -> set[int]:
+    """Ids of records marked allowed whose allowance is gone: they count as
+    infected. Read-only, for the listings, which can run alongside a scan
+    and never write; reconcile() is what updates the records."""
+    pairs = allowed_pairs(engine)
+    with Session(engine) as session:
+        # "Unknown" when ClamAV named no signature: what --allow saved (_candidate).
+        return {row_id for row_id, digest, threat in session.query(
+                    FileRecord.id, FileRecord.file_hash, FileRecord.threat_name).filter(
+                    FileRecord.scan_status == ScanStatus.ALLOWED.value)
+                if (digest, threat or "Unknown") not in pairs}
+
+
 def reconcile(engine: Engine) -> int:
     """Flag again every file recorded as allowed whose allowance is gone.
     Returns how many.
@@ -78,17 +91,17 @@ def reconcile(engine: Engine) -> int:
     root's (protect.py) and root never writes your database, so your runs
     do it here, at the start. It also turns back a record that says
     "allowed" with no allowance behind it at all."""
-    pairs = allowed_pairs(engine)
-    flagged = 0
+    ids = sorted(orphaned(engine))
+    if not ids:
+        return 0
     with Session(engine) as session:
-        for record in session.query(FileRecord).filter(
-                FileRecord.scan_status == ScanStatus.ALLOWED.value):
-            # "Unknown" when ClamAV named no signature: what --allow saved (_candidate).
-            if (record.file_hash, record.threat_name or "Unknown") not in pairs:
-                record.scan_status = ScanStatus.INFECTED.value
-                flagged += 1
+        # In chunks: one "IN (...)" with every id would hit SQLite's limit on
+        # variables if something planted tens of thousands of such records.
+        for start in range(0, len(ids), 500):
+            session.query(FileRecord).filter(FileRecord.id.in_(ids[start:start + 500])).update(
+                {FileRecord.scan_status: ScanStatus.INFECTED.value}, synchronize_session=False)
         session.commit()
-    return flagged
+    return len(ids)
 
 
 def _candidate(engine: Engine, path: str) -> _Candidate | str:
@@ -617,6 +630,12 @@ def list_allowed(engine: Engine, expand: bool = False) -> int:
     signature, inside it) is counted under the folder; with `expand`
     (--list-allowed-all) it's also listed there, one level in. Returns how
     many folders and files were listed."""
+    stale = len(orphaned(engine))
+    if stale:
+        print_unwrapped(f"[yellow]! {stale} file{'s' if stale != 1 else ''} recorded as allowed "
+                        f"{'have' if stale != 1 else 'has'} no allowance any more, so "
+                        f"{'they count' if stale != 1 else 'it counts'} as infected (see "
+                        f"ensign-scan --list-infected).[/yellow]")
     folders, files, gone = _gather(engine)
     if not folders and not files and not gone:
         print(f"Nothing is allowed. ({_COMMAND} --allow PATH marks a flagged file as a false positive.)")
