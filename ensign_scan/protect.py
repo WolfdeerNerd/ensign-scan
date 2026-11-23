@@ -139,12 +139,32 @@ def _check_readable(found: Protected) -> None:
         # read the decisions stops here, before anything is scanned.
         conn = sqlite3.connect(f"file:{found.decisions}?mode=ro", uri=True)
         try:
-            for table in DECISION_TABLES:
-                conn.execute(f"SELECT count(*) FROM {table}").fetchone()
+            for table, columns in _expected_columns().items():
+                have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                missing = sorted(set(columns) - have)
+                if missing:
+                    # A newer Ensign than the one that made the file: its
+                    # queries would fail with "no such column" mid-run.
+                    raise Unsafe(f"root's decisions file is missing {', '.join(missing)} in "
+                                 f"{table}: it was made by an older Ensign. Upgrading a protected "
+                                 f"decisions file isn't built yet; report it as a bug.")
+                conn.execute(f"SELECT {', '.join(columns)} FROM {table} LIMIT 1").fetchall()
         finally:
             conn.close()
     except (OSError, sqlite3.Error) as exc:
+        if os.path.lexists(f"{found.decisions}-journal"):
+            # Root stopped partway through changing them (a crash, Ctrl+C at
+            # the wrong moment): the half-made change can only be undone by
+            # root, which SQLite does the next time root opens the file.
+            raise Unsafe("root was interrupted while changing your protected decisions, and only "
+                         "root can finish undoing that. Run any sudo command on them, for example: "
+                         "sudo ensign-scan --protected --persistence") from None
         raise Unsafe(f"you are protected, but root's copies can't be read: {exc}") from None
+
+
+def _expected_columns() -> dict[str, list[str]]:
+    from .models import Base
+    return {t: [c.name for c in Base.metadata.tables[t].columns] for t in DECISION_TABLES}
 
 
 # ----------------------------------------------------------------------
@@ -213,7 +233,10 @@ def _verify_as(uid: int, found: Protected) -> str | None:
     """Check, as the user, that their runs can read both files: fork, drop
     to the user, and run the same check their runs do. None if it works."""
     import pwd
-    gid = pwd.getpwuid(uid).pw_gid
+    try:
+        gid = pwd.getpwuid(uid).pw_gid
+    except KeyError:
+        return f"there's no account with uid {uid}"
     read_end, write_end = os.pipe()
     pid = os.fork()
     if pid == 0:   # the child: never returns
@@ -267,7 +290,7 @@ def protect(uid: int, config_text: str, copied_from: str | None, confirm) -> Pro
         for folder in (config_dir(uid), data_dir(uid)):
             folder.mkdir(mode=0o700)
             created.append(folder)
-            acl.grant(str(folder), uid, acl.EXECUTE)
+            acl.set_only(str(folder), uid, acl.EXECUTE)
 
         found = Protected(config_path(uid), decisions_path(uid))
         staged = config_dir(uid) / ".config.toml.new"
@@ -277,10 +300,18 @@ def protect(uid: int, config_text: str, copied_from: str | None, confirm) -> Pro
         except (ValueError, OSError) as exc:
             raise CantProtect(f"your config has an error, so nothing was protected: {exc}") from None
         os.rename(staged, found.config)
-        acl.grant(str(found.config), uid, acl.READ)
+        acl.set_only(str(found.config), uid, acl.READ)
 
         _create_decisions(found.decisions)
-        acl.grant(str(found.decisions), uid, acl.READ)
+        acl.set_only(str(found.decisions), uid, acl.READ)
+
+        # Nobody but the user may read them: no entry inherited from a default
+        # ACL above, no group or other access.
+        for path, perm in ((config_dir(uid), acl.EXECUTE), (data_dir(uid), acl.EXECUTE),
+                           (found.config, acl.READ), (found.decisions, acl.READ)):
+            if not acl.exactly(str(path), uid, perm):
+                raise CantProtect(f"{path} didn't get the permissions it should (only your user "
+                                  f"may read it), so nothing was protected")
 
         problem = _verify_as(uid, found)
         if problem:

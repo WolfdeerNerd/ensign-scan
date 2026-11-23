@@ -158,6 +158,10 @@ def _upgrade_to_fd_passing(conn) -> None:
     conn.exec_driver_sql("PRAGMA secure_delete = OFF")
 
 
+# A column added to allowances, allowed_folders or persistence_entries must
+# also be added to protected decisions files (protect.py), which only root
+# can change: protect._check_readable() stops a protected run whose file
+# lacks one, rather than let it fail with "no such column" mid-run.
 def _ensure_column(engine: Engine, table: str, column: str, ddl_type: str) -> None:
     with engine.connect() as conn:
         existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}

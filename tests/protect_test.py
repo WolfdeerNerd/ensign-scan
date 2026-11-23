@@ -40,6 +40,7 @@ import os  # noqa: E402
 import shutil  # noqa: E402
 import sqlite3  # noqa: E402
 import stat  # noqa: E402
+import struct  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -118,6 +119,11 @@ else:
     acl.revoke(str(f), 4242)
     assert acl.named_users(str(f)) == {}
     assert stat.S_IMODE(f.stat().st_mode) == 0o600, "no entries left: back to the plain mode"
+    acl.grant(str(f), 4243, acl.READ)            # an entry someone else set up
+    acl.set_only(str(f), 4242, acl.READ)
+    assert acl.named_users(str(f)) == {4242: acl.READ} and acl.exactly(str(f), 4242, acl.READ), \
+        "set_only leaves exactly one named entry"
+    assert not acl.exactly(str(f), 4243, acl.READ)
     try:
         acl.grant(str(f), 4242, 2)
         raise AssertionError("acl.grant must never give write")
@@ -202,6 +208,45 @@ scanner.engine.dispose()
 print("protected reads test passed ✓")
 
 # ----------------------------------------------------------------------
+# 2b. reconcile(): a record that says "allowed" with no allowance behind
+#     it counts as infected again (an unchanged allowed file isn't rescanned)
+# ----------------------------------------------------------------------
+recon = Scanner(Config(db_url=f"sqlite:///{data}/recon.db", log_file=data / "r.txt", max_workers=2),
+                clamd=FakeClamd())
+with Session(recon.engine) as s:
+    for name, digest_, threat in (("kept", "h1", "Sig.A"), ("unknown", "h2", None), ("orphan", "h3", "Sig.B")):
+        s.add(FileRecord(filepath=f"/srv/{name}", filename=name, file_hash=digest_,
+                         scan_status=ScanStatus.ALLOWED.value, threat_name=threat))
+    s.add(allowlist.Allowance(file_hash="h1", threat_name="Sig.A", filepath="/srv/kept", allowed_at=allowlist.utcnow()))
+    s.add(allowlist.Allowance(file_hash="h2", threat_name="Unknown", filepath="/srv/unknown", allowed_at=allowlist.utcnow()))
+    s.commit()
+assert allowlist.reconcile(recon.engine) == 1
+with Session(recon.engine) as s:
+    got = {r.filename: r.scan_status for r in s.query(FileRecord)}
+assert got == {"kept": "allowed", "unknown": "allowed", "orphan": "infected"}, got
+assert allowlist.reconcile(recon.engine) == 0, "nothing left to turn back"
+recon.engine.dispose()
+print("reconcile test passed ✓")
+
+# ----------------------------------------------------------------------
+# 2c. A decisions file from an older Ensign (a column missing) stops the run
+# ----------------------------------------------------------------------
+old = tmp / "old-decisions.db"
+protect._create_decisions(old)
+with sqlite3.connect(old) as c:
+    c.execute("ALTER TABLE persistence_entries DROP COLUMN kind")
+c.close()
+cfg_file = tmp / "cfg.toml"
+cfg_file.write_text("")
+try:
+    protect._check_readable(protect.Protected(cfg_file, old))
+    raise AssertionError("a decisions file missing a column must stop the run")
+except protect.Unsafe as exc:
+    assert "older Ensign" in str(exc) and "kind" in str(exc), exc
+protect._check_readable(protect.Protected(cfg_file, decisions))   # the current one is fine
+print("old decisions file test passed ✓")
+
+# ----------------------------------------------------------------------
 # 3. What a protected run refuses
 # ----------------------------------------------------------------------
 def ns(**kw):
@@ -284,8 +329,21 @@ else:
     assert quiet(protect.protect, uid, "", None, lambda p: False)[0] is None
     assert not protect.is_protected(uid)
 
+    # An admin's default ACL above, giving someone else read: nothing of
+    # protected mode may inherit it.
+    for root in (protect.CONFIG_ROOT, protect.DATA_ROOT):
+        (root / "users").mkdir(parents=True, mode=0o711, exist_ok=True)
+        os.chmod(root / "users", 0o711)
+        U = 0xFFFFFFFF
+        blob = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *e) for e in (
+            (acl.USER_OBJ, 7, U), (acl.USER, acl.READ | acl.EXECUTE, 4444), (acl.GROUP_OBJ, 0, U),
+            (acl.MASK, 5, U), (acl.OTHER, 0, U)))
+        os.setxattr(root / "users", "system.posix_acl_default", blob)
+
     config_text = 'excludes = ["/srv/cache"]\n'
     found, out = quiet(protect.protect, uid, config_text, Path("/home/u/.config/ensign-scan/config.toml"), yes)
+    for path in (protect.config_dir(uid), protect.data_dir(uid), found.config, found.decisions):
+        assert 4444 not in acl.named_users(str(path)), f"{path} inherited another user's entry"
     assert found and "/srv/cache" in out, "the config is shown before anything is protected"
     for folder in (protect.CONFIG_ROOT, protect.CONFIG_ROOT / "users",
                    protect.DATA_ROOT, protect.DATA_ROOT / "users"):
@@ -348,6 +406,26 @@ else:
     os.chown(found.config, 0, -1)
     acl.grant(str(found.config), uid, acl.READ)
     assert as_user(protect.status)[0], "back to normal"
+
+    # Root interrupted mid-write: a hot journal only root can roll back. The
+    # user's run stops and says what to run; root's next open finishes it.
+    pid = os.fork()
+    if pid == 0:
+        c = sqlite3.connect(found.decisions, isolation_level=None)
+        c.execute("PRAGMA cache_size=1")
+        c.execute("BEGIN")
+        for i in range(3000):
+            c.execute("INSERT INTO allowances (file_hash, threat_name, filepath, allowed_at) "
+                      "VALUES (?, 'T', '/x', '2026-11-23 10:00:00')", (f"k{i}",))
+        os._exit(9)   # killed before COMMIT
+    os.waitpid(pid, 0)
+    assert os.path.exists(f"{found.decisions}-journal"), "the interrupted write left its journal"
+    ok, message = as_user(protect.status)
+    assert not ok and "interrupted" in message and "sudo ensign-scan --protected" in message, message
+    sqlite3.connect(found.decisions).execute("SELECT count(*) FROM allowances").fetchone()   # root rolls back
+    assert not os.path.exists(f"{found.decisions}-journal")
+    assert acl.exactly(str(found.decisions), uid, acl.READ), "the rollback kept the file's ACL"
+    assert as_user(protect.status)[0], "readable again"
 
     # sudo ... --protected: decisions written to the user's protected file,
     # with root's own records as the evidence, and root's left as they were.

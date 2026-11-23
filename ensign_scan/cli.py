@@ -607,6 +607,14 @@ def run(args: argparse.Namespace, config: Config) -> int:
             _print_rules_status(scanner.prepare_big_rules())
         print()
 
+    # Before the scan: a file whose allowance is gone counts as infected
+    # again, and so gets scanned again (allowlist.reconcile).
+    regained = allowlist.reconcile(scanner.engine)
+    if regained:
+        print(f"[yellow]! {regained} file{'s' if regained != 1 else ''} recorded as allowed "
+              f"{'have' if regained != 1 else 'has'} no allowance any more, so "
+              f"{'they count' if regained != 1 else 'it counts'} as infected again.[/yellow]")
+
     targets = args.targets or config.scan_targets
     start = time.time()
     print("=== Starting Scan ===")

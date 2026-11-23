@@ -105,6 +105,35 @@ def grant(path: str, uid: int, perm: int) -> None:
     _write(path, entries)
 
 
+def set_only(path: str, uid: int, perm: int) -> None:
+    """Make `path`'s ACL exactly: the owner as its mode says, user `uid`
+    with `perm`, nobody else (no group, no other, no named entries). On a
+    folder, also drop any default ACL, so nothing created inside inherits
+    entries. For protected mode's own files, where an entry inherited from
+    a default ACL on a folder above would otherwise let someone else read
+    them once a named entry turns the mask on."""
+    if perm & ~(READ | EXECUTE):
+        raise ValueError("acl.set_only gives read and/or search only, never write")
+    owner = (stat.S_IMODE(os.lstat(path).st_mode) >> 6) & 7
+    _write(path, [(USER_OBJ, owner, _UNDEFINED), (USER, perm, uid),
+                  (GROUP_OBJ, 0, _UNDEFINED), (OTHER, 0, _UNDEFINED)])
+    if stat.S_ISDIR(os.lstat(path).st_mode):
+        try:
+            os.removexattr(path, "system.posix_acl_default", follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno not in (errno.ENODATA, errno.EOPNOTSUPP):
+                raise
+
+
+def exactly(path: str, uid: int, perm: int) -> bool:
+    """True if `path`'s ACL is what set_only() makes: no group or other
+    access, and `uid` the only named entry, with `perm`."""
+    entries = _entries(path)
+    named = [(tag, p, id_) for tag, p, id_ in entries if tag in (USER, GROUP)]
+    plain = {tag: p for tag, p, _ in entries if tag in (GROUP_OBJ, OTHER)}
+    return named == [(USER, perm, uid)] and plain.get(GROUP_OBJ) == 0 and plain.get(OTHER) == 0
+
+
 def revoke(path: str, uid: int) -> None:
     """Remove user `uid`'s entry from `path`, if it has one."""
     entries = _entries(path)
