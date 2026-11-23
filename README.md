@@ -158,10 +158,25 @@ sudo ensign-scan --protect
 It shows your config and asks before changing anything. Then:
 
 - **Your config** is copied to `/etc/ensign-scan/users/<your uid>/config.toml`. Your runs use that copy from then on, and never read `~/.config/ensign-scan/config.toml`. Change it with `sudoedit /etc/ensign-scan/users/<your uid>/config.toml`. `--config` and `$ENSIGN_CONFIG` are refused: if a run says one was set and you didn't set it, find out what did.
-- **Your decisions** are kept in `/var/lib/ensign-scan/users/<your uid>/decisions.db`. It **starts empty**: the allowances and acknowledgments in your own database aren't carried over, since root never reads a file you can write, and anything running as you could have added to them. Your user can't change them: `--allow`, `--allow-folder`, `--acknowledge` and the rest are refused. (Changing them with `sudo` comes in a later version.)
+- **Your decisions** are kept in `/var/lib/ensign-scan/users/<your uid>/decisions.db`. It **starts empty**: the allowances and acknowledgments in your own database aren't carried over, since root never reads a file you can write, and anything running as you could have added to them. Your user can't change them: `--allow`, `--allow-folder`, `--acknowledge` and the rest are refused when you run them as yourself. Change them with `sudo` and `--protected` instead (below).
 - **Your verdicts** (each file's last scan result) stay in your own database. Something running as you could still mark a file clean there, but only until the next signature rescan checks it again.
 - **Only you can read root's copies.** Each file is root's (mode 600), with an ACL entry that lets your user read it and nothing else. This needs a filesystem with ACL support, as ext4, btrfs and xfs have. Without it, `--protect` refuses and changes nothing. The folders above are mode 711: anyone can pass through, nobody can list them.
 - **Every run checks root's copies first,** the way runs with `sudo` check their own: owned by root, and in folders only root can change. If a check fails (a file replaced, made writable by others, or unreadable because its ACL was lost in a restore), the run stops and says why. It never falls back to your own config.
+
+**Changing your decisions** takes `sudo` and `--protected`, which says you mean your protected decisions, not root's own:
+
+```bash
+sudo ensign-scan --protected --allow PATH
+sudo ensign-scan --protected --allow-folder FOLDER --signature NAME
+sudo ensign-scan --protected --persistence          # list what's new against your baseline
+sudo ensign-scan --protected --acknowledge PATH     # or --acknowledge-all
+```
+
+`--unallow` and `--unallow-folder` work the same way. Without `--protected`, `sudo` changes root's own decisions, as before.
+
+- **The evidence is root's own scan.** Root never reads your database, so a file can be allowed only if root's own records say it was flagged: scan it with `sudo` first (`sudo ensign-scan PATH`). It's hashed again before it's allowed, as always, so only the content root saw flagged can be allowed.
+- **Root's runs keep flagging it.** Root's decisions stay separate, so a run with `sudo` is still an independent check. Your own runs mark the file allowed on their next pass.
+- **Acknowledgments** are checked against your protected baseline, and logged in a log only root can read, next to the decisions file.
 
 **Undo it** with `sudo ensign-scan --unprotect`. Your runs then use your own config and database again, as they are at that moment, so check them.
 
@@ -263,6 +278,7 @@ These run one job and exit — no full scan.
 | `python3 main.py --acknowledge-all` | Show the persistence audit, then accept everything it lists. Asks to confirm |
 | `sudo python3 main.py --protect` | Keep your config and decisions where only root can change them (see Protected mode). Shows your config and asks first |
 | `sudo python3 main.py --unprotect` | Undo `--protect`: your runs use your own config and database again. Asks first |
+| `sudo python3 main.py --protected --allow PATH` | In protected mode, change your decisions: goes with `--allow`, `--unallow`, `--allow-folder`, `--unallow-folder`, `--persistence`, `--acknowledge` and `--acknowledge-all` |
 | `python3 main.py --clamav-report PATH` | Prepare a false-positive report for ClamAV about a flagged file (see A note on infected results). Nothing is sent: you submit it |
 
 ### Only one run at a time

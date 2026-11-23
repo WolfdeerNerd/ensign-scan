@@ -515,15 +515,17 @@ def report(audit: Audit) -> None:
         for line in _unchecked_lines(audit.unchecked):
             print_unwrapped(line)
         if os.geteuid() != 0:
-            print("  Most of these need root to read. To include them: sudo ensign-scan --persistence")
+            sudo = _PROTECTED_COMMAND or "sudo ensign-scan"
+            print(f"  Most of these need root to read. To include them: {sudo} --persistence")
 
     if not audit.pending:
         print("\n[green]✓ Nothing new, changed or gone since you last acknowledged.[/green]")
         return
-    sudo = "sudo " if os.geteuid() == 0 else ""  # root-only entries need root to acknowledge
+    # Root-only entries need root to acknowledge; protected decisions need --protected.
+    command = _PROTECTED_COMMAND or ("sudo ensign-scan" if os.geteuid() == 0 else "ensign-scan")
     print("\nIf you know where an entry came from (something you installed or set up), accept it:")
-    print(f"  {sudo}ensign-scan --acknowledge PATH     one entry")
-    print(f"  {sudo}ensign-scan --acknowledge-all      everything listed above")
+    print(f"  {command} --acknowledge PATH     one entry")
+    print(f"  {command} --acknowledge-all      everything listed above")
     print("If you don't, look at it before you accept it: an entry you can't explain is the "
           "reason this check exists.")
 
@@ -644,6 +646,16 @@ def acknowledge_all(engine: Engine, audit: Audit, log_path: Path) -> int:
 def unreadable_pending(audit: Audit) -> int:
     """New or changed entries this run could only list, not read."""
     return sum(not e.readable for e in audit.new) + sum(not e.readable for _, e in audit.changed)
+
+
+# Protected mode (protect.py): acknowledging goes through sudo --protected,
+# from a protected user's own runs and from sudo --protected runs alike.
+_PROTECTED_COMMAND: str | None = None
+
+
+def show_protected_commands() -> None:
+    global _PROTECTED_COMMAND
+    _PROTECTED_COMMAND = "sudo ensign-scan --protected"
 
 
 def run_audit(engine: Engine, home: str, root: str = "/", check_packages: bool = True) -> Audit:
