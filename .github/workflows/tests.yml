@@ -240,6 +240,10 @@ jobs:
       # another user can change (symlink and config-tampering attacks).
       - name: Root keeps its own config and data, under sudo
         run: sudo "$(command -v python)" tests/sudo_state_test.py
+      # Protected mode: --protect and --unprotect, and the protected user's
+      # runs failing closed. Works in a folder of its own, not /etc or /var/lib.
+      - name: Protected mode, under sudo
+        run: sudo "$(command -v python)" tests/protect_test.py
       - name: Show the clamd log and any AppArmor denials
         if: failure()
         run: |

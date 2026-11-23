@@ -1,13 +1,28 @@
 """Database engine construction for Ensign."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
 from .models import Base
+from .protect import DECISION_TABLES
 
 
-def make_engine(db_url: str) -> Engine:
+def make_engine(db_url: str, decisions: Path | None = None) -> Engine:
+    """The engine for a database. With `decisions` (protected mode, see
+    protect.py), root's decisions file is attached read-only on every
+    connection, and a temporary view for each decision table is put in
+    front of the database's own table of that name.
+
+    SQLite looks an unqualified table name up in the temp schema first,
+    then main, then attached databases, so every existing query on
+    allowances, allowed_folders and persistence_entries reads root's copy
+    without any change, and a write to one fails: a view can't be changed.
+    Your own tables of those names are left as they are, unused. root's
+    file is opened read-only by the operating system (only root can write
+    it), and it uses a rollback journal, so reading it writes nothing."""
     engine = create_engine(
         db_url,
         pool_size=10,
@@ -24,6 +39,10 @@ def make_engine(db_url: str) -> Engine:
         # Note: this was previously misspelled "synchronious" — SQLite
         # silently ignores unknown pragmas, so it never took effect.
         cursor.execute("PRAGMA synchronous=NORMAL")
+        if decisions is not None:
+            cursor.execute("ATTACH DATABASE ? AS decisions", (str(decisions),))
+            for table in DECISION_TABLES:
+                cursor.execute(f"CREATE TEMP VIEW {table} AS SELECT * FROM decisions.{table}")
         cursor.close()
 
     Base.metadata.create_all(engine)
