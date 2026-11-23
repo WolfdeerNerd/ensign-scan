@@ -39,6 +39,7 @@ Not decided. Discussion welcome:
 - **Name the provider of `.UNOFFICIAL` signatures** in `--clamav-report`, by finding which signature file the name comes from.
 - **NSRL hashes.** NIST's National Software Reference Library, as a local second opinion on flagged files.
 - **Hidden payloads.** Files that go beyond their normal scope.
+- **Temp and RAM-backed folders.** Scan `/tmp`, `/var/tmp`, `/dev/shm` and `/run/user/<uid>`, where anyone can write and malware is often staged, and look again at excluding `~/.cache`. Files that vanish mid-scan would count as normal there. Shared folders hold other users' files, which Ensign can't open, so the report would say so. Programs that run from RAM and delete their own file need a look at running processes, which needs its own research.
 - **Folder-level secrets detection.** Treat a folder as a secrets store when most of its files look like credentials.
 - **Looking inside archives over 2 GiB.** Open zip and tar archives ClamAV can't scan whole, and hand it each member. An experiment showed it works; see [`docs/Large_Files_Research.md`](docs/Large_Files_Research.md).
 - **A graphical interface,** if people want one, in a way that honors ClamTk.
