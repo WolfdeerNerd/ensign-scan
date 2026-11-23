@@ -54,7 +54,7 @@ class FakeClamd:
     """Just enough of ClamdClient for Scanner: unprivileged, FILDES, and a
     verdict from the file's name ("evil" in it = infected)."""
     def daemon_uid(self):
-        return 1000
+        return 990   # not your uid: Ensign refuses a clamd running as you
 
     def supports_fildes(self):
         return True

@@ -41,7 +41,7 @@ from ensign_scan.reports import (
     unreadable_report,
     unsaved_report,
 )
-from ensign_scan.scanner import ClamdRunsAsRoot, Scanner
+from ensign_scan.scanner import ClamdUnsafe, Scanner
 
 EXIT_BUSY = 75  # sysexits EX_TEMPFAIL: another Ensign holds the lock; try again later
 EXIT_UNSAVED = 1  # the run finished, but some results couldn't be saved (see unsaved_report)
@@ -325,10 +325,10 @@ def _print_rules_status(status) -> None:
 
 def clamd_is_safe(scanner: Scanner) -> bool:
     """Check clamd once before any file is sent to it. False (with the
-    reason printed) if it runs as root -- Ensign then scans nothing."""
+    reason printed) if it runs as root, or as you -- Ensign then scans nothing."""
     try:
         scanner.prepare_clamd()
-    except ClamdRunsAsRoot as exc:
+    except ClamdUnsafe as exc:
         print(f"[red]✗ {exc}[/red]")
         return False
     return True
