@@ -68,6 +68,29 @@ class _Candidate:
     threat: str
 
 
+def reconcile(engine: Engine) -> int:
+    """Flag again every file recorded as allowed whose allowance is gone.
+    Returns how many.
+
+    An unchanged allowed file isn't sent to ClamAV again (like a clean
+    one), so its record must follow the allowances by itself. --unallow
+    does that in the same database; in protected mode the allowances are
+    root's (protect.py) and root never writes your database, so your runs
+    do it here, at the start. It also turns back a record that says
+    "allowed" with no allowance behind it at all."""
+    pairs = allowed_pairs(engine)
+    flagged = 0
+    with Session(engine) as session:
+        for record in session.query(FileRecord).filter(
+                FileRecord.scan_status == ScanStatus.ALLOWED.value):
+            # "Unknown" when ClamAV named no signature: what --allow saved (_candidate).
+            if (record.file_hash, record.threat_name or "Unknown") not in pairs:
+                record.scan_status = ScanStatus.INFECTED.value
+                flagged += 1
+        session.commit()
+    return flagged
+
+
 def _candidate(engine: Engine, path: str) -> _Candidate | str:
     """What --allow would allow for `path`, or why it can't."""
     with Session(engine) as session:

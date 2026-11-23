@@ -143,7 +143,7 @@ Your config and your database belong to you, so only you (and root) can change t
 | An allowance (its file's hash and signature name) | That hit is reported as "allowed by you" for as long as the file stays the same | The "Allowed by you" count at the end of each run, and `--list-allowed`. In protected mode it can't add one |
 | An acknowledged startup entry | The persistence audit stops listing its entry | `persistence_acknowledged.log`, which sits in the same folder, so it could edit that too. In protected mode it can't acknowledge one |
 | A file's record, set to clean | The file isn't sent to ClamAV again until the next signature rescan (`rescan_after_signature_updates`) | The signature rescan, unless your config was also changed to switch it off. A record claiming a newer signature version than clamd has is rescanned at once |
-| Ensign itself, if it's installed where you can write (a checkout, a venv in your home, `pip install --user`) | Anything. Under `sudo`, the changed code runs as root | Nothing Ensign can do. Install it where only root can write if this matters to you |
+| Ensign itself, if it's installed where you can write (a checkout, a venv in your home, `pip install --user`), or the command you type: an alias, a `PATH` entry, or a variable like `LD_PRELOAD` or `PYTHONPATH` set in your shell's startup files | Anything, protected mode included. Under `sudo`, the changed code runs as root | Nothing Ensign can do. Install it where only root can write if this matters to you. A change to your shell's startup files shows up in the persistence audit |
 
 **The independent check is a run with `sudo`.** Root keeps its own config, database and persistence baseline, which only root can change (see Running with `sudo`), so none of the changes to your config or database reach it. It only helps if Ensign itself is installed where only root can write: a copy you can change runs your changes as root. A run with `sudo` now and then scans everything by its own record, and its persistence audit compares against its own baseline.
 
@@ -159,7 +159,7 @@ It shows your config and asks before changing anything. Then:
 
 - **Your config** is copied to `/etc/ensign-scan/users/<your uid>/config.toml`. Your runs use that copy from then on, and never read `~/.config/ensign-scan/config.toml`. Change it with `sudoedit /etc/ensign-scan/users/<your uid>/config.toml`. `--config` and `$ENSIGN_CONFIG` are refused: if a run says one was set and you didn't set it, find out what did.
 - **Your decisions** are kept in `/var/lib/ensign-scan/users/<your uid>/decisions.db`. It **starts empty**: the allowances and acknowledgments in your own database aren't carried over, since root never reads a file you can write, and anything running as you could have added to them. Your user can't change them: `--allow`, `--allow-folder`, `--acknowledge` and the rest are refused when you run them as yourself. Change them with `sudo` and `--protected` instead (below).
-- **Your verdicts** (each file's last scan result) stay in your own database. Something running as you could still mark a file clean there, but only until the next signature rescan checks it again.
+- **Your verdicts** (each file's last scan result) stay in your own database. Something running as you could still mark a file clean there, but only until the next signature rescan checks it again. A file marked allowed with no allowance behind it counts as infected again at the start of your next run.
 - **Only you can read root's copies.** Each file is root's (mode 600), with an ACL entry that lets your user read it and nothing else. This needs a filesystem with ACL support, as ext4, btrfs and xfs have. Without it, `--protect` refuses and changes nothing. The folders above are mode 711: anyone can pass through, nobody can list them.
 - **Every run checks root's copies first,** the way runs with `sudo` check their own: owned by root, and in folders only root can change. If a check fails (a file replaced, made writable by others, or unreadable because its ACL was lost in a restore), the run stops and says why. It never falls back to your own config.
 
@@ -181,7 +181,8 @@ sudo ensign-scan --protected --acknowledge PATH     # or --acknowledge-all
 **Undo it** with `sudo ensign-scan --unprotect`. Your runs then use your own config and database again, as they are at that moment, so check them.
 
 **What it doesn't cover:**
-- A copy of Ensign you can write to (see the table above).
+- A copy of Ensign you can write to, or the command you type (see the table above).
+- Your own database being made to attack Ensign as it reads it. Your runs still parse a file you can write, and a file crafted against SQLite could change what that run does. It can't reach root's copies or a run with `sudo`.
 - Root's own runs. They keep their own config and decisions, as before, so a run with `sudo` stays an independent check.
 - `sudo`'s remembered password. By default sudo remembers it for a few minutes in the terminal you used, and a program started from that terminal in that time can use it without asking you. Run `sudo -k` after changing settings to make sudo forget it.
 
