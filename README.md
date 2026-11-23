@@ -132,6 +132,20 @@ Ensign never changes permissions, and never asks you to. It also never deletes, 
 - **Most of what's inside files over about 2 GiB.** No ClamAV tool can scan a file that large, so Ensign marks it **not fully scanned**. With the sweep on, it still checks the raw bytes in slices, plus a YARA pass for the signatures slices miss, but nothing inside compressed or encrypted content (see Large files).
 - **Anything ClamAV has no signature for.** Ensign is a file scanner built on ClamAV. It doesn't look at memory or running processes, and a clean result only means "no known signature matched". It doesn't prove a file is safe.
 
+### Malware running as you
+
+Your config and your database belong to you, so only you (and root) can change them. That also means anything running as your user can change them, malware included. Here is what it could do, and what notices:
+
+| It changes | Effect | What notices |
+|---|---|---|
+| `excludes` or `scan_targets` in your config | Its folder is never scanned, and nothing says so | Nothing in your own runs |
+| An allowance (its file's hash and signature name) | That hit is reported as "allowed by you" for as long as the file stays the same | The "Allowed by you" count at the end of each run, and `--list-allowed` |
+| An acknowledged startup entry | The persistence audit stops listing its entry | `persistence_acknowledged.log`, which sits in the same folder, so it could edit that too |
+| A file's record, set to clean | The file isn't sent to ClamAV again until the next signature rescan (`rescan_after_signature_updates`) | The signature rescan, unless your config was also changed to switch it off. A record claiming a newer signature version than clamd has is rescanned at once |
+| Ensign itself, if it's installed where you can write (a checkout, a venv in your home, `pip install --user`) | Anything. Under `sudo`, the changed code runs as root | Nothing Ensign can do. Install it where only root can write if this matters to you |
+
+**The independent check is a run with `sudo`.** Root keeps its own config, database and persistence baseline, which only root can change (see Running with `sudo`), so none of the changes to your config or database reach it. It only helps if Ensign itself is installed where only root can write: a copy you can change runs your changes as root. A run with `sudo` now and then scans everything by its own record, and its persistence audit compares against its own baseline.
+
 ## How clamd Reads Your Files
 
 clamd runs as its own unprivileged user, `clamav`, not as you. Ensign doesn't ask clamd to open your files. It opens each file itself, as you, and passes clamd the already-open file over the local socket (clamd's `FILDES` command; `clamdscan --fdpass` does the same thing). The kernel checks *your* permission when Ensign opens the file, and clamd gets a handle to that one file for that one scan, with no permission on anything else. So:
@@ -322,7 +336,7 @@ After that, a run lists only what changed. Accept an entry you recognize with `-
 
 **Every acknowledgment is logged** to `persistence_acknowledged.log` in your data directory: one line per entry, with the time, the path, and the hash or link target, separated by tabs.
 
-**The limit to know about:** the baseline lives in your data directory, which you own. Malware running as you can write there too, so it could acknowledge its own entry. The log makes such a change visible, but it sits in the same folder. A baseline kept where only root can write would close this gap; that isn't built yet.
+**The limit to know about:** your baseline lives in your data directory, which you own. Malware running as you can write there too, so it could acknowledge its own entry. The log makes such a change visible, but it sits in the same folder. A sudo run's baseline is kept where only root can write, so `sudo python3 main.py --persistence` isn't fooled by such a change (see Malware running as you).
 
 ## What Gets Rescanned
 
