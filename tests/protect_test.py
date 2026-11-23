@@ -220,6 +220,17 @@ assert "ENSIGN_CONFIG" in cli._protected_refusal(ns())
 os.environ.pop("ENSIGN_CONFIG")
 if saved is not None:
     os.environ["ENSIGN_CONFIG"] = saved
+for argv in (["--protected"], ["--protected", "--list-allowed"]):
+    saved_argv = _sys_path.argv
+    _sys_path.argv = ["ensign-scan", *argv]
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args()
+        raise AssertionError(f"{argv} must be refused")
+    except SystemExit as exc:
+        assert exc.code == 2
+    finally:
+        _sys_path.argv = saved_argv
 print("protected refusals test passed ✓")
 
 # ----------------------------------------------------------------------
@@ -337,6 +348,91 @@ else:
     os.chown(found.config, 0, -1)
     acl.grant(str(found.config), uid, acl.READ)
     assert as_user(protect.status)[0], "back to normal"
+
+    # sudo ... --protected: decisions written to the user's protected file,
+    # with root's own records as the evidence, and root's left as they were.
+    from ensign_scan.db import make_protected_writer
+    from ensign_scan.models import Allowance, AllowedFolder, PersistenceEntry
+    root_data = tmp / "root-data"
+    root_data.mkdir(mode=0o700)
+    root_cfg = Config(db_url=f"sqlite:///{root_data}/system.db", log_file=root_data / "e.txt", max_workers=2)
+    root_engine = Scanner(root_cfg, clamd=FakeClamd()).engine
+    quiet(Scanner(root_cfg, clamd=FakeClamd()).scan_tree, tree)   # root's own scan: the evidence
+    writer = make_protected_writer(found.decisions, root_engine.url.database)
+    allowlist.use_protected_decisions()
+
+    def root_records() -> dict:
+        with Session(root_engine) as s:
+            return {Path(r.filepath).name: r.scan_status for r in s.query(FileRecord)}
+    before = root_records()
+    assert before == {"asset.dat": "infected", "forged.dat": "infected"}, before
+
+    unscanned = tree / "unscanned.dat"
+    unscanned.write_bytes(b"EVIL too")
+    ok, out = quiet(allowlist.allow, writer, str(unscanned), yes)
+    assert not ok and "Root has no record" in out and "sudo ensign-scan" in out, out
+    unscanned.unlink()
+
+    ok, out = quiet(allowlist.allow, writer, str(tree / "asset.dat"), yes)
+    assert ok and "sudo ensign-scan --protected --unallow" in out, out
+    assert allowlist.allowed_pairs(writer) == {(digest, "Test.Evil")}
+    assert root_records() == before, "root's own records are evidence only, never changed"
+    with Session(root_engine) as s:
+        assert s.query(Allowance).count() == 0, "root's own allowances stay as they were"
+    ok, out = quiet(allowlist.allow, writer, str(tree / "asset.dat"), yes)
+    assert not ok and "already allowed" in out, out
+
+    # The protected user's run reads it.
+    def users_view():
+        from ensign_scan.db import make_engine
+        own = Path(tempfile.mkdtemp(prefix="ensign_protect_user_")) / "system.db"
+        return sorted(allowlist.allowed_pairs(make_engine(f"sqlite:///{own}", decisions=found.decisions)))
+    ok, message = as_user(users_view)
+    assert ok and digest in message, message
+
+    # A changed file isn't the content root saw flagged.
+    saved_forged = (tree / "forged.dat").read_bytes()
+    (tree / "forged.dat").write_bytes(saved_forged + b" changed")
+    ok, out = quiet(allowlist.allow, writer, str(tree / "forged.dat"), yes)
+    assert not ok and "changed since it was scanned" in out and "with sudo" in out, out
+    (tree / "forged.dat").write_bytes(saved_forged)
+
+    # A folder: what's already allowed is skipped, the rest is allowed.
+    allowed_now = quiet(allowlist.allow_folder, writer, str(tree), "Test.Evil", yes)[0]
+    assert allowed_now == 1, "only forged.dat: asset.dat was already allowed"
+    with Session(writer) as s:
+        assert s.query(AllowedFolder).count() == 1
+    count, out = quiet(allowlist.allow_folder, writer, str(tree), "Test.Evil", yes)
+    assert count == 0 and "already allowed" in out, out
+    assert root_records() == before
+
+    ok, out = quiet(allowlist.unallow_folder, writer, str(tree), "Test.Evil")
+    assert ok and "next run flags" in out, out
+    with Session(writer) as s:
+        assert s.query(AllowedFolder).count() == 0 and s.query(Allowance).count() == 0
+    assert root_records() == before
+
+    # Acknowledgments: the audit's baseline is the protected file.
+    rc = tmp / "home" / ".bashrc"
+    rc.parent.mkdir()
+    rc.write_text("alias ls=ls\n")
+    audit = persistence.run_audit(writer, str(rc.parent), check_packages=False)
+    quiet(persistence.acknowledge, writer, audit, [str(rc)], protect.data_dir(uid) / "ack.log")
+    with Session(writer) as s:
+        assert s.query(PersistenceEntry).filter(PersistenceEntry.path == str(rc)).count() == 1
+    with Session(root_engine) as s:
+        assert s.query(PersistenceEntry).count() == 0, "root's own baseline stays as it was"
+
+    # The protected file is still root's, unchanged in mode and ACL, and
+    # nothing was left next to it.
+    st = found.decisions.stat()
+    assert st.st_uid == 0 and stat.S_IMODE(st.st_mode) == 0o640
+    assert acl.named_users(str(found.decisions)) == {uid: acl.READ}
+    assert sorted(p.name for p in protect.data_dir(uid).iterdir()) == ["ack.log", "decisions.db"]
+    assert as_user(protect.status)[0]
+    writer.dispose()
+    root_engine.dispose()
+    print("sudo --protected writes test passed ✓")
 
     # --unprotect: declined changes nothing, then everything goes.
     assert not quiet(protect.unprotect, uid, lambda p: False)[0]

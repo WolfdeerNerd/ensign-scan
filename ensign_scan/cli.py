@@ -18,6 +18,7 @@ import argparse
 import dataclasses
 import os
 import time
+from pathlib import Path
 from builtins import print as builtin_print
 from importlib.metadata import PackageNotFoundError, version as dist_version
 
@@ -139,6 +140,10 @@ def parse_args() -> argparse.Namespace:
                         help="With sudo: keep your config and your decisions (allowances, "
                              "acknowledged startup entries) where only root can change them, so "
                              "nothing running as you can. Shows your config and asks first, then exit")
+    parser.add_argument("--protected", action="store_true",
+                        help="With sudo, before --allow, --unallow, --allow-folder, --unallow-folder, "
+                             "--persistence, --acknowledge or --acknowledge-all: change your protected "
+                             "decisions (see --protect) instead of root's own")
     parser.add_argument("--unprotect", action="store_true",
                         help="With sudo: undo --protect, so your runs use your own config and "
                              "database again. Asks first, then exit")
@@ -154,6 +159,11 @@ def parse_args() -> argparse.Namespace:
         parser.error("--allow-folder and --unallow-folder can't be used together")
     if args.protect and args.unprotect:
         parser.error("--protect and --unprotect can't be used together")
+    if args.protected and not (args.allow or args.unallow or args.allow_folder or args.unallow_folder
+                               or args.persistence or args.acknowledge or args.acknowledge_all):
+        parser.error("--protected goes with --allow, --unallow, --allow-folder, --unallow-folder, "
+                     "--persistence, --acknowledge or --acknowledge-all. To see what's allowed, "
+                     "run ensign-scan --list-allowed as yourself.")
     return args
 
 
@@ -218,6 +228,10 @@ def _main() -> int:
         return 0
     if args.protect or args.unprotect:
         return _run_protect(args)
+    if args.protected and not AS_ROOT:
+        print("[bold red]✗[/bold red] --protected changes your protected decisions, which only root "
+              "can write. Run it with sudo: sudo ensign-scan --protected ...")
+        return 1
     # Protected mode (protect.py): before anything reads your own config.
     protected = None
     if not AS_ROOT:
@@ -232,6 +246,8 @@ def _main() -> int:
             if refusal:
                 print(f"[bold red]✗[/bold red] {refusal}")
                 return 1
+            allowlist.show_protected_commands()
+            persistence.show_protected_commands()
     # Before the starter config: it must never be written next to an old
     # config that's about to move into the new place.
     moved, not_moved = migrate.move_legacy_folders(args.config)
@@ -276,9 +292,37 @@ def _protected_refusal(args) -> str | None:
     if (args.allow or args.unallow or args.allow_folder or args.unallow_folder
             or args.acknowledge or args.acknowledge_all):
         return ("You are protected, so your allowances and acknowledged startup entries are "
-                "root's, and your user can't change them. (Changing them with sudo comes in a "
-                "later version.) Nothing was changed.")
+                "root's, and your user can't change them. Change them with sudo and --protected, "
+                "for example: sudo ensign-scan --protected --allow PATH. Nothing was changed.")
     return None
+
+
+def _protected_writer(scanner: Scanner):
+    """For sudo ... --protected: (engine on the user's protected decisions,
+    with root's own records as the evidence; the log for acknowledgments),
+    or None with the reason printed."""
+    from ensign_scan.db import make_protected_writer
+    try:
+        uid = protect.target_uid()
+    except protect.CantProtect as exc:
+        print(f"[bold red]✗ {shown(str(exc))}[/bold red]")
+        return None
+    path = protect.decisions_path(uid)
+    if not protect.is_protected(uid) or not path.is_file():
+        print("[bold red]✗ You aren't protected,[/bold red] so there are no protected decisions to "
+              "change. Without --protected, sudo changes root's own; as yourself, your own. "
+              "To protect yours: sudo ensign-scan --protect")
+        return None
+    why = protect.trust.untrusted_reason(path)
+    if why:
+        print(f"[bold red]✗ Your protected decisions file isn't safe to use:[/bold red] {shown(why)}")
+        return None
+    allowlist.use_protected_decisions()
+    persistence.show_protected_commands()
+    print(f"[ensign] Changing your protected decisions ({shown(str(path))}). The evidence that a "
+          f"file was flagged is root's own scan.")
+    return (make_protected_writer(path, scanner.engine.url.database),
+            protect.data_dir(uid) / "persistence_acknowledged.log")
 
 
 def _run_protect(args) -> int:
@@ -303,6 +347,8 @@ def _run_protect(args) -> int:
         print(f"Change the config with: sudoedit {shown(str(found.config))}")
         print("Your own ~/.config/ensign-scan/config.toml isn't read any more. "
               "Undo all this with: sudo ensign-scan --unprotect")
+        print("Allow files and acknowledge startup entries with sudo and --protected, for example: "
+              "sudo ensign-scan --protected --allow PATH. Your runs show what needs it, as before.")
     return 0
 
 
@@ -405,14 +451,15 @@ def clamd_is_safe(scanner: Scanner) -> bool:
     return True
 
 
-def run_persistence(args: argparse.Namespace, config: Config, scanner: Scanner) -> int:
-    """--persistence, --acknowledge, --acknowledge-all."""
-    log_path = config.data_dir / "persistence_acknowledged.log"
+def run_persistence(args: argparse.Namespace, engine, log_path: Path) -> int:
+    """--persistence, --acknowledge, --acknowledge-all, against the
+    baseline in `engine` (your own database, or with --protected your
+    protected decisions)."""
     confirm = _confirm(args.yes)
     if args.acknowledge and not args.acknowledge_all:
         # No package lookups: acknowledging one named entry needs only its
         # state now, and the package check can take a while.
-        audit = persistence.run_audit(scanner.engine, str(HOME), check_packages=False)
+        audit = persistence.run_audit(engine, str(HOME), check_packages=False)
         pending = {e.path for e in audit.new} | {e.path for _, e in audit.changed} | {r.path for r in audit.removed}
         named = [p for p in args.acknowledge if p in pending]
         if named:
@@ -423,25 +470,26 @@ def run_persistence(args: argparse.Namespace, config: Config, scanner: Scanner) 
             if not confirm("Acknowledge? [y/N] "):
                 print("Nothing acknowledged.")
                 return 0
-        persistence.acknowledge(scanner.engine, audit, args.acknowledge, log_path)
+        persistence.acknowledge(engine, audit, args.acknowledge, log_path)
         return 0
     backend = pkgdb.active()
     if backend.name != "none":
         print(f"Checking startup entries, and asking {backend.label} about new or changed ones "
               f"outside your home folder…")
-    audit = persistence.run_audit(scanner.engine, str(HOME))
+    audit = persistence.run_audit(engine, str(HOME))
     persistence.report(audit)
     if args.acknowledge_all and audit.pending:
         print()
         if not confirm(f"Acknowledge all {audit.pending} listed above as they are now? [y/N] "):
             print("Nothing acknowledged.")
             return EXIT_PERSISTENCE_PENDING
-        count = persistence.acknowledge_all(scanner.engine, audit, log_path)
+        count = persistence.acknowledge_all(engine, audit, log_path)
         print(f"[green]✓ Acknowledged {count}.[/green] Log: {shown(log_path)}")
         unreadable = persistence.unreadable_pending(audit)
         if unreadable:
             print(f"[yellow]! {unreadable} couldn't be read, so they stay listed. Acknowledge them "
-                  f"with sudo: sudo ensign-scan --acknowledge-all[/yellow]")
+                  f"with sudo: sudo ensign-scan {'--protected ' if args.protected else ''}"
+                  f"--acknowledge-all[/yellow]")
             return EXIT_PERSISTENCE_PENDING
         return 0
     return EXIT_PERSISTENCE_PENDING if audit.pending else 0
@@ -451,15 +499,21 @@ def run(args: argparse.Namespace, config: Config) -> int:
     greet(config)
 
     scanner = Scanner(config)
+    decisions, log_path = scanner.engine, config.data_dir / "persistence_acknowledged.log"
+    if args.protected:
+        writer = _protected_writer(scanner)
+        if writer is None:
+            return 1
+        decisions, log_path = writer
     if args.allow or args.unallow or args.allow_folder or args.unallow_folder:
         for path in args.unallow:
-            allowlist.unallow(scanner.engine, path)
+            allowlist.unallow(decisions, path)
         if args.unallow_folder:
-            allowlist.unallow_folder(scanner.engine, args.unallow_folder, args.signature)
+            allowlist.unallow_folder(decisions, args.unallow_folder, args.signature)
         for path in args.allow:
-            allowlist.allow(scanner.engine, path, _confirm(args.yes))
+            allowlist.allow(decisions, path, _confirm(args.yes))
         if args.allow_folder:
-            allowlist.allow_folder(scanner.engine, args.allow_folder, args.signature, _confirm(args.yes))
+            allowlist.allow_folder(decisions, args.allow_folder, args.signature, _confirm(args.yes))
         return 0
     if args.list_allowed or args.list_allowed_all:
         allowlist.list_allowed(scanner.engine, expand=args.list_allowed_all)
@@ -468,7 +522,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
         list_infected(scanner.engine, paths=args.targets or None, files_per_threat=None)
         return 0
     if args.persistence or args.acknowledge or args.acknowledge_all:
-        return run_persistence(args, config, scanner)
+        return run_persistence(args, decisions, log_path)
     if args.clamav_report:
         if not scanner.clamd.ping():
             print("[red]✗ clamd is not answering on its socket.[/red] The file is scanned again "

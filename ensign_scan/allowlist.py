@@ -73,12 +73,15 @@ def _candidate(engine: Engine, path: str) -> _Candidate | str:
     with Session(engine) as session:
         record = session.query(FileRecord).filter(FileRecord.filepath == path).first()
         if record is None:
+            if _PROTECTED:
+                return ("Root has no record of this file. Scan it with sudo first: "
+                        "sudo ensign-scan " + shlex.quote(path))
             return "Ensign has no record of this file. Scan it first."
-        if record.scan_status == ScanStatus.ALLOWED.value:
+        if record.scan_status == ScanStatus.ALLOWED.value and not _PROTECTED:
             return "This file is already allowed."
-        if record.scan_status != ScanStatus.INFECTED.value:
+        if record.scan_status not in _flagged_statuses():
             return (f"Only files ClamAV flagged can be allowed; this one is recorded as "
-                    f"'{record.scan_status}'.")
+                    f"'{record.scan_status}'" + (" in root's last scan of it." if _PROTECTED else "."))
         stored, threat = record.file_hash, record.threat_name or "Unknown"
     # Hash it again now: only the exact bytes that were flagged can be
     # allowed, never whatever the file has become since.
@@ -92,7 +95,12 @@ def _candidate(engine: Engine, path: str) -> _Candidate | str:
         os.close(fd)
     if digest != stored:
         return ("This file has changed since it was scanned, so it isn't the content ClamAV "
-                "flagged. Scan it again first.")
+                "flagged. Scan it again first" + (" (with sudo)." if _PROTECTED else "."))
+    if _PROTECTED:
+        with Session(engine) as session:
+            if session.query(Allowance).filter(Allowance.file_hash == digest,
+                                               Allowance.threat_name == threat).first():
+                return "This file is already allowed."
     return _Candidate(path, digest, threat)
 
 
@@ -110,10 +118,11 @@ def _record(session: Session, found: _Candidate) -> int:
     copies = session.query(FileRecord).filter(
         FileRecord.file_hash == found.digest,
         FileRecord.threat_name == found.threat,
-        FileRecord.scan_status == ScanStatus.INFECTED.value,
+        FileRecord.scan_status.in_(_flagged_statuses()),
     ).all()
-    for record in copies:
-        record.scan_status = ScanStatus.ALLOWED.value
+    if not _PROTECTED:   # root's records are evidence only; the user's runs mark their own
+        for record in copies:
+            record.scan_status = ScanStatus.ALLOWED.value
     return len(copies)
 
 
@@ -138,7 +147,9 @@ def allow(engine: Engine, path: str, confirm) -> bool:
         session.commit()
     others = marked - 1
     also = f" (and {others} identical {'copy' if others == 1 else 'copies'} elsewhere)" if others > 0 else ""
-    print_unwrapped(f"[green]  Allowed{also}.[/green] Undo with: ensign-scan --unallow {shown(found.path)}")
+    print_unwrapped(f"[green]  Allowed{also}.[/green] Undo with: {_command('--unallow', found.path)}")
+    if _PROTECTED:
+        print("  Your next run (as yourself) marks it allowed. Root's own runs keep flagging it.")
     return True
 
 
@@ -148,7 +159,7 @@ def unallow(engine: Engine, path: str) -> bool:
     with Session(engine) as session:
         record = session.query(FileRecord).filter(FileRecord.filepath == path).first()
         pairs = set()
-        if record is not None and record.scan_status == ScanStatus.ALLOWED.value:
+        if record is not None and record.scan_status == ScanStatus.ALLOWED.value and not _PROTECTED:
             pairs.add((record.file_hash, record.threat_name))
         for row in session.query(Allowance).filter(Allowance.filepath == path):
             pairs.add((row.file_hash, row.threat_name))
@@ -159,14 +170,19 @@ def unallow(engine: Engine, path: str) -> bool:
         for digest, threat in pairs:
             session.query(Allowance).filter(
                 Allowance.file_hash == digest, Allowance.threat_name == threat).delete()
-            flagged += session.query(FileRecord).filter(
-                FileRecord.file_hash == digest,
-                FileRecord.threat_name == threat,
-                FileRecord.scan_status == ScanStatus.ALLOWED.value,
-            ).update({FileRecord.scan_status: ScanStatus.INFECTED.value})
+            if not _PROTECTED:
+                flagged += session.query(FileRecord).filter(
+                    FileRecord.file_hash == digest,
+                    FileRecord.threat_name == threat,
+                    FileRecord.scan_status == ScanStatus.ALLOWED.value,
+                ).update({FileRecord.scan_status: ScanStatus.INFECTED.value})
         session.commit()
-    print_unwrapped(f"[yellow]No longer allowed:[/yellow] {shown(path)} "
-                    f"({flagged} file{'s' if flagged != 1 else ''} flagged as infected again).")
+    if _PROTECTED:
+        print_unwrapped(f"[yellow]No longer allowed:[/yellow] {shown(path)}. Your next run flags "
+                        f"it as infected again.")
+    else:
+        print_unwrapped(f"[yellow]No longer allowed:[/yellow] {shown(path)} "
+                        f"({flagged} file{'s' if flagged != 1 else ''} flagged as infected again).")
     return True
 
 
@@ -178,15 +194,46 @@ def _folder_text(folder: str) -> str:
     return folder.rstrip("/") or "/"
 
 
+# How the commands in this module's messages are spelled, and whether it is
+# working on a protected user's decisions (sudo ensign-scan --protected, see
+# protect.py and db.make_protected_writer). In that mode the file records
+# are root's own, read through a view: they are the evidence that a file was
+# flagged, and are never changed. Set once by the command line.
+_COMMAND = "ensign-scan"
+_PROTECTED = False
+
+
+def use_protected_decisions() -> None:
+    """sudo ... --protected: write the user's protected decisions, with
+    root's records as the evidence."""
+    global _PROTECTED
+    show_protected_commands()
+    _PROTECTED = True
+
+
+def show_protected_commands() -> None:
+    """A protected user's own runs: they read their own records, but can't
+    change decisions, so the commands they're shown need sudo --protected."""
+    global _COMMAND
+    _COMMAND = "sudo ensign-scan --protected"
+
+
 def _command(*words: str) -> str:
     """An ensign-scan command you can paste: every argument shell-quoted."""
-    return shown("ensign-scan " + " ".join(shlex.quote(w) for w in words))
+    return shown(_COMMAND + " " + " ".join(shlex.quote(w) for w in words))
+
+
+def _flagged_statuses() -> tuple[str, ...]:
+    # Root's own records: a file root allowed for itself was still flagged.
+    if _PROTECTED:
+        return (ScanStatus.INFECTED.value, ScanStatus.ALLOWED.value)
+    return (ScanStatus.INFECTED.value,)
 
 
 def _flagged_under(session: Session, folder: str) -> list[tuple[str, str, str]]:
     """(path, signature, stored SHA-256) of every infected file inside `folder`."""
     rows = session.query(FileRecord.filepath, FileRecord.threat_name, FileRecord.file_hash).filter(
-        FileRecord.scan_status == ScanStatus.INFECTED.value,
+        FileRecord.scan_status.in_(_flagged_statuses()),
         path_under(FileRecord.filepath, folder)).all()
     return sorted((path, threat or "Unknown", digest) for path, threat, digest in rows)
 
@@ -209,9 +256,20 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
         return 0
     with Session(engine) as session:
         flagged = _flagged_under(session, folder)
+    if _PROTECTED:
+        # Root's records still say infected for what your decisions already
+        # allow (root's runs keep flagging it): leave those out, as your own
+        # records would (they say allowed).
+        done = allowed_pairs(engine)
+        still = [f for f in flagged if (f[2], f[1]) not in done]
+        if flagged and not still:
+            print_unwrapped(f"[yellow]Nothing to allow:[/yellow] everything flagged under "
+                            f"{shown(folder)} is already allowed.")
+            return 0
+        flagged = still
     if not flagged:
         print_unwrapped(f"[yellow]Nothing to allow:[/yellow] no file under {shown(folder)} is "
-                        f"recorded as infected. Scan it first.")
+                        f"recorded as infected. Scan it first" + (" with sudo." if _PROTECTED else "."))
         return 0
     by_signature: dict[str, list[str]] = {}
     stored_hash: dict[str, str] = {}
@@ -263,7 +321,7 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
         print(f"  Left out:  {len(code)} file{'s' if len(code) != 1 else ''} in a format that can "
               f"run code when a program loads it ({', '.join(sorted(LOADS_CODE_EXTENSIONS))}). "
               f"These stay infected. If you've checked one, allow it by itself: "
-              f"ensign-scan --allow PATH")
+              f"{_COMMAND} --allow PATH")
         _print_some(code, top, "!")
     if not_ready:
         print(f"  Left out:  {len(not_ready)} file{'s' if len(not_ready) != 1 else ''} Ensign "
@@ -300,6 +358,8 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
     also = f" (and {others} identical {'copy' if others == 1 else 'copies'} elsewhere)" if others > 0 else ""
     print_unwrapped(f"[green]  Allowed {len(inside)} file{'s' if len(inside) != 1 else ''}{also}.[/green] "
                     f"Undo with: {_command('--unallow-folder', folder, '--signature', signature)}")
+    if _PROTECTED:
+        print("  Your next run (as yourself) marks them allowed. Root's own runs keep flagging them.")
     return len(inside)
 
 
@@ -316,7 +376,7 @@ def unallow_folder(engine: Engine, folder: str, signature: str) -> bool:
             AllowedFolder.threat_name == signature,
             or_(AllowedFolder.folder == folder, path_under(AllowedFolder.folder, folder)),
         ).delete(synchronize_session=False)
-        digests = {h for (h,) in session.query(FileRecord.file_hash).filter(
+        digests = set() if _PROTECTED else {h for (h,) in session.query(FileRecord.file_hash).filter(
             FileRecord.scan_status == ScanStatus.ALLOWED.value,
             FileRecord.threat_name == signature,
             path_under(FileRecord.filepath, folder))}
@@ -332,14 +392,19 @@ def unallow_folder(engine: Engine, folder: str, signature: str) -> bool:
         for digest in digests:
             session.query(Allowance).filter(
                 Allowance.file_hash == digest, Allowance.threat_name == signature).delete()
-            flagged += session.query(FileRecord).filter(
-                FileRecord.file_hash == digest,
-                FileRecord.threat_name == signature,
-                FileRecord.scan_status == ScanStatus.ALLOWED.value,
-            ).update({FileRecord.scan_status: ScanStatus.INFECTED.value})
+            if not _PROTECTED:
+                flagged += session.query(FileRecord).filter(
+                    FileRecord.file_hash == digest,
+                    FileRecord.threat_name == signature,
+                    FileRecord.scan_status == ScanStatus.ALLOWED.value,
+                ).update({FileRecord.scan_status: ScanStatus.INFECTED.value})
         session.commit()
-    print_unwrapped(f"[yellow]No longer allowed:[/yellow] {shown(signature)} under {shown(folder)} "
-                    f"({flagged} file{'s' if flagged != 1 else ''} flagged as infected again).")
+    if _PROTECTED:
+        print_unwrapped(f"[yellow]No longer allowed:[/yellow] {shown(signature)} under "
+                        f"{shown(folder)}. Your next run flags those files as infected again.")
+    else:
+        print_unwrapped(f"[yellow]No longer allowed:[/yellow] {shown(signature)} under {shown(folder)} "
+                        f"({flagged} file{'s' if flagged != 1 else ''} flagged as infected again).")
     return True
 
 
@@ -386,7 +451,7 @@ def new_in_allowed_folders(engine: Engine, paths: list[str] | None = None, top: 
         if code:
             print(f"    {code} of these can run code when a program loads "
                   f"{'it' if code == 1 else 'them'}; --allow-folder leaves "
-                  f"{'it' if code == 1 else 'them'} out, so allow each with --allow PATH.")
+                  f"{'it' if code == 1 else 'them'} out, so allow each with {_COMMAND} --allow PATH.")
     return total
 
 
@@ -475,7 +540,7 @@ def _print_file(path: str, entry: dict, indent: str, inner: str) -> None:
 def _print_folders(folders: dict, expand: bool) -> None:
     print(f"\n[bold]=== FOLDERS YOU ALLOWED ({len(folders)}) ===[/bold]")
     print("A folder allows nothing by itself: each file in it is allowed by its own content. "
-          "Undo one with --unallow-folder FOLDER --signature NAME.")
+          f"Undo one with {_COMMAND} --unallow-folder FOLDER --signature NAME.")
     for folder, entry in folders.items():
         print_unwrapped(f"\n{_L1}Folder: {shown(folder)}")
         width = max(len(shown(t)) for t, *_ in entry["signatures"])
@@ -519,7 +584,7 @@ def allowed_report(engine: Engine, paths: list[str] | None = None, top: int = 10
     if files:
         _print_files("FILES YOU ALLOWED", files,
                      "Flagged by ClamAV, and marked by you as false positives; not counted as "
-                     "infected. Undo one with --unallow PATH.", top=top)
+                     f"infected. Undo one with {_COMMAND} --unallow PATH.", top=top)
     return len(folders) + len(files)
 
 
@@ -531,14 +596,14 @@ def list_allowed(engine: Engine, expand: bool = False) -> int:
     many folders and files were listed."""
     folders, files, gone = _gather(engine)
     if not folders and not files and not gone:
-        print("Nothing is allowed. (ensign-scan --allow PATH marks a flagged file as a false positive.)")
+        print(f"Nothing is allowed. ({_COMMAND} --allow PATH marks a flagged file as a false positive.)")
         return 0
     if folders:
         _print_folders(folders, expand)
         if not expand:
             print(f"\n{_L1}ensign-scan --list-allowed-all also lists the files in each folder.")
     if files:
-        _print_files("FILES YOU ALLOWED", files, "Undo one with --unallow PATH.")
+        _print_files("FILES YOU ALLOWED", files, f"Undo one with {_COMMAND} --unallow PATH.")
     if gone:
         _print_files("ALLOWED, BUT NOT ON DISK NOW", gone,
                      "No tracked file has this content right now; shown where it was when you "

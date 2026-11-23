@@ -164,3 +164,30 @@ def _ensure_column(engine: Engine, table: str, column: str, ddl_type: str) -> No
         if column not in existing:
             conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
             conn.commit()
+
+
+def make_protected_writer(decisions: Path, verdicts: str) -> Engine:
+    """For `sudo ensign-scan --protected ...` (protect.py): an engine whose
+    main database is the user's protected decisions file, so allowances,
+    folder allowances and acknowledgments are written there.
+
+    The evidence that a file was flagged comes from root's own database
+    (`verdicts`), never from the user's, which root must not parse. It is
+    attached, and a temporary view named `files` is put in front, so the
+    allowlist's queries read root's records unchanged and can't change them
+    (a view can't be changed). Root's runs keep their own verdicts: the
+    user's runs mark the file allowed on their next pass.
+
+    The decisions file keeps its rollback journal (see protect.py), so the
+    user's runs can go on reading it without writing anything."""
+    engine = create_engine(f"sqlite:///{decisions}", connect_args={"timeout": 30})
+
+    @event.listens_for(engine, "connect")
+    def _on_connect(dbapi_conn, _record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=DELETE")
+        cursor.execute("ATTACH DATABASE ? AS verdicts", (verdicts,))
+        cursor.execute("CREATE TEMP VIEW files AS SELECT * FROM verdicts.files")
+        cursor.close()
+
+    return engine
