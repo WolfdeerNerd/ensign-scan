@@ -225,6 +225,20 @@ with Session(recon.engine) as s:
     got = {r.filename: r.scan_status for r in s.query(FileRecord)}
 assert got == {"kept": "allowed", "unknown": "allowed", "orphan": "infected"}, got
 assert allowlist.reconcile(recon.engine) == 0, "nothing left to turn back"
+
+# The listings, which never write, already count such a record as infected.
+with Session(recon.engine) as s:
+    s.add(FileRecord(filepath="/srv/gone", filename="gone", file_hash="h4",
+                     scan_status=ScanStatus.ALLOWED.value, threat_name="Sig.C"))
+    s.commit()
+from ensign_scan.reports import list_infected  # noqa: E402
+rows, out = quiet(list_infected, recon.engine, files_per_threat=None)
+assert {r["filepath"] for r in rows} == {"/srv/orphan", "/srv/gone"}, (rows, out)   # reconciled + not yet
+_, out = quiet(allowlist.list_allowed, recon.engine)
+assert "1 file recorded as allowed has no allowance any more" in out, out
+with Session(recon.engine) as s:
+    assert s.query(FileRecord).filter(FileRecord.filename == "gone").one().scan_status == "allowed", \
+        "the listings didn't write"
 recon.engine.dispose()
 print("reconcile test passed ✓")
 
@@ -511,6 +525,41 @@ else:
     writer.dispose()
     root_engine.dispose()
     print("sudo --protected writes test passed ✓")
+
+    # A failure partway through --protect (a read-only /etc, a full disk)
+    # is refused with the reason and leaves nothing of the user's behind.
+    other_uid = 65533
+    real_create = protect._create_decisions
+    protect._create_decisions = lambda path: (_ for _ in ()).throw(OSError(28, "No space left on device", str(path)))
+    try:
+        quiet(protect.protect, other_uid, "", None, yes)
+        raise AssertionError("a failed --protect must be refused")
+    except protect.CantProtect as exc:
+        assert "No space left" in str(exc) and "Nothing was protected" in str(exc), exc
+    finally:
+        protect._create_decisions = real_create
+    assert not protect.is_protected(other_uid), "nothing is left after a failed --protect"
+
+    # --unprotect failing partway: the decisions go first, so the config is
+    # still there and the user's runs stop instead of using their own config.
+    real_rmtree = protect.shutil.rmtree
+    def failing_rmtree(path, *a, **kw):
+        if Path(path) == protect.config_dir(uid):
+            raise OSError(16, "Device or resource busy", str(path))
+        return real_rmtree(path, *a, **kw)
+    protect.shutil.rmtree = failing_rmtree
+    try:
+        quiet(protect.unprotect, uid, yes)
+        raise AssertionError("a failed --unprotect must be refused")
+    except protect.CantProtect as exc:
+        assert "--unprotect again" in str(exc), exc
+    finally:
+        protect.shutil.rmtree = real_rmtree
+    assert protect.config_dir(uid).exists() and not protect.data_dir(uid).exists()
+    expect_unsafe("half-undone --unprotect")
+    assert quiet(protect.unprotect, uid, yes)[0], "running it again finishes it"
+    assert as_user(protect.status) == (True, "None")
+    found, _ = quiet(protect.protect, uid, config_text, None, yes)   # back, for the checks below
 
     # --unprotect: declined changes nothing, then everything goes.
     assert not quiet(protect.unprotect, uid, lambda p: False)[0]

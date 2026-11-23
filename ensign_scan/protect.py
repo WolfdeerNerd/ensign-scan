@@ -321,6 +321,11 @@ def protect(uid: int, config_text: str, copied_from: str | None, confirm) -> Pro
         _remove(created)
         raise CantProtect(f"{exc}. Protected mode needs ACLs, so that only your user can read "
                           f"root's copies; nothing was protected.") from None
+    except OSError as exc:   # a read-only /etc, a full disk, ...
+        _remove(created)
+        where = f" ({exc.filename})" if exc.filename else ""
+        raise CantProtect(f"couldn't set up root's copies{where}: {exc.strerror or exc}. "
+                          f"Nothing was protected.") from None
     except BaseException:
         _remove(created)
         raise
@@ -349,9 +354,15 @@ def unprotect(uid: int, confirm) -> bool:
         print("Nothing was changed.")
         return False
     _check_places()
-    for folder in (config_dir(uid), data_dir(uid)):
+    # The decisions first, the config last: your runs go by the config folder,
+    # so if removing fails partway they still see you as protected (and stop,
+    # saying what's missing) instead of quietly using your own config again.
+    for folder in (data_dir(uid), config_dir(uid)):
         try:
             shutil.rmtree(folder)
         except FileNotFoundError:
             pass
+        except OSError as exc:
+            raise CantProtect(f"couldn't remove {exc.filename or folder}: {exc.strerror or exc}. "
+                              f"Fix that, then run sudo ensign-scan --unprotect again.") from None
     return True

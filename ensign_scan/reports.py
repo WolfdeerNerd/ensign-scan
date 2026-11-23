@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+from collections import namedtuple
 import os
 import textwrap
 from pathlib import Path
@@ -465,6 +466,9 @@ def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, in
     return {"total": total, **{s.value: counts.get(s.value, 0) for s in ScanStatus}}
 
 
+_InfectedRow = namedtuple("_InfectedRow", "filepath threat_name last_scanned scan_result file_hash")
+
+
 def list_infected(engine: Engine, paths: list[str] | None = None,
                   files_per_threat: int | None = 25, more_elsewhere: bool = False) -> list[dict]:
     """Print infected files grouped by threat name, so a signature that hits
@@ -483,11 +487,20 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
             FileRecord.last_scanned,
             FileRecord.scan_result,
             FileRecord.file_hash,
-        ).filter(FileRecord.scan_status == ScanStatus.INFECTED.value)
+        )
+        # Infected, and also recorded as allowed with no allowance behind it
+        # any more: that counts as infected (allowlist.orphaned), even before
+        # the next run updates its record.
+        # (Filtered here, not with "IN (...)": see allowlist.reconcile.)
+        from .allowlist import orphaned
+        stale = orphaned(engine)
+        query = query.add_columns(FileRecord.id, FileRecord.scan_status).filter(
+            FileRecord.scan_status.in_((ScanStatus.INFECTED.value, ScanStatus.ALLOWED.value)))
         scope = _scope_filter(paths)
         if scope is not None:
             query = query.filter(scope)
-        rows = query.all()
+        rows = [_InfectedRow(*row[:5]) for row in query.all()
+                if row.scan_status == ScanStatus.INFECTED.value or row.id in stale]
 
     if not rows:
         if not more_elsewhere:
