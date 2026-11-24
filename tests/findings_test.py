@@ -242,13 +242,23 @@ with tempfile.TemporaryDirectory() as d:
     _, text = quiet(reports.list_infected, engine)
     assert "\x1b" not in text and "Found by:" in text, repr(text)
     # A deleted file's findings are tidied away with its record.
+    # --purge-missing deletes them with the record, at once: SQLite can give
+    # the deleted record's id to the next new file.
     (tree / "yara.dat").unlink()
+    quiet(Scanner(config, clamd=clamd).purge_missing)
     with Session(engine) as session:
-        session.query(FileRecord).filter(FileRecord.filepath.like("%/yara.dat")).delete()
+        assert session.query(Finding).filter(Finding.engine == ENGINE_CLAMAV_YARA).count() == 0
+    # And a record deleted some other way: tidied at the start of the next run.
+    (tree / "gone.dat").write_bytes(b"EVIL to be removed")
+    scan()
+    (tree / "gone.dat").unlink()
+    with Session(engine) as session:
+        session.query(FileRecord).filter(FileRecord.filepath.like("%/gone.dat")).delete()
         session.commit()
     scan()
     with Session(engine) as session:
-        assert session.query(Finding).filter(Finding.engine == ENGINE_CLAMAV_YARA).count() == 0
+        known = {r.id for r in session.query(FileRecord)}
+        assert {f.file_id for f in session.query(Finding)} <= known
     print("finding lifecycle test passed ✓")
 
     # --- evidence: what the package manager says, never a verdict --------------------------------
