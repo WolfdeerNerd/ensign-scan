@@ -329,6 +329,22 @@ def _protected_writer(scanner: Scanner):
     if why:
         print(f"[bold red]✗ Your protected decisions file isn't safe to use:[/bold red] {shown(why)}")
         return None
+    # Upgraded at the start of this run (protect.upgrade_all); if that
+    # failed, writing to it would fail halfway with "no such column".
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            missing = protect.missing_columns(conn)
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        print(f"[bold red]✗ Your protected decisions file can't be read:[/bold red] {shown(str(exc))}")
+        return None
+    if missing:
+        print("[bold red]✗ Your protected decisions file is from an older Ensign and couldn't be "
+              "upgraded.[/bold red] The reason is in Ensign's log. Nothing was changed.")
+        return None
     allowlist.use_protected_decisions()
     persistence.show_protected_commands()
     print(f"[ensign] Changing your protected decisions ({shown(str(path))}). The evidence that a "

@@ -142,16 +142,18 @@ def _check_readable(found: Protected) -> None:
         # read the decisions stops here, before anything is scanned.
         conn = sqlite3.connect(f"file:{found.decisions}?mode=ro", uri=True)
         try:
-            for table, columns in _expected_columns().items():
-                have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-                missing = sorted(set(columns) - have)
-                if missing:
-                    # A newer Ensign than the one that made the file: its
-                    # queries would fail with "no such column" mid-run.
+            missing = missing_columns(conn)
+            if missing:
+                # A newer Ensign than the one that made the file: its
+                # queries would fail with "no such column" mid-run.
+                what = "; ".join(f"{t} has no {', '.join(c)}" for t, c in missing.items())
+                if upgradable(missing):
                     raise Unsafe(f"root's copy of your decisions was made by an older Ensign "
-                                 f"({table} has no {', '.join(missing)}), and only root can "
-                                 f"upgrade it. Run any sudo command once, and it's upgraded: "
-                                 f"sudo ensign-scan --list-allowed")
+                                 f"({what}), and only root can upgrade it. Run any sudo command "
+                                 f"once, and it's upgraded: sudo ensign-scan --list-allowed")
+                raise Unsafe(f"root's copy of your decisions was made by an older Ensign ({what}), "
+                             f"and this version can't upgrade it: report it as a bug.")
+            for table, columns in _expected_columns().items():
                 conn.execute(f"SELECT {', '.join(columns)} FROM {table} LIMIT 1").fetchall()
         finally:
             conn.close()
@@ -200,6 +202,25 @@ def upgrade_all() -> list[int]:
         finally:
             engine.dispose()
     return changed
+
+
+# Columns db.upgrade_decision_tables adds. Anything else missing can't be upgraded.
+_UPGRADABLE = {("allowances", "engine"), ("allowed_folders", "engine")}
+
+
+def missing_columns(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """{table: columns this version needs that the decisions file lacks}."""
+    missing = {}
+    for table, columns in _expected_columns().items():
+        have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        lacking = sorted(set(columns) - have)
+        if lacking:
+            missing[table] = lacking
+    return missing
+
+
+def upgradable(missing: dict[str, list[str]]) -> bool:
+    return all((table, column) in _UPGRADABLE for table, columns in missing.items() for column in columns)
 
 
 def _expected_columns() -> dict[str, list[str]]:

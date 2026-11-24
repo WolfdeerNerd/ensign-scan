@@ -89,7 +89,8 @@ def engine_label(found_by: str | None) -> str:
 
 
 def signature_text(threat: str, found_by: str | None) -> str:
-    """A signature as listings show it: with its engine, unless ClamAV's."""
+    """A signature as listings show it: with its engine, unless ClamAV's.
+    Both come from the database: callers escape it (shown) like any name."""
     if (found_by or ENGINE_CLAMAV) == ENGINE_CLAMAV:
         return threat
     return f"{threat} ({found_by})"
@@ -193,9 +194,12 @@ def _record(session: Session, found: _Candidate) -> int:
                               filepath=found.path, allowed_at=utcnow()))
         session.flush()
     # Every copy of the same content flagged by the same signature, from the same engine.
+    same_threat = FileRecord.threat_name == found.threat
+    if found.threat == "Unknown":   # a record that named no signature is saved as "Unknown"
+        same_threat = or_(same_threat, FileRecord.threat_name.is_(None))
     copies = session.query(FileRecord).filter(
         FileRecord.file_hash == found.digest,
-        FileRecord.threat_name == found.threat,
+        same_threat,
         same_engine(FileRecord.threat_engine, found.engine),
         FileRecord.scan_status.in_(_flagged_statuses()),
     ).all()
@@ -214,7 +218,7 @@ def allow(engine: Engine, path: str, confirm) -> bool:
         return False
     print_unwrapped(f"\n  File:      {shown(found.path)}")
     print(f"  Signature: {shown(found.threat)}")
-    print(f"  Found by:  {engine_label(found.engine)}")
+    print(f"  Found by:  {shown(engine_label(found.engine))}")
     print(f"  SHA-256:   {found.digest}")
     print("  Allowing tells Ensign this is a false positive: it stops counting this exact "
           "content, flagged by this exact signature, as infected. If the file changes, or "

@@ -542,7 +542,7 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
                 print_unwrapped(f"{_DETAIL}Details: {shown((detail or '')[:200])}")
                 if found_by:
                     from .allowlist import engine_label
-                    print(f"{_DETAIL}Found by: {engine_label(found_by)}")
+                    print(f"{_DETAIL}Found by: {shown(engine_label(found_by))}")
                 fact = facts.get(file_id)
                 _note("›", _file_facts(filepath, owner=fact is None), label="Context",
                       indent=len(_DETAIL))

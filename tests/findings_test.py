@@ -72,6 +72,10 @@ class FakeClamd:
 
     def scan_fd(self, fd, label=""):
         data = os.pread(fd, 1 << 20, 0)
+        if b"BROKEN" in data:
+            return ScanOutcome(ScanStatus.ERROR, f"{label}: clamd stopped answering")
+        if b"NONAME" in data:   # a hit ClamAV gave no signature name for
+            return ScanOutcome(ScanStatus.INFECTED, f"{label}: FOUND", None)
         if b"EVIL" in data:
             engine = ENGINE_CLAMAV_YARA if b"YARA" in data else "clamav"
             return ScanOutcome(ScanStatus.INFECTED, f"{label}: Test.Evil FOUND", "Test.Evil", engine)
@@ -208,6 +212,35 @@ with tempfile.TemporaryDirectory() as d:
     scan()
     assert finding_states(engine, "asset.dat") == [("clamav", "Test.Evil", "gone"),
                                                   ("clamav", "Test.Evil", "open")]
+    # Changed content that couldn't be scanned: the old finding was about
+    # other content, so it's closed, even though no new verdict replaces it.
+    (tree / "asset.dat").write_bytes(b"BROKEN content now")
+    scan()
+    assert record(engine, "asset.dat").scan_status == "error"
+    assert all(state == "gone" for *_, state in finding_states(engine, "asset.dat")), \
+        finding_states(engine, "asset.dat")
+    (tree / "asset.dat").write_bytes(b"game data EVIL again, other bytes")   # the earlier content
+    scan()
+    assert finding_states(engine, "asset.dat") == [("clamav", "Test.Evil", "gone"),
+                                                  ("clamav", "Test.Evil", "open")], \
+        "the same content flagged again reopens its finding"
+    # A hit with no signature name is allowed as "Unknown", the file included.
+    (tree / "noname.dat").write_bytes(b"NONAME hit")
+    scan()
+    ok, out = quiet(allowlist.allow, engine, str(tree / "noname.dat"), yes)
+    assert ok and record(engine, "noname.dat").scan_status == "allowed", out
+    (tree / "noname.dat").unlink()
+    with Session(engine) as session:
+        session.query(FileRecord).filter(FileRecord.filepath.like("%/noname.dat")).delete()
+        session.query(Allowance).filter(Allowance.threat_name == "Unknown").delete()
+        session.commit()
+    # The engine shown comes from the database, so it's escaped like a name.
+    with Session(engine) as session:
+        session.query(FileRecord).filter(FileRecord.filepath.like("%/yara.dat")).update(
+            {FileRecord.threat_engine: "x\x1b]0;pwned\x07"}, synchronize_session=False)
+        session.commit()
+    _, text = quiet(reports.list_infected, engine)
+    assert "\x1b" not in text and "Found by:" in text, repr(text)
     # A deleted file's findings are tidied away with its record.
     (tree / "yara.dat").unlink()
     with Session(engine) as session:
