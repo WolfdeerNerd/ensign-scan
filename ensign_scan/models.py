@@ -196,6 +196,10 @@ class FileRecord(Base):
     # (a .kdbx, a .ppk, an SSH key...) but doesn't start that way: why
     # (secrets.format_mismatch). NULL when it matches, or has no such name.
     format_mismatch = Column(SafeText)
+    # Why the last check of a flagged file failed. Its verdict was kept: an
+    # error never counts as "nothing found" (scanner._upsert_file). Cleared
+    # by the next check that gives an answer.
+    last_error = Column(SafeText)
     last_scanned = Column(DateTime)
 
     created_at = Column(DateTime, default=utcnow)

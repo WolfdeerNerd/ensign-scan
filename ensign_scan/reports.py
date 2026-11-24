@@ -471,7 +471,7 @@ def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, in
     return {"total": total, **{s.value: counts.get(s.value, 0) for s in ScanStatus}}
 
 
-_InfectedRow = namedtuple("_InfectedRow", "filepath threat_name last_scanned scan_result file_hash id threat_engine")
+_InfectedRow = namedtuple("_InfectedRow", "filepath threat_name last_scanned scan_result file_hash id threat_engine last_error")
 
 
 def list_infected(engine: Engine, paths: list[str] | None = None,
@@ -499,12 +499,13 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
         # (Filtered here, not with "IN (...)": see allowlist.reconcile.)
         from .allowlist import orphaned
         stale = orphaned(engine)
-        query = query.add_columns(FileRecord.id, FileRecord.threat_engine, FileRecord.scan_status).filter(
+        query = query.add_columns(FileRecord.id, FileRecord.threat_engine, FileRecord.last_error,
+                                  FileRecord.scan_status).filter(
             FileRecord.scan_status.in_((ScanStatus.INFECTED.value, ScanStatus.ALLOWED.value)))
         scope = _scope_filter(paths)
         if scope is not None:
             query = query.filter(scope)
-        rows = [_InfectedRow(*row[:7]) for row in query.all()
+        rows = [_InfectedRow(*row[:8]) for row in query.all()
                 if row.scan_status == ScanStatus.INFECTED.value or row.id in stale]
         # Second opinions (evidence.py), only for the content they were checked against.
         from . import evidence
@@ -533,13 +534,17 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
             if explanation.false_positive_note:
                 label = "Hint" if explanation.decoded else "Known false positive"
                 _note("›", explanation.false_positive_note, label=label)
-        for i, (filepath, _t, scanned, detail, digest, file_id, found_by) in enumerate(group):
+        for i, (filepath, _t, scanned, detail, digest, file_id, found_by, failed) in enumerate(group):
             if files_per_threat is None or i < files_per_threat:
                 # Each file is its own block: the path, then its details
                 # indented under it, so a long list reads down the paths.
                 print_unwrapped(f"\n  File: {shown(filepath)}")
                 print(f"{_DETAIL}Scanned: {scanned} UTC")
                 print_unwrapped(f"{_DETAIL}Details: {shown((detail or '')[:200])}")
+                if failed:
+                    _note("!", f"Couldn't be checked again ({failed[-160:]}). This is the "
+                          f"earlier verdict; the next run tries again.", label="Last check",
+                          indent=len(_DETAIL))
                 if found_by:
                     from .allowlist import engine_label
                     print(f"{_DETAIL}Found by: {shown(engine_label(found_by))}")
