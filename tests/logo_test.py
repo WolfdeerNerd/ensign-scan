@@ -14,11 +14,17 @@ ROOT = _Path(__file__).resolve().parent.parent
 _sys_path.path.insert(0, str(ROOT))
 
 import io  # noqa: E402
+import os  # noqa: E402
 import re  # noqa: E402
 
 from rich.console import Console  # noqa: E402
 
 from ensign_scan import logo  # noqa: E402
+
+
+# A known terminal type, whatever runs this test (only TERM=linux is skipped,
+# checked below).
+os.environ["TERM"] = "xterm-256color"
 
 
 def console(width=80, terminal=True, encoding="utf-8"):
@@ -44,6 +50,11 @@ assert logo.banner(console(terminal=False)) is None, "a pipe or a log"
 assert logo.banner(console(width=logo.WIDTH)) is None, "too narrow"
 assert logo.banner(console(encoding="ascii")) is None, "no block characters"
 assert logo.banner(console(encoding="latin-1")) is None, "no block characters"
+os.environ["TERM"] = "linux"
+assert logo.banner(console()) is None, "the bare text console: its fonts often lack box characters"
+os.environ["TERM"] = "tmux-256color"
+assert logo.banner(console()) is not None, "only TERM=linux is skipped"
+os.environ["TERM"] = "xterm-256color"
 
 # The greeting prints it above the usual lines, and leaves it out in a pipe.
 from ensign_scan import cli  # noqa: E402

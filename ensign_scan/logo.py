@@ -8,10 +8,13 @@ decides the exact shades.
 
 It's printed only where it will look right: on a terminal (not into a
 pipe or a log), at least WIDTH + 1 columns wide, with an encoding that has
-the block and box characters. Anywhere else the greeting is plain text, as
-before. Rich leaves the colors out when NO_COLOR is set.
+the block and box characters, and not on the kernel's bare text console
+(TERM=linux), whose fonts often lack the box characters. Anywhere else the
+greeting is plain text, as before. Rich leaves the colors out when NO_COLOR is set.
 """
 from __future__ import annotations
+
+import os
 
 from rich.console import Console
 from rich.text import Text
@@ -34,6 +37,10 @@ def banner(console: Console) -> list[Text] | None:
     """The logo as styled lines for `console`, or None where it wouldn't
     render properly (see the module docstring)."""
     if not console.is_terminal or console.width <= WIDTH:
+        return None
+    # The kernel's bare text console (Ctrl+Alt+F3): its fonts often lack
+    # box-drawing characters, so the shadow would come out as ? or diamonds.
+    if os.environ.get("TERM") == "linux":
         return None
     try:
         "".join(LINES).encode(console.encoding)
