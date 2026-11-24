@@ -204,6 +204,20 @@ with tempfile.TemporaryDirectory() as d:
     assert record(engine, "asset.dat").scan_status == "allowed"
     assert record(engine, "yara.dat").scan_status == "infected", "the other engine's hit stays flagged"
     assert finding_states(engine, "asset.dat") == [("clamav", "Test.Evil", "allowed")]
+    # A folder allowance is per engine too, and says whose hits it covers.
+    mixed = tree / "mixed"
+    mixed.mkdir()
+    (mixed / "a.dat").write_bytes(b"EVIL in a folder")
+    (mixed / "b.dat").write_bytes(b"EVIL in a folder, YARA")
+    scan()
+    allowed_now, out = quiet(allowlist.allow_folder, engine, str(mixed), "Test.Evil", yes)
+    assert allowed_now == 2 and "Found by:" in out and "(1)" in out, out
+    with Session(engine) as session:
+        folder_rows = {r.engine for r in session.query(AllowedFolder)}
+    assert folder_rows == {"clamav", ENGINE_CLAMAV_YARA}, folder_rows
+    for child in mixed.iterdir():
+        child.unlink()
+    mixed.rmdir()
     print("an allowance covers only its own engine test passed ✓")
 
     # Content changes: the old finding is gone, a new one is about the new content.
@@ -270,6 +284,37 @@ with tempfile.TemporaryDirectory() as d:
     assert record(engine, "asset.dat").scan_status == "infected"
     (ssh / "id_ed25519").unlink()
     ssh.rmdir()
+    # An allowed file that changed, then couldn't be read (a passing read
+    # error, so nothing else about it changes when it's readable again): its
+    # allowed verdict stands for now, but the change isn't forgotten.
+    # Allowed files aren't checked every run, so the size and times it was
+    # allowed with are kept, and the next run scans the change.
+    import errno
+
+    from ensign_scan import scanner as scanner_mod
+    swapped = tree / "swapped.dat"
+    swapped.write_bytes(b"allowed EVIL bytes")
+    scan()
+    ok, _ = quiet(allowlist.allow, engine, str(swapped), yes)
+    assert ok
+    swapped.write_bytes(b"other EVIL bytes, never allowed")
+    real_open = scanner_mod.open_for_scan
+
+    def failing_open(path, *args, **kwargs):
+        if Path(path).name == "swapped.dat":
+            raise OSError(errno.EIO, "Input/output error")
+        return real_open(path, *args, **kwargs)
+    scanner_mod.open_for_scan = failing_open
+    try:
+        scan()
+    finally:
+        scanner_mod.open_for_scan = real_open
+    assert record(engine, "swapped.dat").scan_status == "allowed"
+    assert record(engine, "swapped.dat").last_error
+    scan()
+    assert record(engine, "swapped.dat").scan_status == "infected", \
+        "the change made before the read error was never scanned"
+    swapped.unlink()
     print("an error keeps the earlier verdict test passed ✓")
 
     # --purge-missing deletes them with the record, at once: SQLite can give

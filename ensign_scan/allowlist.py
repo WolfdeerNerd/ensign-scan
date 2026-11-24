@@ -414,6 +414,13 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
     print(f"  Signature: {shown(signature)}")
     if ready:
         print(f"  To allow:  {len(ready)} file{'s' if len(ready) != 1 else ''}")
+        engines: dict[str, int] = {}
+        for c in ready:
+            engines[c.engine] = engines.get(c.engine, 0) + 1
+        if len(engines) > 1 or ENGINE_CLAMAV not in engines:
+            # Each engine's hits get their own allowance: say whose these are.
+            print("  Found by:  " + ", ".join(f"{shown(engine_label(e))} ({n})"
+                                             for e, n in sorted(engines.items())))
         _print_some([c.path for c in ready], top)
     if code:
         print(f"  Left out:  {len(code)} file{'s' if len(code) != 1 else ''} in a format that can "
