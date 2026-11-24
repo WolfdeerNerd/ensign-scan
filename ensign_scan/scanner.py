@@ -1703,6 +1703,11 @@ class Scanner:
                         and (actual is None or actual == previous_hash))
                 if keep:
                     record.file_hash = previous_hash   # never the "" of a credential file
+                    if actual is None and previous_stat is not None:
+                        # Not read: keep the size and times the verdict was
+                        # for, so a change since is still seen as one (an
+                        # allowed file isn't checked again every run).
+                        record.file_size, record.mtime_ns, record.ctime_ns = previous_stat
                     record.last_error = outcome.raw
                     log.warning("could not check %s again (%s); its earlier verdict stands",
                                 path, outcome.raw)
@@ -1731,6 +1736,7 @@ class Scanner:
                     record.scan_result = None
                     record.threat_name = None
                     record.threat_engine = None
+                    record.last_error = None
                     record.sig_version = None
                     record.last_scanned = None
                     findings.content_changed(session, record.id)
