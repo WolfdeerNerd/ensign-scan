@@ -22,12 +22,12 @@ from pathlib import Path
 from builtins import print as builtin_print
 from importlib.metadata import PackageNotFoundError, version as dist_version
 
-from rich import print
+from rich import get_console, print
 
 from ensign_scan.config import AS_ROOT, HOME, HOSTNAME, Config, ensure_default_config, legacy_notice
 from ensign_scan import (
     allowlist, bigrules, diagnostics, explanations, fpreport, logsetup, migrate, notify, persistence, pkgdb,
-    protect, secrets,
+    logo, protect, secrets,
 )
 from ensign_scan.fsutil import print_unwrapped, shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
@@ -173,6 +173,11 @@ def setup_logging(config: Config) -> None:
 
 def greet(config: Config) -> None:
     print()
+    lines = logo.banner(get_console())   # None in a pipe, a narrow window, or without UTF-8
+    if lines:
+        for line in lines:
+            print(line)
+        print()
     print(f" Greetings, {HOME.name}!")
     print("-" * 71)
     print(" I, Ensign, will start scanning your system shortly…")
