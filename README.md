@@ -1,13 +1,17 @@
-<h1>
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/WolfdeerNerd/ensign-scan/main/assets/ensign-logo-dark.svg">
-    <img src="https://raw.githubusercontent.com/WolfdeerNerd/ensign-scan/main/assets/ensign-logo-light.svg" alt="Ensign" width="470">
-  </picture>
-</h1>
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/WolfdeerNerd/ensign-scan/main/assets/ensign-logo-dark.svg">
+  <img src="https://raw.githubusercontent.com/WolfdeerNerd/ensign-scan/main/assets/ensign-logo-light.svg" alt="Ensign" width="470">
+</picture>
 
 **A local-first ClamAV file scanner for Linux.**
 
 [Install](#installation) · [Usage](#usage) · [Roadmap](https://github.com/WolfdeerNerd/ensign-scan/blob/main/ROADMAP.md) · [Security](https://github.com/WolfdeerNerd/ensign-scan/blob/main/SECURITY.md) · [Contributing](https://github.com/WolfdeerNerd/ensign-scan/blob/main/CONTRIBUTING.md) · [Report a bug](https://github.com/WolfdeerNerd/ensign-scan/issues/new/choose)
+
+</div>
+
+---
 
 Greetings!
 
