@@ -1,4 +1,9 @@
-# Ensign
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/WolfdeerNerd/ensign-scan/main/assets/ensign-logo-dark.svg">
+    <img src="https://raw.githubusercontent.com/WolfdeerNerd/ensign-scan/main/assets/ensign-logo-light.svg" alt="Ensign" width="470">
+  </picture>
+</h1>
 
 **A local-first ClamAV file scanner for Linux.**
 
