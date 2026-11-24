@@ -464,6 +464,7 @@ class ScanOutcome:
     status: ScanStatus
     raw: str
     threat_name: str | None = None
+    engine: str = "clamav"   # models.ENGINE_*: which detector this answer is from
 
 
 class ClamdClient:

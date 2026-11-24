@@ -40,7 +40,16 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from .fsutil import open_for_scan, print_unwrapped, sha256_fd, shown
-from .models import AllowedFolder, Allowance, FileRecord, ScanStatus, path_under, utcnow
+from .models import (
+    ENGINE_CLAMAV,
+    ENGINE_CLAMAV_YARA,
+    AllowedFolder,
+    Allowance,
+    FileRecord,
+    ScanStatus,
+    path_under,
+    utcnow,
+)
 
 # File formats that can run code the moment a program loads them: Python
 # pickles, and the model checkpoints and saved objects built on pickle.
@@ -55,10 +64,43 @@ def loads_code(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in LOADS_CODE_EXTENSIONS
 
 
-def allowed_pairs(engine: Engine) -> set[tuple[str, str]]:
-    """Every (SHA-256, signature name) you have allowed."""
+def key(digest: str | None, threat: str | None, found_by: str | None) -> tuple[str, str, str]:
+    """What an allowance is matched on: (SHA-256, signature, engine).
+    "Unknown" when ClamAV named no signature (what --allow saves); an engine
+    of None is ClamAV (every hit recorded before 0.10.0)."""
+    return (digest or "", threat or "Unknown", found_by or ENGINE_CLAMAV)
+
+
+def same_engine(column, found_by: str | None):
+    """A filter for files.threat_engine == found_by, where NULL is ClamAV."""
+    if (found_by or ENGINE_CLAMAV) == ENGINE_CLAMAV:
+        return or_(column.is_(None), column == ENGINE_CLAMAV)
+    return column == found_by
+
+
+ENGINE_LABELS = {
+    ENGINE_CLAMAV: "ClamAV",
+    ENGINE_CLAMAV_YARA: "YARA, with Ensign's translation of a ClamAV signature (the sweep)",
+}
+
+
+def engine_label(found_by: str | None) -> str:
+    return ENGINE_LABELS.get(found_by or ENGINE_CLAMAV, found_by or ENGINE_CLAMAV)
+
+
+def signature_text(threat: str, found_by: str | None) -> str:
+    """A signature as listings show it: with its engine, unless ClamAV's."""
+    if (found_by or ENGINE_CLAMAV) == ENGINE_CLAMAV:
+        return threat
+    return f"{threat} ({found_by})"
+
+
+def allowed_keys(engine: Engine) -> set[tuple[str, str, str]]:
+    """Every (SHA-256, signature, engine) you have allowed: an allowance
+    covers the engine that flagged the file, and no other."""
     with Session(engine) as session:
-        return {(h, t) for h, t in session.query(Allowance.file_hash, Allowance.threat_name)}
+        return {(h, t, e) for h, t, e in session.query(
+            Allowance.file_hash, Allowance.threat_name, Allowance.engine)}
 
 
 @dataclass
@@ -66,19 +108,20 @@ class _Candidate:
     path: str
     digest: str
     threat: str
+    engine: str = ENGINE_CLAMAV
 
 
 def orphaned(engine: Engine) -> set[int]:
     """Ids of records marked allowed whose allowance is gone: they count as
     infected. Read-only, for the listings, which can run alongside a scan
     and never write; reconcile() is what updates the records."""
-    pairs = allowed_pairs(engine)
+    keys = allowed_keys(engine)
     with Session(engine) as session:
-        # "Unknown" when ClamAV named no signature: what --allow saved (_candidate).
-        return {row_id for row_id, digest, threat in session.query(
-                    FileRecord.id, FileRecord.file_hash, FileRecord.threat_name).filter(
+        return {row_id for row_id, digest, threat, found_by in session.query(
+                    FileRecord.id, FileRecord.file_hash, FileRecord.threat_name,
+                    FileRecord.threat_engine).filter(
                     FileRecord.scan_status == ScanStatus.ALLOWED.value)
-                if (digest, threat or "Unknown") not in pairs}
+                if key(digest, threat, found_by) not in keys}
 
 
 def reconcile(engine: Engine) -> int:
@@ -116,9 +159,10 @@ def _candidate(engine: Engine, path: str) -> _Candidate | str:
         if record.scan_status == ScanStatus.ALLOWED.value and not _PROTECTED:
             return "This file is already allowed."
         if record.scan_status not in _flagged_statuses():
-            return (f"Only files ClamAV flagged can be allowed; this one is recorded as "
+            return (f"Only flagged files can be allowed; this one is recorded as "
                     f"'{shown(record.scan_status)}'" + (" in root's last scan of it." if _PROTECTED else "."))
         stored, threat = record.file_hash, record.threat_name or "Unknown"
+        found_by = record.threat_engine or ENGINE_CLAMAV
     # Hash it again now: only the exact bytes that were flagged can be
     # allowed, never whatever the file has become since.
     try:
@@ -130,14 +174,11 @@ def _candidate(engine: Engine, path: str) -> _Candidate | str:
     finally:
         os.close(fd)
     if digest != stored:
-        return ("This file has changed since it was scanned, so it isn't the content ClamAV "
+        return ("This file has changed since it was scanned, so it isn't the content that was "
                 "flagged. Scan it again first" + (" (with sudo)." if _PROTECTED else "."))
-    if _PROTECTED:
-        with Session(engine) as session:
-            if session.query(Allowance).filter(Allowance.file_hash == digest,
-                                               Allowance.threat_name == threat).first():
-                return "This file is already allowed."
-    return _Candidate(path, digest, threat)
+    if _PROTECTED and key(digest, threat, found_by) in allowed_keys(engine):
+        return "This file is already allowed."
+    return _Candidate(path, digest, threat, found_by)
 
 
 def _record(session: Session, found: _Candidate) -> int:
@@ -145,15 +186,17 @@ def _record(session: Session, found: _Candidate) -> int:
     and signature as allowed. Returns how many files were marked. The
     caller commits."""
     exists = session.query(Allowance).filter(
-        Allowance.file_hash == found.digest, Allowance.threat_name == found.threat).first()
+        Allowance.file_hash == found.digest, Allowance.threat_name == found.threat,
+        Allowance.engine == found.engine).first()
     if exists is None:
-        session.add(Allowance(file_hash=found.digest, threat_name=found.threat,
+        session.add(Allowance(file_hash=found.digest, threat_name=found.threat, engine=found.engine,
                               filepath=found.path, allowed_at=utcnow()))
         session.flush()
-    # Every copy of the same content flagged by the same signature.
+    # Every copy of the same content flagged by the same signature, from the same engine.
     copies = session.query(FileRecord).filter(
         FileRecord.file_hash == found.digest,
         FileRecord.threat_name == found.threat,
+        same_engine(FileRecord.threat_engine, found.engine),
         FileRecord.scan_status.in_(_flagged_statuses()),
     ).all()
     if not _PROTECTED:   # root's records are evidence only; the user's runs mark their own
@@ -171,10 +214,12 @@ def allow(engine: Engine, path: str, confirm) -> bool:
         return False
     print_unwrapped(f"\n  File:      {shown(found.path)}")
     print(f"  Signature: {shown(found.threat)}")
+    print(f"  Found by:  {engine_label(found.engine)}")
     print(f"  SHA-256:   {found.digest}")
     print("  Allowing tells Ensign this is a false positive: it stops counting this exact "
-          "content, flagged by this exact signature, as infected. If the file changes or "
-          "another signature flags it, it's flagged again. Only allow a file you've checked.")
+          "content, flagged by this exact signature, as infected. If the file changes, or "
+          "another signature or another engine flags it, it's flagged again. Only allow a file "
+          "you've checked.")
     if not confirm("  Allow it? [y/N] "):
         print("  Not allowed.")
         return False
@@ -194,25 +239,25 @@ def unallow(engine: Engine, path: str) -> bool:
     the file has since gone). Its copies are flagged as infected again."""
     with Session(engine) as session:
         record = session.query(FileRecord).filter(FileRecord.filepath == path).first()
-        pairs = set()
+        keys = set()
         if record is not None:
-            # "Unknown" when ClamAV named no signature: what --allow saved.
-            pair = (record.file_hash, record.threat_name or "Unknown")
+            this = key(record.file_hash, record.threat_name, record.threat_engine)
             if not _PROTECTED and record.scan_status == ScanStatus.ALLOWED.value:
-                pairs.add(pair)
-            elif _PROTECTED and pair in allowed_pairs(engine):
+                keys.add(this)
+            elif _PROTECTED and this in allowed_keys(engine):
                 # Root's record says what content is at `path`; the allowance
                 # may have been made for a copy of it somewhere else.
-                pairs.add(pair)
+                keys.add(this)
         for row in session.query(Allowance).filter(Allowance.filepath == path):
-            pairs.add((row.file_hash, row.threat_name))
-        if not pairs:
+            keys.add((row.file_hash, row.threat_name, row.engine))
+        if not keys:
             print_unwrapped(f"[yellow]Nothing to undo:[/yellow] {shown(path)} isn't allowed.")
             return False
         flagged = 0
-        for digest, threat in pairs:
+        for digest, threat, found_by in keys:
             session.query(Allowance).filter(
-                Allowance.file_hash == digest, Allowance.threat_name == threat).delete()
+                Allowance.file_hash == digest, Allowance.threat_name == threat,
+                Allowance.engine == found_by).delete()
             if not _PROTECTED:
                 same_threat = FileRecord.threat_name == threat
                 if threat == "Unknown":   # saved for a record that named no signature
@@ -220,6 +265,7 @@ def unallow(engine: Engine, path: str) -> bool:
                 flagged += session.query(FileRecord).filter(
                     FileRecord.file_hash == digest,
                     same_threat,
+                    same_engine(FileRecord.threat_engine, found_by),
                     FileRecord.scan_status == ScanStatus.ALLOWED.value,
                 ).update({FileRecord.scan_status: ScanStatus.INFECTED.value}, synchronize_session=False)
         session.commit()
@@ -276,12 +322,14 @@ def _flagged_statuses() -> tuple[str, ...]:
     return (ScanStatus.INFECTED.value,)
 
 
-def _flagged_under(session: Session, folder: str) -> list[tuple[str, str, str]]:
-    """(path, signature, stored SHA-256) of every infected file inside `folder`."""
-    rows = session.query(FileRecord.filepath, FileRecord.threat_name, FileRecord.file_hash).filter(
+def _flagged_under(session: Session, folder: str) -> list[tuple[str, str, str, str]]:
+    """(path, signature, stored SHA-256, engine) of every infected file inside `folder`."""
+    rows = session.query(FileRecord.filepath, FileRecord.threat_name, FileRecord.file_hash,
+                         FileRecord.threat_engine).filter(
         FileRecord.scan_status.in_(_flagged_statuses()),
         path_under(FileRecord.filepath, folder)).all()
-    return sorted((path, threat or "Unknown", digest) for path, threat, digest in rows)
+    return sorted((path, threat or "Unknown", digest, found_by or ENGINE_CLAMAV)
+                  for path, threat, digest, found_by in rows)
 
 
 def _print_some(paths: list[str], top: int, icon: str = "○") -> None:
@@ -306,8 +354,8 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
         # Root's records still say infected for what your decisions already
         # allow (root's runs keep flagging it): leave those out, as your own
         # records would (they say allowed).
-        done = allowed_pairs(engine)
-        still = [f for f in flagged if (f[2], f[1]) not in done]
+        done = allowed_keys(engine)
+        still = [f for f in flagged if key(f[2], f[1], f[3]) not in done]
         if flagged and not still:
             print_unwrapped(f"[yellow]Nothing to allow:[/yellow] everything flagged under "
                             f"{shown(folder)} is already allowed.")
@@ -319,7 +367,7 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
         return 0
     by_signature: dict[str, list[str]] = {}
     stored_hash: dict[str, str] = {}
-    for path, threat, digest in flagged:
+    for path, threat, digest, _found_by in flagged:
         by_signature.setdefault(threat, []).append(path)
         stored_hash[path] = digest
     if signature not in by_signature:
@@ -392,13 +440,17 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
     with Session(engine) as session:
         marked = sum(_record(session, c) for c in ready)
         now = utcnow()
-        row = session.query(AllowedFolder).filter(
-            AllowedFolder.folder == folder, AllowedFolder.threat_name == signature).first()
-        if row is None:
-            session.add(AllowedFolder(folder=folder, threat_name=signature,
-                                      allowed_at=now, last_allowed_at=now))
-        else:
-            row.last_allowed_at = now
+        # Remembered per engine, like the allowances: a later file there is
+        # "new for this folder" only when the same engine flags it.
+        for found_by in sorted({c.engine for c in ready}):
+            row = session.query(AllowedFolder).filter(
+                AllowedFolder.folder == folder, AllowedFolder.threat_name == signature,
+                AllowedFolder.engine == found_by).first()
+            if row is None:
+                session.add(AllowedFolder(folder=folder, threat_name=signature, engine=found_by,
+                                          allowed_at=now, last_allowed_at=now))
+            else:
+                row.last_allowed_at = now
         session.commit()
     others = marked - len(inside)
     also = f" (and {others} identical {'copy' if others == 1 else 'copies'} elsewhere)" if others > 0 else ""
@@ -422,26 +474,30 @@ def unallow_folder(engine: Engine, folder: str, signature: str) -> bool:
             AllowedFolder.threat_name == signature,
             or_(AllowedFolder.folder == folder, path_under(AllowedFolder.folder, folder)),
         ).delete(synchronize_session=False)
-        digests = set() if _PROTECTED else {h for (h,) in session.query(FileRecord.file_hash).filter(
+        # (content, engine) pairs: every engine's allowance for this signature goes.
+        digests = set() if _PROTECTED else {(h, e or ENGINE_CLAMAV) for h, e in session.query(
+            FileRecord.file_hash, FileRecord.threat_engine).filter(
             FileRecord.scan_status == ScanStatus.ALLOWED.value,
             FileRecord.threat_name == signature,
             path_under(FileRecord.filepath, folder))}
         # Also content that was allowed from this folder and has since
         # changed or gone: its allowance may still cover a copy elsewhere.
-        digests |= {h for (h,) in session.query(Allowance.file_hash).filter(
+        digests |= {(h, e) for h, e in session.query(Allowance.file_hash, Allowance.engine).filter(
             Allowance.threat_name == signature, path_under(Allowance.filepath, folder))}
         if not remembered and not digests:
             print_unwrapped(f"[yellow]Nothing to undo:[/yellow] nothing under {shown(folder)} is "
                             f"allowed for {shown(signature)}.")
             return False
         flagged = 0
-        for digest in digests:
+        for digest, found_by in digests:
             session.query(Allowance).filter(
-                Allowance.file_hash == digest, Allowance.threat_name == signature).delete()
+                Allowance.file_hash == digest, Allowance.threat_name == signature,
+                Allowance.engine == found_by).delete()
             if not _PROTECTED:
                 flagged += session.query(FileRecord).filter(
                     FileRecord.file_hash == digest,
                     FileRecord.threat_name == signature,
+                    same_engine(FileRecord.threat_engine, found_by),
                     FileRecord.scan_status == ScanStatus.ALLOWED.value,
                 ).update({FileRecord.scan_status: ScanStatus.INFECTED.value})
         session.commit()
@@ -464,14 +520,16 @@ def new_in_allowed_folders(engine: Engine, paths: list[str] | None = None, top: 
     scope = _scope_filter(paths)
     groups: list[tuple[str, str, list[str]]] = []
     with Session(engine) as session:
-        folders = session.query(AllowedFolder.folder, AllowedFolder.threat_name).all()
+        folders = session.query(AllowedFolder.folder, AllowedFolder.threat_name,
+                                AllowedFolder.engine).all()
         seen: set[str] = set()
         # Deepest folder first, so a file is listed once, under the most
         # specific folder you allowed.
-        for folder, threat in sorted(folders, key=lambda r: (-len(r[0]), r[0], r[1])):
+        for folder, threat, found_by in sorted(folders, key=lambda r: (-len(r[0]), r[0], r[1], r[2])):
             query = session.query(FileRecord.filepath).filter(
                 FileRecord.scan_status == ScanStatus.INFECTED.value,
                 FileRecord.threat_name == threat,
+                same_engine(FileRecord.threat_engine, found_by),
                 path_under(FileRecord.filepath, folder))
             if scope is not None:
                 query = query.filter(scope)
@@ -533,8 +591,10 @@ def _gather(engine: Engine) -> tuple[dict, dict, dict]:
             now_allowed = session.query(FileRecord).filter(
                 FileRecord.scan_status == ScanStatus.ALLOWED.value,
                 FileRecord.threat_name == f.threat_name,
+                same_engine(FileRecord.threat_engine, f.engine),
                 path_under(FileRecord.filepath, f.folder)).count()
-            entry["signatures"].append((f.threat_name, f.allowed_at, f.last_allowed_at, now_allowed))
+            entry["signatures"].append((signature_text(f.threat_name, f.engine), f.allowed_at,
+                                        f.last_allowed_at, now_allowed))
         for folder, entry in folders.items():
             # Flagged now and not allowed: a new or changed file in a folder you trusted.
             entry["infected"] = session.query(FileRecord).filter(
@@ -547,11 +607,11 @@ def _gather(engine: Engine) -> tuple[dict, dict, dict]:
         tracked = [(p, h) for p, h in session.query(FileRecord.filepath, FileRecord.file_hash)
                    if h in hashes]
 
-    rules = [(f.folder, f.threat_name) for f in folder_rows]
+    rules = [(f.folder, f.threat_name, f.engine) for f in folder_rows]
 
-    def covering(path: str, threat: str) -> str | None:
-        """The innermost allowed folder that covers this file for this signature."""
-        found = [folder for folder, t in rules if t == threat and _under(path, folder)]
+    def covering(path: str, threat: str, found_by: str) -> str | None:
+        """The innermost allowed folder that covers this file for this signature and engine."""
+        found = [folder for folder, t, e in rules if t == threat and e == found_by and _under(path, folder)]
         return max(found, key=len) if found else None
 
     # The database keeps one signature per file (the latest match), so the
@@ -562,16 +622,16 @@ def _gather(engine: Engine) -> tuple[dict, dict, dict]:
     files: dict[str, dict] = {}
     for a in sorted(allowances, key=lambda a: a.threat_name):
         for path in paths_of.get(a.file_hash, []):
-            folder = covering(path, a.threat_name)
+            folder = covering(path, a.threat_name, a.engine)
             into = folders[folder]["files"] if folder else files
             into.setdefault(path, {"hash": a.file_hash, "signatures": []})["signatures"].append(
-                (a.threat_name, a.allowed_at))
+                (signature_text(a.threat_name, a.engine), a.allowed_at))
     gone: dict[tuple[str, str], dict] = {}
     for a in allowances:
-        if a.file_hash in paths_of or covering(a.filepath, a.threat_name):
+        if a.file_hash in paths_of or covering(a.filepath, a.threat_name, a.engine):
             continue
         gone.setdefault((a.filepath, a.file_hash), {"hash": a.file_hash, "signatures": []})[
-            "signatures"].append((a.threat_name, a.allowed_at))
+            "signatures"].append((signature_text(a.threat_name, a.engine), a.allowed_at))
     return folders, files, gone
 
 

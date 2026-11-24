@@ -30,6 +30,13 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Which detector found something. A hit, and an allowance for one, belongs
+# to one engine: allowing a false positive from one never silences another.
+ENGINE_CLAMAV = "clamav"            # clamd or clamscan, whole files or the sweep's slices
+ENGINE_CLAMAV_YARA = "clamav-yara"  # the sweep's YARA pass: Ensign's translations of ClamAV signatures
+CLAMAV_ENGINES = (ENGINE_CLAMAV, ENGINE_CLAMAV_YARA)   # what a ClamAV pass on a file speaks for
+
+
 class ScanStatus(str, Enum):
     CLEAN = "clean"
     INFECTED = "infected"
@@ -181,6 +188,10 @@ class FileRecord(Base):
     scan_status = Column(String, default=ScanStatus.PENDING.value, index=True)
     scan_result = Column(SafeText)
     threat_name = Column(SafeText)
+    # The engine behind threat_name (ENGINE_*). NULL for ClamAV, which is
+    # what every hit recorded before 0.10.0 was (db.py upgrades the sweep's
+    # YARA hits).
+    threat_engine = Column(String)
     # Set when the file is named like a credential format with a fixed start
     # (a .kdbx, a .ppk, an SSH key...) but doesn't start that way: why
     # (secrets.format_mismatch). NULL when it matches, or has no such name.
@@ -200,11 +211,14 @@ class Allowance(Base):
     path -- an identical copy elsewhere is the same false positive, and a
     changed file is not covered."""
     __tablename__ = "allowances"
-    __table_args__ = (UniqueConstraint("file_hash", "threat_name"),)
+    __table_args__ = (UniqueConstraint("file_hash", "threat_name", "engine"),)
 
     id = Column(Integer, primary_key=True)
     file_hash = Column(String, nullable=False, index=True)   # SHA-256
     threat_name = Column(SafeText, nullable=False)
+    # The engine that flagged it (ENGINE_*): an allowance covers that engine
+    # only. Every allowance made before 0.10.0 was for ClamAV.
+    engine = Column(String, nullable=False, default=ENGINE_CLAMAV, server_default=ENGINE_CLAMAV)
     # Where the file was when you allowed it: for the listing only.
     filepath = Column(FsPath, nullable=False)
     allowed_at = Column(DateTime, default=utcnow, nullable=False)
@@ -220,16 +234,66 @@ class AllowedFolder(Base):
     can tell you when a new or changed file there is flagged by the same
     signature, and --list-allowed can show the folder."""
     __tablename__ = "allowed_folders"
-    __table_args__ = (UniqueConstraint("folder", "threat_name"),)
+    __table_args__ = (UniqueConstraint("folder", "threat_name", "engine"),)
 
     id = Column(Integer, primary_key=True)
     folder = Column(FsPath, nullable=False)
     threat_name = Column(SafeText, nullable=False)
+    engine = Column(String, nullable=False, default=ENGINE_CLAMAV, server_default=ENGINE_CLAMAV)
     allowed_at = Column(DateTime, default=utcnow, nullable=False)       # the first time
     last_allowed_at = Column(DateTime, default=utcnow, nullable=False)  # the latest time
 
     def __repr__(self) -> str:
         return f"<AllowedFolder {self.folder!r} {self.threat_name!r}>"
+
+
+class Finding(Base):
+    """One thing one engine found in one file's content: the history behind
+    files.scan_status, which stays the summary every report reads.
+
+    A ClamAV pass on a file speaks for the ClamAV engines (CLAMAV_ENGINES):
+    the hit it reports is open (or allowed); any other open hit of theirs on
+    that file is gone, since ClamAV no longer reports it. A clean result, or
+    the file's content changing, makes them all gone. Rows of files that are
+    no longer recorded are removed at the start of each run."""
+    __tablename__ = "findings"
+    __table_args__ = (UniqueConstraint("file_id", "engine", "signature", "content_hash"),)
+
+    id = Column(Integer, primary_key=True)
+    file_id = Column(Integer, nullable=False, index=True)    # files.id
+    engine = Column(String, nullable=False)
+    signature = Column(SafeText, nullable=False)
+    detail = Column(SafeText)                                # the engine's own words
+    content_hash = Column(String, nullable=False)            # SHA-256 of what it was found in
+    first_seen = Column(DateTime, default=utcnow, nullable=False)
+    last_seen = Column(DateTime, default=utcnow, nullable=False)
+    state = Column(String, nullable=False, default="open")   # open, allowed or gone
+
+    def __repr__(self) -> str:
+        return f"<Finding {self.engine}:{self.signature!r} {self.state}>"
+
+
+class Evidence(Base):
+    """A fact about a flagged file from a source other than the engine that
+    flagged it, for the reports. It never changes a verdict: a file is clean
+    only when a scan says so, and allowed only when you allow it.
+
+    One row per (file, source), replaced each time it's checked, tied to the
+    content it was checked against: a fact about other content isn't shown.
+    Sources: "package" (pacman, dpkg or rpm owns the file; see pkgdb.origins)."""
+    __tablename__ = "evidence"
+    __table_args__ = (UniqueConstraint("file_id", "source"),)
+
+    id = Column(Integer, primary_key=True)
+    file_id = Column(Integer, nullable=False, index=True)    # files.id
+    source = Column(String, nullable=False)
+    verdict = Column(String, nullable=False)                 # the source's answer, e.g. pkgdb's "package"
+    subject = Column(SafeText)                               # e.g. the package's name
+    content_hash = Column(String, nullable=False)
+    checked_at = Column(DateTime, default=utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<Evidence {self.source}:{self.verdict} {self.subject!r}>"
 
 
 class DirectoryRecord(Base):

@@ -170,7 +170,7 @@ c.close()
 
 protected = Config(db_url=plain.db_url, log_file=plain.log_file, max_workers=2, decisions_db=decisions)
 scanner = Scanner(protected, clamd=FakeClamd())
-assert allowlist.allowed_pairs(scanner.engine) == {(digest, "Test.Evil")}, \
+assert allowlist.allowed_keys(scanner.engine) == {(digest, "Test.Evil", "clamav")}, \
     "only root's allowance counts; the one in your own database is ignored"
 quiet(scanner.scan_tree, tree)
 with Session(scanner.engine) as s:
@@ -192,7 +192,7 @@ for attempt in (lambda: allowlist.allow(scanner.engine, str(tree / "forged.dat")
                 lambda: persistence.acknowledge_all(scanner.engine, audit, tmp / "ack.log")):
     try:
         quiet(attempt)
-        changed = allowlist.allowed_pairs(scanner.engine) != {(digest, "Test.Evil")}
+        changed = allowlist.allowed_keys(scanner.engine) != {(digest, "Test.Evil", "clamav")}
         raise AssertionError(f"a protected run wrote a decision (changed={changed})")
     except Exception as exc:   # noqa: BLE001 -- any refusal will do, as long as nothing changed
         if isinstance(exc, AssertionError):
@@ -448,6 +448,35 @@ else:
     assert acl.exactly(str(found.decisions), uid, acl.READ), "the rollback kept the file's ACL"
     assert as_user(protect.status)[0], "readable again"
 
+    # A decisions file made by 0.9.x (no engine column). The user's run
+    # can't upgrade root's file, so it stops and says how; any sudo run
+    # upgrades it in place, keeping its owner, mode and ACL.
+    with sqlite3.connect(found.decisions) as c:
+        c.executescript("""
+            CREATE TABLE allowances_old (id INTEGER NOT NULL, file_hash VARCHAR NOT NULL,
+                threat_name TEXT NOT NULL, filepath VARCHAR NOT NULL, allowed_at DATETIME NOT NULL,
+                PRIMARY KEY (id), UNIQUE (file_hash, threat_name));
+            INSERT INTO allowances_old SELECT id, file_hash, threat_name, filepath, allowed_at
+                FROM allowances;
+            INSERT INTO allowances_old (file_hash, threat_name, filepath, allowed_at)
+                VALUES ('old', 'Old.Sig', '/x', '2026-01-01 00:00:00');
+            DROP TABLE allowances;
+            ALTER TABLE allowances_old RENAME TO allowances;
+        """)
+    c.close()
+    ok, message = as_user(protect.status)
+    assert not ok and "older Ensign" in message and "sudo ensign-scan" in message, message
+    assert protect.upgrade_all() == [uid]
+    assert protect.upgrade_all() == [], "already upgraded"
+    st = found.decisions.stat()
+    assert st.st_uid == 0 and stat.S_IMODE(st.st_mode) == 0o640
+    assert acl.exactly(str(found.decisions), uid, acl.READ), "the upgrade kept the file's ACL"
+    with sqlite3.connect(found.decisions) as c:
+        assert c.execute("SELECT engine FROM allowances WHERE file_hash = 'old'").fetchone() == ("clamav",)
+        c.execute("DELETE FROM allowances WHERE file_hash = 'old'")
+    c.close()
+    assert as_user(protect.status)[0], "readable after the upgrade"
+
     # sudo ... --protected: decisions written to the user's protected file,
     # with root's own records as the evidence, and root's left as they were.
     from ensign_scan.db import make_protected_writer
@@ -474,7 +503,7 @@ else:
 
     ok, out = quiet(allowlist.allow, writer, str(tree / "asset.dat"), yes)
     assert ok and "sudo ensign-scan --protected --unallow" in out, out
-    assert allowlist.allowed_pairs(writer) == {(digest, "Test.Evil")}
+    assert allowlist.allowed_keys(writer) == {(digest, "Test.Evil", "clamav")}
     assert root_records() == before, "root's own records are evidence only, never changed"
     with Session(root_engine) as s:
         assert s.query(Allowance).count() == 0, "root's own allowances stay as they were"
@@ -485,7 +514,7 @@ else:
     def users_view():
         from ensign_scan.db import make_engine
         own = Path(tempfile.mkdtemp(prefix="ensign_protect_user_")) / "system.db"
-        return sorted(allowlist.allowed_pairs(make_engine(f"sqlite:///{own}", decisions=found.decisions)))
+        return sorted(allowlist.allowed_keys(make_engine(f"sqlite:///{own}", decisions=found.decisions)))
     ok, message = as_user(users_view)
     assert ok and digest in message, message
 
@@ -496,7 +525,7 @@ else:
     quiet(Scanner(root_cfg, clamd=FakeClamd()).scan_tree, tree)
     ok, out = quiet(allowlist.unallow, writer, str(copy))
     assert ok and "No longer allowed" in out, out
-    assert allowlist.allowed_pairs(writer) == set(), "the copy's allowance (made for asset.dat) is gone"
+    assert allowlist.allowed_keys(writer) == set(), "the copy's allowance (made for asset.dat) is gone"
     copy.unlink()
     quiet(Scanner(root_cfg, clamd=FakeClamd()).scan_tree, tree)
     quiet(allowlist.allow, writer, str(tree / "asset.dat"), yes)

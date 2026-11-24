@@ -40,6 +40,7 @@ before: a sudo run stays an independent check.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sqlite3
@@ -48,6 +49,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import acl, trust
+
+log = logging.getLogger(__name__)
 
 CONFIG_ROOT = Path("/etc/ensign-scan")
 DATA_ROOT = Path("/var/lib/ensign-scan")
@@ -145,9 +148,10 @@ def _check_readable(found: Protected) -> None:
                 if missing:
                     # A newer Ensign than the one that made the file: its
                     # queries would fail with "no such column" mid-run.
-                    raise Unsafe(f"root's decisions file is missing {', '.join(missing)} in "
-                                 f"{table}: it was made by an older Ensign. Upgrading a protected "
-                                 f"decisions file isn't built yet; report it as a bug.")
+                    raise Unsafe(f"root's copy of your decisions was made by an older Ensign "
+                                 f"({table} has no {', '.join(missing)}), and only root can "
+                                 f"upgrade it. Run any sudo command once, and it's upgraded: "
+                                 f"sudo ensign-scan --list-allowed")
                 conn.execute(f"SELECT {', '.join(columns)} FROM {table} LIMIT 1").fetchall()
         finally:
             conn.close()
@@ -160,6 +164,42 @@ def _check_readable(found: Protected) -> None:
                          "root can finish undoing that. Run any sudo command on them, for example: "
                          "sudo ensign-scan --protected --persistence") from None
         raise Unsafe(f"you are protected, but root's copies can't be read: {exc}") from None
+
+
+def upgrade_all() -> list[int]:
+    """Bring every protected decisions file up to this version's tables
+    (db.upgrade_decision_tables). Run by root at the start of every sudo
+    run, so a protected user's runs, which can't upgrade root's file and
+    stop until it's done, need nothing more than any sudo command. Returns
+    the uids whose file changed. A file that isn't safe to use is left
+    alone: the user's runs report it."""
+    from sqlalchemy import create_engine
+
+    from .db import upgrade_decision_tables
+    if os.geteuid() != 0:
+        return []
+    try:
+        folders = sorted((DATA_ROOT / "users").iterdir())
+    except OSError:
+        return []   # nobody is protected here
+    changed = []
+    for folder in folders:
+        path = folder / "decisions.db"
+        if not folder.name.isdigit() or not path.is_file() or trust.untrusted_reason(path):
+            continue
+        engine = create_engine(f"sqlite:///{path}", connect_args={"timeout": 30})
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql("PRAGMA journal_mode=DELETE")
+                if upgrade_decision_tables(conn):
+                    changed.append(int(folder.name))
+        except Exception as exc:  # e.g. another sudo run upgrading it at the same moment
+            # Nothing is lost: the rebuild is one transaction, and the
+            # user's runs keep saying what to run until it's done.
+            log.warning("could not upgrade the protected decisions in %s: %s", path, exc)
+        finally:
+            engine.dispose()
+    return changed
 
 
 def _expected_columns() -> dict[str, list[str]]:

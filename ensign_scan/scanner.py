@@ -49,7 +49,7 @@ from rich import print
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from . import allowlist, bigrules, secrets, yarachild, yaraengine
+from . import allowlist, bigrules, findings, secrets, yarachild, yaraengine
 from .clamd import (
     CONTENT_RISKS,
     DEFAULT_LIMITS,
@@ -66,7 +66,16 @@ from .clamd import (
 from .config import HOME, Config
 from .db import make_engine
 from .fsutil import NotScannable, human_size, is_scannable, open_for_scan, safe_lstat, sha256_fd, shown, stat_or_error
-from .models import DirectoryRecord, FileRecord, ScanStatus, open_failed_result, path_under, utcnow
+from .models import (
+    ENGINE_CLAMAV,
+    ENGINE_CLAMAV_YARA,
+    DirectoryRecord,
+    FileRecord,
+    ScanStatus,
+    open_failed_result,
+    path_under,
+    utcnow,
+)
 from .progress import RunProgress
 
 log = logging.getLogger(__name__)
@@ -482,7 +491,7 @@ class Scanner:
         self._oversized_bytes = 0  # total size of the files in self._oversized
         self._oversized_lock = threading.Lock()
         self._clamscans: _ClamscanPool | None = None
-        self._allowed_pairs: set[tuple[str, str]] | None = None  # see _allowed()
+        self._allowed_keys: set[tuple[str, str, str]] | None = None  # see _allowed()
         self.clamd_max_threads: int | None = None  # set when the worker count is resolved
         # Scan workers busy on a file right now: they share the CPU budget
         # with the clamscans.
@@ -549,11 +558,11 @@ class Scanner:
 
     def _allowed(self) -> set[tuple[str, str]]:
         """Your allowances (allowlist.py), read once per run."""
-        if self._allowed_pairs is None:
+        if self._allowed_keys is None:
             with self._prepare_lock:
-                if self._allowed_pairs is None:
-                    self._allowed_pairs = allowlist.allowed_pairs(self.engine)
-        return self._allowed_pairs
+                if self._allowed_keys is None:
+                    self._allowed_keys = allowlist.allowed_keys(self.engine)
+        return self._allowed_keys
 
     def _scan_limit(self) -> int:
         return (self.limits or DEFAULT_LIMITS).scan_limit
@@ -1088,10 +1097,11 @@ class Scanner:
         against its name, and `mismatch` is the answer to store (a sweep
         result arrives without one, and leaves the stored answer alone)."""
         if (outcome is not None and outcome.status == ScanStatus.INFECTED and digest
-                and (digest, outcome.threat_name or "Unknown") in self._allowed()):
-            # You marked this exact content, flagged by this exact signature,
-            # as a false positive (allowlist.py). Anything else stays infected.
-            outcome = ScanOutcome(ScanStatus.ALLOWED, outcome.raw, outcome.threat_name)
+                and allowlist.key(digest, outcome.threat_name, outcome.engine) in self._allowed()):
+            # You marked this exact content, flagged by this exact signature
+            # from this engine, as a false positive (allowlist.py). Anything
+            # else stays infected, a hit from another engine included.
+            outcome = ScanOutcome(ScanStatus.ALLOWED, outcome.raw, outcome.threat_name, outcome.engine)
         # A credential file's hash is used above, in memory, and not kept:
         # stored, a hash of a short secret can be confirmed by guessing.
         # Kept once the file is found infected: it's malware then, and
@@ -1465,7 +1475,7 @@ class Scanner:
             where = f"at byte {at} of {st.st_size}" if at is not None else f"in its {st.st_size} bytes"
             raw = (f"{SWEEP_HIT_PREFIX}{name} FOUND {where} by YARA, using Ensign's translation of "
                    f"this ClamAV signature. ClamAV can't scan this file whole.")
-            self._finish(path, st, digest, ScanOutcome(ScanStatus.INFECTED, raw, name))
+            self._finish(path, st, digest, ScanOutcome(ScanStatus.INFECTED, raw, name, ENGINE_CLAMAV_YARA))
             return True
         if yara_note:
             notes.append(yara_note)
@@ -1483,10 +1493,14 @@ class Scanner:
             session.query(FileRecord).filter(FileRecord.filepath == str(path)).update({
                 FileRecord.scan_status: ScanStatus.INCOMPLETE.value,
                 FileRecord.threat_name: f"{LIMITS_EXCEEDED_PREFIX}.MaxFileSize",
+                FileRecord.threat_engine: None,
                 FileRecord.scan_result: summary,
                 FileRecord.sig_version: self._sig_version,
                 FileRecord.last_scanned: utcnow(),
             })
+            row = session.query(FileRecord.id).filter(FileRecord.filepath == str(path)).first()
+            if row is not None:
+                findings.clamav_found_nothing(session, row[0])
             session.commit()
         print(f"{_STATUS_SYMBOLS[ScanStatus.INCOMPLETE.value]} {shown(path.name):.<50} swept, nothing found")
         return True
@@ -1638,9 +1652,14 @@ class Scanner:
                     record.scan_status = outcome.status.value
                     record.scan_result = outcome.raw
                     record.threat_name = outcome.threat_name
+                    # NULL for ClamAV, as on every record from before 0.10.0.
+                    record.threat_engine = (None if outcome.engine == ENGINE_CLAMAV
+                                            or outcome.threat_name is None else outcome.engine)
                     record.last_scanned = utcnow()
                     if outcome.status in (ScanStatus.CLEAN, ScanStatus.INFECTED, ScanStatus.ALLOWED):
                         record.sig_version = self._sig_version
+                    session.flush()   # a new record needs its id for its findings
+                    findings.record_outcome(session, record, outcome)
                 elif previous_hash is not None and digest is not None and (
                         digest != previous_hash
                         or (not digest and previous_stat
@@ -1648,8 +1667,10 @@ class Scanner:
                     record.scan_status = ScanStatus.PENDING.value
                     record.scan_result = None
                     record.threat_name = None
+                    record.threat_engine = None
                     record.sig_version = None
                     record.last_scanned = None
+                    findings.content_changed(session, record.id)
                 session.commit()
             except Exception:
                 session.rollback()

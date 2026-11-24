@@ -183,6 +183,8 @@ sudo ensign-scan --protected --acknowledge PATH     # or --acknowledge-all
 
 `--unallow` and `--unallow-folder` work the same way. Without `--protected`, `sudo` changes root's own decisions, as before.
 
+When a new version of Ensign changes how decisions are stored, your runs can't upgrade root's file, so they stop and say so. Any `sudo ensign-scan` command upgrades every protected user's file in place, keeping its owner, mode and ACL.
+
 - **The evidence is root's own scan.** Root never reads your database, so a file can be allowed only if root's own records say it was flagged: scan it with `sudo` first (`sudo ensign-scan PATH`). It's hashed again before it's allowed, as always, so only the content root saw flagged can be allowed.
 - **Root's runs keep flagging it.** Root's decisions stay separate, so a run with `sudo` is still an independent check. Your own runs mark the file allowed on their next pass.
 - **Acknowledgments** are checked against your protected baseline, and logged in a log only root can read, next to the decisions file.
@@ -474,6 +476,11 @@ See infected files and what triggered them:
 sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, threat_name FROM files WHERE scan_status='infected';"
 ```
 
+Each hit is also kept as a finding (which engine, which signature, which content, and whether it's open, allowed, or gone because a later scan found nothing), and second opinions are in `evidence`:
+```
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT f.filepath, x.engine, x.signature, x.state FROM findings x JOIN files f ON f.id = x.file_id;"
+```
+
 Look up everything Ensign knows about one specific file:
 ```
 sqlite3 ~/.local/share/ensign-scan/system.db "SELECT * FROM files WHERE filepath='/full/path/to/file';"
@@ -496,7 +503,8 @@ ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match 
 
   Ensign never submits anything itself. Submitting sends the whole file to Cisco (ClamAV's owner), so don't submit anything private; Ensign warns you if the file is in a personal folder like Documents or Downloads. A file the sweep flagged can't be reported this way: ClamAV can't scan a file that large, so it can't reproduce the detection.
 - **Allow it in Ensign** with `--allow PATH`. Ensign first hashes the file again, so you can only allow the exact content that was flagged, then asks you to confirm. An allowance is deliberately narrow:
-  - it covers that exact content (its SHA-256), flagged by that exact signature. Identical copies elsewhere are covered too, since they're the same false positive. If the file changes, or a different signature flags it, it's flagged again;
+  - it covers that exact content (its SHA-256), flagged by that exact signature, found by that exact engine. Identical copies elsewhere are covered too, since they're the same false positive. If the file changes, a different signature flags it, or another engine finds it, it's flagged again;
+  - the sweep's YARA pass (see Large files) counts as its own engine, `clamav-yara`, and `--allow` says which engine found the file. Allowances made before 0.10.0 are ClamAV's, so a large file the YARA pass flagged, and that you allowed then, is flagged once more after the upgrade: check it, then allow it again;
   - allowed files don't count as infected for alerts or the exit code, but they're never hidden: every run ends with the folders and files you allowed within what it scanned (the `--list-allowed` layout, up to 10 files), and `--list-allowed` shows them all;
   - they're still rescanned when the signatures update, so once ClamAV fixes the false positive the file simply turns clean;
   - `--unallow PATH` undoes it.
@@ -506,6 +514,13 @@ ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match 
   - **Files that can run code are left out.** A file in a format that can run code the moment a program loads it (`.pkl`, `.pickle`, `.pt`, `.pth`, `.ckpt`, `.bin`, `.joblib`) is never part of a folder allow, and neither is a file with the very same content as one. Each needs its own `--allow PATH`;
   - **A file that changed since its last scan is left out** until it has been scanned again;
   - `--unallow-folder FOLDER --signature NAME` undoes it for everything allowed under that folder, or allowed from it, for that signature.
+
+**A second opinion from your package manager.** At the end of each scan, Ensign asks the package manager (pacman, dpkg or rpm; see `package_verification`) about every flagged file. Under the file, the report then says:
+
+- **Likely false positive** when a package installed the file and it's still exactly what the package put there. A package is not a guarantee: an AUR package is a script anyone can publish. So the file stays flagged until you decide;
+- **Package** when a package owns it but the file differs from what it installed (worth a closer look), or couldn't be compared.
+
+The answer is kept with the content it was checked against, so once the file changes it's no longer shown. It never changes a verdict, and it's left out of the report sent to ClamAV except for one line: when the package manager vouches for the file, `--clamav-report` names the package, which helps ClamAV find the file.
 
 Allowances live in Ensign's own database. Ensign doesn't touch ClamAV or its signatures, so nothing else that uses clamd is affected. (ClamAV's own allow lists, `.sfp` and `.ign2` files in its database folder, work for every program using clamd. See ClamAV's documentation if that's what you want.)
 
