@@ -350,7 +350,7 @@ with tempfile.TemporaryDirectory() as d:
     try:
         assert evidence.refresh(engine) == 2
         _, text = quiet(reports.list_infected, engine)
-        assert "Likely false positive: Installed by the package libfoo, and unchanged since" in text, text
+        assert "Likely false positive: Installed by the package libfoo, and unchanged since" in text and "AUR" in text, text
         assert "differs from what it installed" in text, text
         assert record(engine, "pkg.so").scan_status == "infected", "evidence never changes a verdict"
         assert "not owned by any" not in text, "the Context line doesn't repeat the package"

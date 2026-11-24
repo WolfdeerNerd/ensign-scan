@@ -117,8 +117,11 @@ def describe(found: Evidence) -> str:
     """One line for the reports."""
     package = found.subject or "a package"
     if found.verdict == pkgdb.FROM_PACKAGE:
-        return (f"Installed by the package {package}, and unchanged since. Likely a false positive, "
-                f"if you trust where that package came from (an AUR package is anyone's script).")
+        # The label already says "likely false positive": say what was checked.
+        source = ("an AUR package is a script anyone can publish"
+                  if pkgdb.active().name == "pacman" else "a package is only as good as where it came from")
+        return (f"Installed by the package {package}, and unchanged since. That's only as trustworthy "
+                f"as the package: {source}.")
     if found.verdict == pkgdb.MODIFIED:
         return (f"Belongs to the package {package}, but differs from what it installed. A changed "
                 f"package file is worth a closer look.")
