@@ -15,8 +15,9 @@ Every feature has to fit these criteria:
 
 ## Next
 
-Decided, and coming next:
+Decided, in this order:
 
+- **Known-good hash libraries.** More local second opinions on flagged files, next to the package manager's (0.10.0): NIST's National Software Reference Library (NSRL), and possibly the file lists of games and Proton/Wine installs, which ClamAV's Windows signatures often flag. Like the package check, a match labels a hit a likely false positive and never clears it.
 - **Your own YARA rules.** Custom rules, written from scratch, for payloads hidden inside ordinary files, checked on every file as a second check alongside ClamAV. They will use yara-x, which the sweep already uses for files too large for ClamAV.
 
 ## Planned
@@ -37,7 +38,6 @@ Decided, no order yet:
 Not decided. Discussion welcome:
 
 - **Name the provider of `.UNOFFICIAL` signatures** in `--clamav-report`, by finding which signature file the name comes from.
-- **NSRL hashes.** NIST's National Software Reference Library, as a local second opinion on flagged files.
 - **Hidden payloads.** Files that go beyond their normal scope.
 - **Temp and RAM-backed folders.** Scan `/tmp`, `/var/tmp`, `/dev/shm` and `/run/user/<uid>`, where anyone can write and malware is often staged, and look again at excluding `~/.cache`. Ensign skips files that vanish before it reaches them, which is right for ordinary churn, but in a temp folder a file that ran and deleted itself looks the same, so these folders would report such files instead of skipping them quietly. Shared folders hold other users' files, which Ensign can't open, so the report would say so. Programs that run from RAM and delete their own file need a look at running processes, which needs its own research.
 - **Folder-level secrets detection.** Treat a folder as a secrets store when most of its files look like credentials.

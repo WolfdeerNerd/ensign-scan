@@ -42,17 +42,22 @@ def _note(icon: str, text: str, label: str | None = None, indent: int = 2) -> No
         get_console().print(f"{lead}{start}[dim]{escape(line)}[/dim]", soft_wrap=True)
 
 
-def _file_facts(filepath: str) -> str:
+def _file_facts(filepath: str, owner: bool = True) -> str:
     """One local line of context about a flagged file: does it still exist,
     how big, how old, and does a package own it. Everything here is a local
     stat or a read-only ownership query to the system's package manager
-    (see pkgdb); nothing leaves the machine."""
+    (see pkgdb); nothing leaves the machine.
+
+    owner=False leaves the package out, when the report already shows it
+    from evidence.py, checked against this very content."""
     try:
         st = os.lstat(filepath)
     except OSError:
         return "no longer on disk (or not readable now)"
     modified = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d")
     parts = [_human_size(st.st_size), f"modified {modified}"]
+    if not owner:
+        return " · ".join(parts)
     backend = pkgdb.active()
     state, pkg = backend.owner(filepath)
     if state == "owned":
@@ -466,7 +471,7 @@ def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, in
     return {"total": total, **{s.value: counts.get(s.value, 0) for s in ScanStatus}}
 
 
-_InfectedRow = namedtuple("_InfectedRow", "filepath threat_name last_scanned scan_result file_hash")
+_InfectedRow = namedtuple("_InfectedRow", "filepath threat_name last_scanned scan_result file_hash id threat_engine")
 
 
 def list_infected(engine: Engine, paths: list[str] | None = None,
@@ -494,13 +499,16 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
         # (Filtered here, not with "IN (...)": see allowlist.reconcile.)
         from .allowlist import orphaned
         stale = orphaned(engine)
-        query = query.add_columns(FileRecord.id, FileRecord.scan_status).filter(
+        query = query.add_columns(FileRecord.id, FileRecord.threat_engine, FileRecord.scan_status).filter(
             FileRecord.scan_status.in_((ScanStatus.INFECTED.value, ScanStatus.ALLOWED.value)))
         scope = _scope_filter(paths)
         if scope is not None:
             query = query.filter(scope)
-        rows = [_InfectedRow(*row[:5]) for row in query.all()
+        rows = [_InfectedRow(*row[:7]) for row in query.all()
                 if row.scan_status == ScanStatus.INFECTED.value or row.id in stale]
+        # Second opinions (evidence.py), only for the content they were checked against.
+        from . import evidence
+        facts = evidence.for_files(session, {row.id: row.file_hash for row in rows})
 
     if not rows:
         if not more_elsewhere:
@@ -525,14 +533,23 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
             if explanation.false_positive_note:
                 label = "Hint" if explanation.decoded else "Known false positive"
                 _note("›", explanation.false_positive_note, label=label)
-        for i, (filepath, _t, scanned, detail, digest) in enumerate(group):
+        for i, (filepath, _t, scanned, detail, digest, file_id, found_by) in enumerate(group):
             if files_per_threat is None or i < files_per_threat:
                 # Each file is its own block: the path, then its details
                 # indented under it, so a long list reads down the paths.
                 print_unwrapped(f"\n  File: {shown(filepath)}")
                 print(f"{_DETAIL}Scanned: {scanned} UTC")
                 print_unwrapped(f"{_DETAIL}Details: {shown((detail or '')[:200])}")
-                _note("›", _file_facts(filepath), label="Context", indent=len(_DETAIL))
+                if found_by:
+                    from .allowlist import engine_label
+                    print(f"{_DETAIL}Found by: {engine_label(found_by)}")
+                fact = facts.get(file_id)
+                _note("›", _file_facts(filepath, owner=fact is None), label="Context",
+                      indent=len(_DETAIL))
+                if fact is not None:
+                    label = ("Likely false positive" if evidence.likely_false_positive(fact)
+                             else "Package")
+                    _note("›", evidence.describe(fact), label=label, indent=len(_DETAIL))
                 # The hash of the content that was flagged: paste it into
                 # VirusTotal's search. A lookup sends only the hash, which
                 # can't be turned back into the file; uploading sends the file.

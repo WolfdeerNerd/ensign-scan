@@ -190,6 +190,15 @@ def make_report(scanner, config, path_text: str) -> Path | None:
     ]
     if changed_name:
         lines.append(f"Earlier name:     {threat} (newer signatures name it {current})")
+    # Asked now, not taken from the stored evidence: the report says what's true today.
+    from . import pkgdb
+    try:
+        state, package = pkgdb.origins([str(path)]).get(str(path), (pkgdb.UNKNOWN, None))
+    except Exception:  # a second opinion failing must not stop the report
+        state, package = pkgdb.UNKNOWN, None
+    if state == pkgdb.FROM_PACKAGE and package:
+        backend = pkgdb.active().name
+        lines.append(f"Package:          installed by {package} ({backend}), unchanged since")
     lines += [
         "",
         "Why I believe this is a false positive:",

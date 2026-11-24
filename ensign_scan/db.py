@@ -46,13 +46,20 @@ def make_engine(db_url: str, decisions: Path | None = None) -> Engine:
         cursor.close()
 
     Base.metadata.create_all(engine)
-    _migrate(engine)
+    # Protected: the decision tables are root's (the views above); this
+    # database's own copies are unused, so they're left for whenever it's
+    # unprotected again, when an engine without views upgrades them.
+    _migrate(engine, decision_tables=decisions is None)
     return engine
 
 
-def _migrate(engine: Engine) -> None:
+def _migrate(engine: Engine, decision_tables: bool = True) -> None:
     """Add columns that create_all() won't add to pre-existing tables,
     then run any one-time data upgrades this database hasn't had yet."""
+    _ensure_column(engine, "files", "threat_engine", "TEXT")
+    if decision_tables:
+        with engine.begin() as conn:
+            upgrade_decision_tables(conn)
     _ensure_column(engine, "files", "mtime_ns", "INTEGER")
     _ensure_column(engine, "files", "ctime_ns", "INTEGER")
     _ensure_column(engine, "files", "sig_version", "INTEGER")
@@ -65,7 +72,7 @@ def _migrate(engine: Engine) -> None:
 # SQLite keeps a free integer in every database file (PRAGMA user_version)
 # for exactly this: recording which one-time upgrades have run. 0 is the
 # value every existing Ensign database has.
-DATA_VERSION = 2
+DATA_VERSION = 3
 
 
 def _upgrade_data(engine: Engine) -> None:
@@ -75,9 +82,70 @@ def _upgrade_data(engine: Engine) -> None:
             _upgrade_to_fd_passing(conn)
         if version < 2:
             _upgrade_to_scanning_credential_files(conn)
+        if version < 3:
+            _upgrade_to_findings(conn)
         if version < DATA_VERSION:
             conn.exec_driver_sql(f"PRAGMA user_version = {DATA_VERSION}")
             conn.commit()
+
+
+# A sweep hit by the YARA pass, as scanner.py words it (with SWEEP_HIT_PREFIX).
+_YARA_SWEEP_HIT = "sweep: % by YARA, %"
+
+
+def _upgrade_to_findings(conn) -> None:
+    """Version 3: findings, and which engine found what (0.10.0).
+
+    Every recorded hit becomes a finding, open or allowed as the file is
+    now. The engine was only ever written into the sweep's result text, so
+    a YARA sweep hit is told apart by its wording; every other hit is
+    ClamAV's. first_seen is the last scan's time: when it was first found
+    wasn't kept before."""
+    conn.exec_driver_sql(
+        "UPDATE files SET threat_engine = 'clamav-yara' "
+        "WHERE scan_status IN ('infected', 'allowed') AND scan_result LIKE ?", (_YARA_SWEEP_HIT,))
+    conn.exec_driver_sql(
+        "INSERT OR IGNORE INTO findings "
+        "(file_id, engine, signature, detail, content_hash, first_seen, last_seen, state) "
+        "SELECT id, COALESCE(threat_engine, 'clamav'), COALESCE(threat_name, 'Unknown'), scan_result, "
+        "file_hash, COALESCE(last_scanned, CURRENT_TIMESTAMP), COALESCE(last_scanned, CURRENT_TIMESTAMP), "
+        "CASE scan_status WHEN 'allowed' THEN 'allowed' ELSE 'open' END "
+        "FROM files WHERE scan_status IN ('infected', 'allowed')")
+
+
+def upgrade_decision_tables(conn) -> bool:
+    """Give allowances and allowed_folders their engine column (0.10.0),
+    in this database's own tables (main), if they don't have it. Returns
+    True if anything changed.
+
+    Every allowance made before was for ClamAV, the only engine there was,
+    and stays exactly that: a hit from another engine is never covered by
+    one. The engine is also part of each table's unique key, which SQLite
+    can't change in place, so each table is rebuilt once, in one
+    transaction: renamed, made again from models.py, copied, dropped.
+
+    Also used on protected decisions files (protect.upgrade_all), which root
+    upgrades the same way. The rebuild stays inside the same file, so it
+    keeps the file's owner, mode and ACL."""
+    changed = False
+    for table in ("allowances", "allowed_folders"):
+        columns = [row[1] for row in conn.exec_driver_sql(f"PRAGMA main.table_info({table})")]
+        if not columns or "engine" in columns:
+            continue   # not in this database (made later by create_all), or already done
+        old = f"{table}_before_engine"
+        conn.exec_driver_sql(f"ALTER TABLE main.{table} RENAME TO {old}")
+        # The renamed table keeps its indexes' names; free them for the new one.
+        for (index,) in conn.exec_driver_sql(
+                "SELECT name FROM main.sqlite_master WHERE type = 'index' AND tbl_name = ? "
+                "AND sql IS NOT NULL", (old,)).fetchall():
+            conn.exec_driver_sql(f'DROP INDEX main."{index}"')
+        Base.metadata.tables[table].create(conn)
+        copied = ", ".join(columns)
+        conn.exec_driver_sql(
+            f"INSERT INTO main.{table} ({copied}, engine) SELECT {copied}, 'clamav' FROM main.{old}")
+        conn.exec_driver_sql(f"DROP TABLE main.{old}")
+        changed = True
+    return changed
 
 
 def _upgrade_to_scanning_credential_files(conn) -> None:
@@ -163,10 +231,12 @@ def _upgrade_to_fd_passing(conn) -> None:
 # can change: protect._check_readable() stops a protected run whose file
 # lacks one, rather than let it fail with "no such column" mid-run.
 def _ensure_column(engine: Engine, table: str, column: str, ddl_type: str) -> None:
+    # main. explicitly: in a protected run, an unqualified name can be one
+    # of the temporary views in front of root's decisions (make_engine).
     with engine.connect() as conn:
-        existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
-        if column not in existing:
-            conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
+        existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA main.table_info({table})")}
+        if existing and column not in existing:
+            conn.exec_driver_sql(f"ALTER TABLE main.{table} ADD COLUMN {column} {ddl_type}")
             conn.commit()
 
 

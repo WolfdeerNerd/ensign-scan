@@ -26,8 +26,8 @@ from rich import get_console, print
 
 from ensign_scan.config import AS_ROOT, HOME, HOSTNAME, Config, ensure_default_config, legacy_notice
 from ensign_scan import (
-    allowlist, bigrules, diagnostics, explanations, fpreport, logsetup, migrate, notify, persistence, pkgdb,
-    logo, protect, secrets,
+    allowlist, bigrules, diagnostics, evidence, explanations, findings, fpreport, logo, logsetup, migrate, notify,
+    persistence, pkgdb, protect, secrets,
 )
 from ensign_scan.fsutil import print_unwrapped, shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
@@ -233,6 +233,13 @@ def _main() -> int:
         return 0
     if args.protect or args.unprotect:
         return _run_protect(args)
+    if AS_ROOT:
+        # A protected user's runs stop on a decisions file made by an older
+        # Ensign (they can't change it): any sudo run brings it up to date.
+        upgraded = protect.upgrade_all()
+        if upgraded:
+            print(f"[ensign] Upgraded the protected decisions of {len(upgraded)} "
+                  f"user{'s' if len(upgraded) != 1 else ''} for this version of Ensign.")
     if args.protected and not AS_ROOT:
         print("[bold red]✗[/bold red] --protected changes your protected decisions, which only root "
               "can write. Run it with sudo: sudo ensign-scan --protected ...")
@@ -615,6 +622,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
     # Before the scan: a file whose allowance is gone counts as infected
     # again, and so gets scanned again (allowlist.reconcile).
     regained = allowlist.reconcile(scanner.engine)
+    findings.tidy(scanner.engine)
     if regained:
         print(f"[yellow]! {regained} file{'s' if regained != 1 else ''} recorded as allowed "
               f"{'have' if regained != 1 else 'has'} no allowance any more, so "
@@ -650,6 +658,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
     unreadable_report(unreadable)
     integrity_report(scanner.integrity_changes)
     unsaved_infected = [u for u in scanner.unsaved if u.status == "infected"]
+    evidence.refresh(scanner.engine)   # second opinions on what's flagged, for the report below
     infected = list_infected(scanner.engine, paths=args.targets or None,
                              more_elsewhere=bool(unsaved_infected))
     format_mismatch_report(scanner.engine, paths=args.targets or None)
