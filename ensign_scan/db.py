@@ -66,6 +66,7 @@ def _migrate(engine: Engine, decision_tables: bool = True) -> None:
     _ensure_column(engine, "directories", "mtime_ns", "INTEGER")
     _ensure_column(engine, "directories", "ctime_ns", "INTEGER")
     _ensure_column(engine, "files", "format_mismatch", "TEXT")
+    _ensure_column(engine, "files", "last_error", "TEXT")
     _upgrade_data(engine)
 
 

@@ -1119,7 +1119,7 @@ class Scanner:
             stored = ""
         try:
             previous_hash = self._upsert_file(path, st, stored, outcome,
-                                              mismatch=mismatch, checked=checked)
+                                              mismatch=mismatch, checked=checked, actual=digest)
         except Exception as exc:
             self._remember_unsaved(path, outcome, exc)
             return None, "failed"
@@ -1139,8 +1139,11 @@ class Scanner:
         symbol = _STATUS_SYMBOLS.get(status, "?")
         if outcome is not None and outcome.status == ScanStatus.ALLOWED:
             symbol = f"{symbol} [dim](allowed by you)[/dim]"
+        said = status
+        if status == ScanStatus.ERROR.value and self._kept_on_error(path):
+            said = f"{status}; [bold red]its earlier hit stands[/bold red]"
         shown_hash = f"{stored[:16]}…" if stored else f"{'hash not kept':<17}"
-        print(f"{symbol} {shown(path.name):.<50} {shown_hash} {status}")
+        print(f"{symbol} {shown(path.name):.<50} {shown_hash} {said}")
         return digest, status
 
     # ------------------------------------------------------------------
@@ -1638,12 +1641,19 @@ class Scanner:
             return None, "failed"
         status = ScanStatus.ERROR.value
         reason = exc.strerror or type(exc).__name__
-        print(f"{_STATUS_SYMBOLS[status]} {shown(path.name):.<50} {'not read':<17} {status} ({shown(reason)})")
+        kept = "; [bold red]its earlier hit stands[/bold red]" if self._kept_on_error(path) else ""
+        print(f"{_STATUS_SYMBOLS[status]} {shown(path.name):.<50} {'not read':<17} {status} "
+              f"({shown(reason)}){kept}")
         return None, status
+
+    def _kept_on_error(self, path: Path) -> bool:
+        with Session(self.engine) as session:
+            row = session.query(FileRecord.last_error).filter(FileRecord.filepath == str(path)).first()
+        return row is not None and row[0] is not None
 
     def _upsert_file(
         self, path: Path, st: os.stat_result, digest: str | None, outcome: ScanOutcome | None,
-        mismatch: str | None = None, checked: bool = False,
+        mismatch: str | None = None, checked: bool = False, actual: str | None = None,
     ) -> str | None:
         """Insert or update the file's row. Returns the hash the row held
         before this update, or None if the file wasn't in the database.
@@ -1657,7 +1667,18 @@ class Scanner:
         otherwise the new size and times would sit beside the old "clean",
         and every later scan would take the file for unchanged and checked.
         A credential file has no stored hash to compare (digest ""), so for
-        it a changed size, mtime or ctime counts as changed content."""
+        it a changed size, mtime or ctime counts as changed content.
+
+        actual: the hash worked out in memory, when `digest` is "" because
+        a credential file's hash isn't kept (_finish). Used to tell whether
+        the content changed.
+
+        A flagged file (infected or allowed) whose check ends in an error
+        keeps its verdict while its content is unchanged (or couldn't be
+        read to tell): "couldn't check" never counts as "found nothing".
+        The error is kept beside it in last_error, and the next run checks
+        it again."""
+        actual = actual if actual is not None else digest
         with Session(self.engine) as session:
             try:
                 record = session.query(FileRecord).filter(
@@ -1676,7 +1697,17 @@ class Scanner:
                 record.ctime_ns = st.st_ctime_ns
                 if checked:   # see _finish
                     record.format_mismatch = mismatch
-                if outcome is not None:
+                keep = (outcome is not None and outcome.status == ScanStatus.ERROR
+                        and previous_hash is not None
+                        and record.scan_status in (ScanStatus.INFECTED.value, ScanStatus.ALLOWED.value)
+                        and (actual is None or actual == previous_hash))
+                if keep:
+                    record.file_hash = previous_hash   # never the "" of a credential file
+                    record.last_error = outcome.raw
+                    log.warning("could not check %s again (%s); its earlier verdict stands",
+                                path, outcome.raw)
+                elif outcome is not None:
+                    record.last_error = None
                     record.scan_status = outcome.status.value
                     record.scan_result = outcome.raw
                     record.threat_name = outcome.threat_name
@@ -1687,7 +1718,7 @@ class Scanner:
                     if outcome.status in (ScanStatus.CLEAN, ScanStatus.INFECTED, ScanStatus.ALLOWED):
                         record.sig_version = self._sig_version
                     session.flush()   # a new record needs its id for its findings
-                    if previous_hash is not None and digest is not None and digest != previous_hash:
+                    if previous_hash is not None and actual is not None and actual != previous_hash:
                         # Its findings were about other content, whatever this
                         # scan says (an error leaves no finding to replace them).
                         findings.content_changed(session, record.id)

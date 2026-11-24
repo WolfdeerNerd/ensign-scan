@@ -57,6 +57,7 @@ class FakeClamd:
     how a second engine's hit reaches the scanner."""
     def __init__(self):
         self.version = 27000
+        self.down = False   # every scan errors: clamd stopped answering
 
     def daemon_uid(self):
         return 990   # not your uid: Ensign refuses a clamd running as you
@@ -72,6 +73,8 @@ class FakeClamd:
 
     def scan_fd(self, fd, label=""):
         data = os.pread(fd, 1 << 20, 0)
+        if self.down:
+            return ScanOutcome(ScanStatus.ERROR, f"{label}: clamd stopped answering")
         if b"BROKEN" in data:
             return ScanOutcome(ScanStatus.ERROR, f"{label}: clamd stopped answering")
         if b"NONAME" in data:   # a hit ClamAV gave no signature name for
@@ -242,6 +245,33 @@ with tempfile.TemporaryDirectory() as d:
     _, text = quiet(reports.list_infected, engine)
     assert "\x1b" not in text and "Found by:" in text, repr(text)
     # A deleted file's findings are tidied away with its record.
+    # --- a check that errors never clears a hit (the content is unchanged) -------------------
+    ssh = tree / ".ssh"
+    ssh.mkdir()
+    (ssh / "id_ed25519").write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nEVIL\n")
+    scan()
+    key_record = record(engine, "id_ed25519")
+    assert key_record.scan_status == "infected" and key_record.file_hash, \
+        "an infected credential file keeps its hash"
+    clamd.down = True
+    _, printed = quiet(scan().rescan_infected)
+    for name in ("asset.dat", "id_ed25519", "yara.dat"):
+        kept = record(engine, name)
+        assert kept.scan_status == "infected" and kept.last_error, (name, kept.scan_status)
+    assert record(engine, "id_ed25519").file_hash == key_record.file_hash, \
+        "the credential file's hash isn't wiped by the error"
+    assert ("clamav", "Test.Evil", "open") in finding_states(engine, "asset.dat")
+    assert "its earlier hit stands" in printed, printed
+    _, text = quiet(reports.list_infected, engine)
+    assert "Last check: Couldn't be checked again" in text, text
+    clamd.down = False
+    scan()
+    assert record(engine, "asset.dat").last_error is None, "cleared by the next answer"
+    assert record(engine, "asset.dat").scan_status == "infected"
+    (ssh / "id_ed25519").unlink()
+    ssh.rmdir()
+    print("an error keeps the earlier verdict test passed ✓")
+
     # --purge-missing deletes them with the record, at once: SQLite can give
     # the deleted record's id to the next new file.
     (tree / "yara.dat").unlink()
