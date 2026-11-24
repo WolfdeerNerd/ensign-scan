@@ -446,7 +446,7 @@ def clamd_is_safe(scanner: Scanner) -> bool:
     try:
         scanner.prepare_clamd()
     except ClamdUnsafe as exc:
-        print(f"[red]✗ {exc}[/red]")
+        print(f"[red]✗ {shown(str(exc))}[/red]")
         return False
     return True
 

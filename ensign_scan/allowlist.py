@@ -111,13 +111,13 @@ def _candidate(engine: Engine, path: str) -> _Candidate | str:
         if record is None:
             if _PROTECTED:
                 return ("Root has no record of this file. Scan it with sudo first: "
-                        "sudo ensign-scan " + shlex.quote(path))
+                        "sudo ensign-scan " + shown(shlex.quote(path)))
             return "Ensign has no record of this file. Scan it first."
         if record.scan_status == ScanStatus.ALLOWED.value and not _PROTECTED:
             return "This file is already allowed."
         if record.scan_status not in _flagged_statuses():
             return (f"Only files ClamAV flagged can be allowed; this one is recorded as "
-                    f"'{record.scan_status}'" + (" in root's last scan of it." if _PROTECTED else "."))
+                    f"'{shown(record.scan_status)}'" + (" in root's last scan of it." if _PROTECTED else "."))
         stored, threat = record.file_hash, record.threat_name or "Unknown"
     # Hash it again now: only the exact bytes that were flagged can be
     # allowed, never whatever the file has become since.
@@ -195,8 +195,15 @@ def unallow(engine: Engine, path: str) -> bool:
     with Session(engine) as session:
         record = session.query(FileRecord).filter(FileRecord.filepath == path).first()
         pairs = set()
-        if record is not None and record.scan_status == ScanStatus.ALLOWED.value and not _PROTECTED:
-            pairs.add((record.file_hash, record.threat_name))
+        if record is not None:
+            # "Unknown" when ClamAV named no signature: what --allow saved.
+            pair = (record.file_hash, record.threat_name or "Unknown")
+            if not _PROTECTED and record.scan_status == ScanStatus.ALLOWED.value:
+                pairs.add(pair)
+            elif _PROTECTED and pair in allowed_pairs(engine):
+                # Root's record says what content is at `path`; the allowance
+                # may have been made for a copy of it somewhere else.
+                pairs.add(pair)
         for row in session.query(Allowance).filter(Allowance.filepath == path):
             pairs.add((row.file_hash, row.threat_name))
         if not pairs:
@@ -207,11 +214,14 @@ def unallow(engine: Engine, path: str) -> bool:
             session.query(Allowance).filter(
                 Allowance.file_hash == digest, Allowance.threat_name == threat).delete()
             if not _PROTECTED:
+                same_threat = FileRecord.threat_name == threat
+                if threat == "Unknown":   # saved for a record that named no signature
+                    same_threat = or_(same_threat, FileRecord.threat_name.is_(None))
                 flagged += session.query(FileRecord).filter(
                     FileRecord.file_hash == digest,
-                    FileRecord.threat_name == threat,
+                    same_threat,
                     FileRecord.scan_status == ScanStatus.ALLOWED.value,
-                ).update({FileRecord.scan_status: ScanStatus.INFECTED.value})
+                ).update({FileRecord.scan_status: ScanStatus.INFECTED.value}, synchronize_session=False)
         session.commit()
     if _PROTECTED:
         print_unwrapped(f"[yellow]No longer allowed:[/yellow] {shown(path)}. Your next run flags "

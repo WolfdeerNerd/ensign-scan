@@ -239,6 +239,13 @@ assert "1 file recorded as allowed has no allowance any more" in out, out
 with Session(recon.engine) as s:
     assert s.query(FileRecord).filter(FileRecord.filename == "gone").one().scan_status == "allowed", \
         "the listings didn't write"
+
+# --unallow of a file ClamAV named no signature for: --allow saved "Unknown".
+ok, out = quiet(allowlist.unallow, recon.engine, "/srv/unknown")
+assert ok and "1 file flagged as infected again" in out, out
+with Session(recon.engine) as s:
+    assert s.query(FileRecord).filter(FileRecord.filename == "unknown").one().scan_status == "infected"
+    assert s.query(allowlist.Allowance).filter(allowlist.Allowance.file_hash == "h2").count() == 0
 recon.engine.dispose()
 print("reconcile test passed ✓")
 
@@ -481,6 +488,19 @@ else:
         return sorted(allowlist.allowed_pairs(make_engine(f"sqlite:///{own}", decisions=found.decisions)))
     ok, message = as_user(users_view)
     assert ok and digest in message, message
+
+    # Unallowing a copy: root's record says what content is at that path, so
+    # the allowance is found though it was made for the original elsewhere.
+    copy = tree / "asset-copy.dat"
+    copy.write_bytes((tree / "asset.dat").read_bytes())
+    quiet(Scanner(root_cfg, clamd=FakeClamd()).scan_tree, tree)
+    ok, out = quiet(allowlist.unallow, writer, str(copy))
+    assert ok and "No longer allowed" in out, out
+    assert allowlist.allowed_pairs(writer) == set(), "the copy's allowance (made for asset.dat) is gone"
+    copy.unlink()
+    quiet(Scanner(root_cfg, clamd=FakeClamd()).scan_tree, tree)
+    quiet(allowlist.allow, writer, str(tree / "asset.dat"), yes)
+    before = root_records()   # root's own rescans above changed them; nothing below may
 
     # A changed file isn't the content root saw flagged.
     saved_forged = (tree / "forged.dat").read_bytes()

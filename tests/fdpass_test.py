@@ -331,6 +331,13 @@ try:
     raise AssertionError("the in-process fake clamd runs as you and must be refused")
 except ClamdRunsAsYou:
     pass
+# The message's command is meant to be pasted, and the socket path comes
+# from a config anything running as you can write: it must be shell-quoted.
+import shlex  # noqa: E402
+
+from ensign_scan.scanner import own_clamd_message  # noqa: E402
+hostile = "/tmp/x'; touch /tmp/pwned; '"
+assert f"grep -F -- {shlex.quote(hostile)}," in own_clamd_message(1000, hostile)
 print("own-user clamd refusal test passed ✓")
 
 # From here on the in-process fake stands in for a real clamd, which runs

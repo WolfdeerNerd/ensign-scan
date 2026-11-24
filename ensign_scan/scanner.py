@@ -36,6 +36,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import shlex
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -101,8 +102,10 @@ def own_clamd_message(uid: int, socket_path: str) -> str:
         f"(uid {uid}). A real clamd runs as its own account ('clamav'), so this is "
         "most likely something else: a program running as you could start one that "
         "reports every file clean. Ensign won't send it any files. See what owns the "
-        f"socket with: ss -xlp | grep -F '{socket_path}', and check clamd_socket "
-        "in your config."
+        # Quoted for the shell: the path comes from a config that, unprotected,
+        # anything running as you can write, and this line is meant to be pasted.
+        f"socket with: ss -xlp | grep -F -- {shlex.quote(socket_path)}, and check "
+        "clamd_socket in your config."
     )
 
 
