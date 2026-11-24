@@ -206,6 +206,63 @@ try:
         assert statuses(engine)["deep.img"][0] == "infected"
         print("unfinished re-sweep keeps the hit test passed ✓")
 
+        # --- a YARA pass hit: kept while the YARA pass can't say otherwise ---------------------
+        from types import SimpleNamespace
+
+        from ensign_scan.models import ENGINE_CLAMAV_YARA
+        yara_answer = {"value": (("Test.Yara", 4096), None)}
+
+        class NoWorker:
+            def __init__(self, *args):
+                pass
+
+            def close(self, kill=False):
+                pass
+
+        real_yara = (Scanner._load_big_rules, Scanner._yara_one, scanner_mod.yarachild.Worker)
+
+        def with_yara(self):
+            self.big_rules = SimpleNamespace(compiled=None, count=1)
+
+        def yara_one(self, fd, path, size):
+            return yara_answer["value"] if path.name == "yhit.img" else (None, None)
+        Scanner._load_big_rules, Scanner._yara_one = with_yara, yara_one
+        scanner_mod.yarachild.Worker = NoWorker
+        try:
+            (tree / "yhit.img").write_bytes(b"\0" * size)
+            scan(sweep=True)
+            st = statuses(engine)
+            assert st["yhit.img"][:2] == ("infected", "Test.Yara"), st["yhit.img"]
+            with Session(engine) as session:
+                assert session.query(FileRecord).filter(
+                    FileRecord.filename == "yhit.img").one().threat_engine == ENGINE_CLAMAV_YARA
+
+            # The YARA pass times out: the hit stands, and it's stamped, so a
+            # pass that will likely time out again isn't run every time.
+            clamd.version += 1
+            yara_answer["value"] = (None, "the YARA pass timed out")
+            scan(sweep=True)
+            assert statuses(engine)["yhit.img"][0] == "infected", statuses(engine)["yhit.img"]
+            clamd.slices.clear()
+            scan(sweep=True)
+            assert not clamd.slices, "a timed-out YARA pass isn't retried every run"
+
+            # No YARA pass this run: the hit stands, and the next run tries again.
+            clamd.version += 1
+            Scanner._load_big_rules = lambda self: None
+            scan(sweep=True)
+            assert statuses(engine)["yhit.img"][0] == "infected"
+            Scanner._load_big_rules = with_yara
+
+            # The YARA pass finishes and finds nothing: now the hit is cleared.
+            yara_answer["value"] = (None, None)
+            scan(sweep=True)
+            assert statuses(engine)["yhit.img"][0] == "incomplete", statuses(engine)["yhit.img"]
+        finally:
+            Scanner._load_big_rules, Scanner._yara_one, scanner_mod.yarachild.Worker = real_yara
+            (tree / "yhit.img").unlink()
+        print("YARA pass hit kept test passed ✓")
+
         # --- newer signatures no longer match: back to "not fully scanned" -------------------
         clamd.version += 1
         clamd.fixed = True

@@ -1513,27 +1513,41 @@ class Scanner:
         return True
 
     def _earlier_hit_stands(self, path: Path, failed: list[str], yara_note: str | None) -> bool:
-        """A sweep that found nothing, but didn't finish, never clears an
-        earlier hit: some slices failed, the YARA pass didn't finish, or the
-        hit was the YARA pass's and there's no YARA pass this time. The
-        record is left as it was, so the next run sweeps it again."""
+        """A sweep that found nothing, but didn't finish the part that made
+        an earlier hit, never clears it. For a ClamAV hit, that's the
+        slices: if any failed, the hit stands and the next run sweeps the
+        file again (a failed slice is usually clamd being away for a
+        moment). For a hit by the YARA pass, it's the YARA pass: if it
+        didn't finish, or there's none this run, the hit stands. A YARA pass
+        that timed out will likely time out again, so that verdict is
+        stamped as checked against these signatures, and re-swept on the
+        usual schedule rather than every run."""
         with Session(self.engine) as session:
-            row = session.query(FileRecord.scan_status, FileRecord.threat_engine).filter(
-                FileRecord.filepath == str(path)).first()
-        if row is None or row[0] not in (ScanStatus.INFECTED.value, ScanStatus.ALLOWED.value):
-            return False
-        why = None
-        if failed:
-            why = f"{len(failed)} slice{'s' if len(failed) != 1 else ''} couldn't be swept"
-        elif yara_note:
-            why = "the YARA pass didn't finish"
-        elif row[1] == ENGINE_CLAMAV_YARA and self._yara_worker is None:
-            why = "its earlier hit was the YARA pass's, and there's no YARA pass this run"
-        if why is None:
-            return False
+            record = session.query(FileRecord).filter(FileRecord.filepath == str(path)).first()
+            if record is None or record.scan_status not in (ScanStatus.INFECTED.value,
+                                                            ScanStatus.ALLOWED.value):
+                return False
+            again = True
+            if record.threat_engine == ENGINE_CLAMAV_YARA:
+                if yara_note:
+                    why, again = "the YARA pass, which found it before, didn't finish", False
+                elif self._yara_worker is None:
+                    why = "the YARA pass found it before, and there's no YARA pass this run"
+                else:
+                    return False   # the YARA pass finished and found nothing
+            elif failed:
+                why = f"{len(failed)} slice{'s' if len(failed) != 1 else ''} couldn't be swept"
+            else:
+                return False       # every slice was swept, and ClamAV found nothing
+            record.last_error = f"sweep didn't finish: {why}"
+            if not again:
+                record.sig_version = self._sig_version
+                record.last_scanned = utcnow()
+            session.commit()
+        when = "the next run sweeps it again" if again else "it's swept again on the usual schedule"
         log.warning("sweep of %s didn't finish (%s); its earlier hit stands", path, why)
         print(f"[yellow]~ {shown(path.name)}: the sweep found nothing, but {why}. Its earlier hit "
-              f"stands, and the next run sweeps it again.[/yellow]")
+              f"stands, and {when}.[/yellow]")
         return True
 
     def _yara_one(self, fd: int, path: Path, size: int) -> tuple[tuple[str, int | None] | None, str | None]:
