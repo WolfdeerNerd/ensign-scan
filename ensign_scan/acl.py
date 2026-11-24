@@ -16,8 +16,10 @@ owner from USER_OBJ, group bits from MASK (the most any named entry or
 the group can get), others from OTHER. This is what `setfacl` writes;
 doing it here means no dependency on the `acl` package.
 
-Only named-*user* entries are added or removed. Everything else (the owner,
-group and other entries, any named groups) is kept as it is.
+grant() and revoke() add or remove one named-user entry and keep the rest
+(the owner, group and other entries, any named groups). set_only() instead
+makes the ACL exactly the owner plus one user, which is what protected mode
+uses for its own files, so nothing inherited or set up earlier comes along.
 """
 from __future__ import annotations
 
