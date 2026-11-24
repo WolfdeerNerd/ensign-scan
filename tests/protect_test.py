@@ -264,6 +264,13 @@ try:
     raise AssertionError("a decisions file missing a column must stop the run")
 except protect.Unsafe as exc:
     assert "older Ensign" in str(exc) and "kind" in str(exc), exc
+    assert "report it as a bug" in str(exc) and "sudo" not in str(exc), \
+        "a column this version can't add: don't promise that sudo fixes it"
+with sqlite3.connect(old) as c:
+    assert protect.missing_columns(c) == {"persistence_entries": ["kind"]}
+    assert not protect.upgradable(protect.missing_columns(c))
+    assert protect.upgradable({"allowances": ["engine"], "allowed_folders": ["engine"]})
+c.close()
 protect._check_readable(protect.Protected(cfg_file, decisions))   # the current one is fine
 print("old decisions file test passed ✓")
 
@@ -466,6 +473,15 @@ else:
     c.close()
     ok, message = as_user(protect.status)
     assert not ok and "older Ensign" in message and "sudo ensign-scan" in message, message
+    # If the upgrade at the start of a sudo run failed, --protected refuses
+    # to write to it rather than failing halfway.
+    from ensign_scan import cli as cli_module
+    os.environ["SUDO_UID"] = str(uid)
+    try:
+        refused, text = quiet(cli_module._protected_writer, None)
+    finally:
+        del os.environ["SUDO_UID"]
+    assert refused is None and "couldn't be upgraded" in text, text
     assert protect.upgrade_all() == [uid]
     assert protect.upgrade_all() == [], "already upgraded"
     st = found.decisions.stat()

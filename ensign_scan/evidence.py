@@ -49,7 +49,8 @@ def refresh(engine: Engine) -> int:
         return 0
     with Session(engine) as session:
         rows = session.query(FileRecord.id, FileRecord.filepath, FileRecord.file_hash).join(
-            Finding, Finding.file_id == FileRecord.id).filter(Finding.state == OPEN).distinct().all()
+            Finding, Finding.file_id == FileRecord.id).filter(
+            Finding.state == OPEN, Finding.content_hash == FileRecord.file_hash).distinct().all()
         if not rows:
             return 0
         try:

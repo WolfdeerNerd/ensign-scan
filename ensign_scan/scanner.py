@@ -1659,6 +1659,10 @@ class Scanner:
                     if outcome.status in (ScanStatus.CLEAN, ScanStatus.INFECTED, ScanStatus.ALLOWED):
                         record.sig_version = self._sig_version
                     session.flush()   # a new record needs its id for its findings
+                    if previous_hash is not None and digest is not None and digest != previous_hash:
+                        # Its findings were about other content, whatever this
+                        # scan says (an error leaves no finding to replace them).
+                        findings.content_changed(session, record.id)
                     findings.record_outcome(session, record, outcome)
                 elif previous_hash is not None and digest is not None and (
                         digest != previous_hash
