@@ -1428,6 +1428,7 @@ class Scanner:
                   f"in {len(ranges)} slices[/dim]")
             found: list[tuple[str, int, int]] = []    # (signature, start, end)
             notes: list[str] = []                     # heuristic hits, errors
+            failed: list[str] = []                    # slices that couldn't be swept
             stop = threading.Event()
 
             def scan_slice(span: tuple[int, int]) -> None:
@@ -1455,6 +1456,7 @@ class Scanner:
                         stop.set()  # one real hit decides it
                 elif outcome.status == ScanStatus.ERROR:
                     notes.append(f"bytes {start}-{end} couldn't be swept ({outcome.raw[-80:]})")
+                    failed.append(f"bytes {start}-{end}")
 
             with ThreadPoolExecutor(max_workers=in_flight) as pool:
                 list(pool.map(scan_slice, ranges))
@@ -1477,6 +1479,8 @@ class Scanner:
                    f"this ClamAV signature. ClamAV can't scan this file whole.")
             self._finish(path, st, digest, ScanOutcome(ScanStatus.INFECTED, raw, name, ENGINE_CLAMAV_YARA))
             return True
+        if self._earlier_hit_stands(path, failed, yara_note):
+            return False
         if yara_note:
             notes.append(yara_note)
         if self.big_rules is not None and not yara_note:
@@ -1503,6 +1507,30 @@ class Scanner:
                 findings.clamav_found_nothing(session, row[0])
             session.commit()
         print(f"{_STATUS_SYMBOLS[ScanStatus.INCOMPLETE.value]} {shown(path.name):.<50} swept, nothing found")
+        return True
+
+    def _earlier_hit_stands(self, path: Path, failed: list[str], yara_note: str | None) -> bool:
+        """A sweep that found nothing, but didn't finish, never clears an
+        earlier hit: some slices failed, the YARA pass didn't finish, or the
+        hit was the YARA pass's and there's no YARA pass this time. The
+        record is left as it was, so the next run sweeps it again."""
+        with Session(self.engine) as session:
+            row = session.query(FileRecord.scan_status, FileRecord.threat_engine).filter(
+                FileRecord.filepath == str(path)).first()
+        if row is None or row[0] not in (ScanStatus.INFECTED.value, ScanStatus.ALLOWED.value):
+            return False
+        why = None
+        if failed:
+            why = f"{len(failed)} slice{'s' if len(failed) != 1 else ''} couldn't be swept"
+        elif yara_note:
+            why = "the YARA pass didn't finish"
+        elif row[1] == ENGINE_CLAMAV_YARA and self._yara_worker is None:
+            why = "its earlier hit was the YARA pass's, and there's no YARA pass this run"
+        if why is None:
+            return False
+        log.warning("sweep of %s didn't finish (%s); its earlier hit stands", path, why)
+        print(f"[yellow]~ {shown(path.name)}: the sweep found nothing, but {why}. Its earlier hit "
+              f"stands, and the next run sweeps it again.[/yellow]")
         return True
 
     def _yara_one(self, fd: int, path: Path, size: int) -> tuple[tuple[str, int | None] | None, str | None]:
@@ -1699,6 +1727,11 @@ class Scanner:
             try:
                 for chunk_start in range(0, len(missing), 500):
                     chunk = missing[chunk_start:chunk_start + 500]
+                    ids = [row[0] for row in session.query(FileRecord.id).filter(
+                        FileRecord.filepath.in_(chunk))]
+                    # Their findings and evidence go with them, now: SQLite can
+                    # give a deleted record's id to the next new file.
+                    findings.forget(session, ids)
                     session.query(FileRecord).filter(
                         FileRecord.filepath.in_(chunk)
                     ).delete(synchronize_session=False)

@@ -79,6 +79,15 @@ def _gone(session: Session, file_id: int, engines, keep: int | None = None) -> N
     query.update({Finding.state: GONE}, synchronize_session=False)
 
 
+def forget(session: Session, file_ids: list[int]) -> None:
+    """Delete the findings and evidence of records about to be deleted.
+    The caller commits."""
+    for start in range(0, len(file_ids), 500):   # see allowlist.reconcile
+        chunk = file_ids[start:start + 500]
+        for table in (Finding, Evidence):
+            session.query(table).filter(table.file_id.in_(chunk)).delete(synchronize_session=False)
+
+
 def tidy(engine: Engine) -> None:
     """At the start of a run: drop findings and evidence of files no longer
     recorded, and match each finding's state to your allowances."""

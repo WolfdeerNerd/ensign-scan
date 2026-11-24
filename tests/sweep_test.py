@@ -65,6 +65,7 @@ class FakeClamd:
     def __init__(self):
         self.version = 27000
         self.fixed = False
+        self.broken = False   # slices come back as errors (clamd stopped answering)
         self.slices: list[int] = []
 
     def daemon_uid(self):
@@ -89,6 +90,8 @@ class FakeClamd:
         data = os.pread(fd, 1 << 22, 0)
         if "[bytes " in label:
             self.slices.append(len(data))
+            if self.broken:
+                return ScanOutcome(ScanStatus.ERROR, f"{label}: clamd stopped answering")
         if b"EVIL" in data and not self.fixed:
             return ScanOutcome(ScanStatus.INFECTED, f"{label}: Test.Evil FOUND", "Test.Evil")
         if b"HEUR" in data:
@@ -183,6 +186,25 @@ try:
         assert st["straddle.img"][0] == "allowed", st["straddle.img"]
         assert st["deep.img"][0] == "infected"
         print("allowed sweep hit test passed ✓")
+
+        # --- a re-sweep that couldn't finish never clears an earlier hit -----------------------
+        clamd.version += 1
+        clamd.broken = True
+        scan(sweep=True)
+        st = statuses(engine)
+        assert st["deep.img"][:2] == ("infected", "Test.Evil"), f"failed slices cleared a hit: {st['deep.img']}"
+        assert st["straddle.img"][0] == "allowed", st["straddle.img"]
+        from ensign_scan.models import Finding
+        with Session(engine) as session:
+            states = {f.state for f in session.query(Finding).join(
+                FileRecord, FileRecord.id == Finding.file_id).filter(FileRecord.filename == "deep.img")}
+        assert states == {"open"}, states
+        clamd.broken = False
+        clamd.slices.clear()
+        scan(sweep=True)
+        assert clamd.slices, "left due, so the next run sweeps it again"
+        assert statuses(engine)["deep.img"][0] == "infected"
+        print("unfinished re-sweep keeps the hit test passed ✓")
 
         # --- newer signatures no longer match: back to "not fully scanned" -------------------
         clamd.version += 1
