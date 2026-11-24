@@ -120,7 +120,7 @@ Ensign makes no network connections. It talks to clamd over a local Unix socket 
 | `gdbus` | After an infected-files alert | Closes that notification after its timeout |
 | `pgrep` | When sending an infected-files alert | Checks whether a Steam game is running (see Alerts) |
 
-Ensign never changes permissions, and never asks you to. It also never deletes, quarantines or edits a file: it reports.
+Ensign never changes permissions on your files, and never asks you to. It also never deletes, quarantines or edits a file: it reports. The only permissions it sets are on its own files, when you run `sudo ensign-scan --protect` (see Protected mode).
 
 ### What Ensign can't see
 

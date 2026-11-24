@@ -7,7 +7,7 @@ Thanks for wanting to help. Ensign is a small project run by one person, so revi
 Every change has to fit the four rules in the [roadmap](ROADMAP.md#what-wont-change):
 
 - **Everything stays local.** No file, hash or result leaves the machine.
-- **Ensign only advises.** It never changes permissions, config files or anything else on the system.
+- **Ensign only advises.** It never changes permissions, config files or anything else on the system. The one thing it changes is its own files: its database, its logs, and, with `sudo ensign-scan --protect`, root's copies of the user's config and decisions.
 - **Fewer false positives over wider coverage.**
 - **Never "clean" without a real scan.**
 
