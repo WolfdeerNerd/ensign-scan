@@ -115,7 +115,7 @@ if os.geteuid() != 0:
             body = json.loads(saved[0].read_text())
             rows = next(iter(body["databases"].values()))["allowances"]
             assert rows[0]["threat_name"] == "Test.Evil" and rows[0]["engine"] == "clamav", rows
-            assert "To remove the program itself" in text and "ClamAV is left installed" in text, text
+            assert "To remove the program itself" in text and "ClamAV isn't part of Ensign" in text, text
             print("uninstall as you test passed ✓")
         finally:
             if real_home is not None:

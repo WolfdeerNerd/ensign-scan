@@ -89,7 +89,7 @@ This deletes everything Ensign made, yours and root's:
 
 It lists every path and its size first, offers to save your decisions (allowances, allowed folders, acknowledged startup entries) to a JSON file in your home, and goes ahead only when you type `uninstall`. `--yes` doesn't skip that, and it refuses without a terminal. It also refuses while a run is going. Under `sudo`, your files are deleted by a process running as you, never as root, so a symlink in your home can't turn it against anything else. Without `sudo`, only your own files go, and it says what of root's is left.
 
-What stays, and is only pointed out: the program itself (the end of the output says how to remove it, for the way it was installed: `pipx uninstall ensign-scan`, a venv, a checkout, or a package), ClamAV, which other programs may use, and any timer, service or cron job you set up to run Ensign. The saved decisions file can't be imported yet; it's there to look up what you allowed.
+What stays, and is only pointed out: the program itself (the end of the output says how to remove it, for the way it was installed: `pipx uninstall ensign-scan`, a venv, a checkout, or a package), ClamAV, which you installed separately (Ensign never installs it; the output says how to remove it if you only had it for Ensign), and any timer, service or cron job you set up to run Ensign. The saved decisions file can't be imported yet; it's there to look up what you allowed.
 
 ## Requirements
 

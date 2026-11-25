@@ -21,8 +21,8 @@ following it would delete whatever it points to.
 What stays, and is only pointed out (Ensign changes only its own files):
 the program itself (its removal depends on how it was installed, and a
 program deleting its own running install is fragile, so the command is
-printed instead), ClamAV, and any timer, service or cron job you set up to
-run Ensign.
+printed instead), ClamAV, which you installed separately (Ensign never
+installs it), and any timer, service or cron job you set up to run Ensign.
 
 Before deleting, you can save your decisions (allowances, allowed folders,
 acknowledged startup entries) to a JSON file in your home, to look up or
@@ -417,10 +417,10 @@ def removal_hints() -> list[str]:
             hints.append(f"Installed by the package {name}: {command or 'remove it with your package manager'}")
         else:
             hints.append(f"Installed with pip at {here.parent}: pip uninstall ensign-scan")
-    hints.append("ClamAV is left installed: other programs may use it. If nothing else needs it, "
-                 "stop its services and remove it with your package manager (on Arch: "
-                 "sudo systemctl disable --now clamav-daemon clamav-freshclam, then "
-                 "sudo pacman -Rns clamav).")
+    hints.append("ClamAV isn't part of Ensign (you installed it separately), so it's untouched. "
+                 "If you only installed it for Ensign, you can stop and remove it with your "
+                 "package manager (on Arch: sudo systemctl disable --now clamav-daemon "
+                 "clamav-freshclam, then sudo pacman -Rns clamav).")
     return hints
 
 
