@@ -9,7 +9,7 @@ Want something that isn't here? [Open a feature request](https://github.com/Wolf
 Every feature has to fit these criteria:
 
 - **Everything stays local.** No file, hash or result leaves your machine. Ensign never uploads anything or looks anything up online.
-- **Ensign only advises.** It never changes permissions, config files or anything else on your system. It tells you what it found and what you could do. The one thing it changes is its own files: its database, its logs, and, when you ask with `sudo ensign-scan --protect`, root's copies of your config and decisions.
+- **Ensign only advises.** It never changes permissions, config files or anything else on your system. It tells you what it found and what you could do. The one thing it changes is its own files: its database, its logs, and, when you ask with `sudo ensign-scan --protect`, root's copies of your config and decisions. With `--uninstall`, it deletes them, and only them.
 - **Fewer false positives over wider coverage.** A warning should mean something. Ensign would rather miss a borderline case than cry wolf.
 - **Never "clean" without a real scan.** A file that couldn't be scanned fully is reported as such, never as clean.
 
