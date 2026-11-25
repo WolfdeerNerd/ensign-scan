@@ -127,12 +127,16 @@ PAIRS = [
     (["unallow-folder", "@T", "--signature", SIGNATURE], ["--unallow-folder", "@T", "--signature", SIGNATURE]),
     (["persistence"], ["--persistence"]),
     (["acknowledge", "--all", "--yes"], ["--acknowledge-all", "--yes"]),
-    (["verify-packages"], ["--verify-packages"]),
     (["suggest-fixes"], ["--suggest-fixes"]),
     (["diagnostics"], ["--diagnostics"]),
     (["protect"], ["--protect"]),       # without sudo: both refuse the same way
     (["unprotect"], ["--unprotect"]),
 ]
+# A full package check takes longer than Ensign's 10-minute limit on a
+# machine with thousands of packages, such as GitHub's runner image, which
+# sets ENSIGN_SKIP_FULL_VERIFY for that reason (see cli_live_test.py).
+if not os.environ.get("ENSIGN_SKIP_FULL_VERIFY"):
+    PAIRS.append((["verify-packages"], ["--verify-packages"]))
 differ = 0
 try:
     for command, option in PAIRS:
