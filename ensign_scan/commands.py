@@ -6,13 +6,18 @@ are the same run. translate() rewrites a command line that starts with a
 command into the original options, and argparse in cli.py does the rest,
 so there is exactly one place that decides what a run does.
 
-A command is the first word that isn't an option. That word is always the
-command, even if a folder has the same name: `ensign-scan scan allow` or
-`ensign-scan ./allow` scans a folder called allow. Any other first word is
+A command is the first word that isn't an option. Any other first word is
 a path, as before, so `ensign-scan ~/Downloads` still scans that folder.
+When the word is a command and also names a file or folder where you are,
+Ensign doesn't guess: it stops and shows both ways to say it (`./allow`
+for the folder, the original option for the command). A script that passes
+paths it didn't choose puts them after `scan --`, where no word is a
+command.
 """
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
 import sys
 import textwrap
@@ -114,6 +119,31 @@ def overview() -> str:
     return "\n".join(lines)
 
 
+def _original_form(name: str) -> str:
+    """The command written with its original options, which no file name
+    can be mistaken for."""
+    if name == "help":
+        return f"{PROG} --help"
+    if name == "scan":
+        return f"{PROG}   (no command: a scan of everything in your config)"
+    if name == "list":
+        return f"{PROG} --list-infected   or   {PROG} --list-allowed"
+    if name == "acknowledge":
+        return f"{PROG} --acknowledge PATH   or   {PROG} --acknowledge-all"
+    command = BY_NAME[name]
+    tail = " PATH" if command.takes == "each" else " FOLDER" if command.takes == "one" else ""
+    return f"{PROG} {command.flag}{tail}" + (" --signature NAME" if command.takes == "one" else "")
+
+
+def _ambiguous(word: str) -> UsageError:
+    path = shlex.quote(f"./{word}")
+    return UsageError(
+        f"{word!r} is a command, and there's also a file or folder called {word} here. "
+        f"Which did you mean?\n"
+        f"  the file or folder:  {PROG} {path}\n"
+        f"  the command:         {_original_form(word)}")
+
+
 def _help_for(command: Command) -> str:
     lines = [usage(command), "", command.summary + "."]
     if command.flag:
@@ -212,6 +242,8 @@ def translate(argv: list[str], takes_value: set[str], out=print) -> list[str]:
     before, rest = argv[:at], argv[at + 1:]
     if any(t in ("-h", "--help", "--version") or _matches(t, {"--help", "--version"}) for t in before):
         return argv   # asked for help or the version first: argparse answers that, as before
+    if (word == "help" or word in BY_NAME) and os.path.lexists(word):
+        raise _ambiguous(word)   # clarify, never guess
     if word == "help":
         wanted = [w for w in rest if not w.startswith("-")]
         if not wanted:
