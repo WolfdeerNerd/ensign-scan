@@ -26,7 +26,7 @@ from rich import get_console, print
 
 from ensign_scan.config import AS_ROOT, HOME, HOSTNAME, Config, ensure_default_config, legacy_notice
 from ensign_scan import (
-    allowlist, bigrules, diagnostics, evidence, explanations, findings, fpreport, logo, logsetup, migrate, notify,
+    allowlist, bigrules, commands, diagnostics, evidence, explanations, findings, fpreport, logo, logsetup, migrate, notify,
     persistence, pkgdb, protect, secrets,
 )
 from ensign_scan.fsutil import print_unwrapped, shown
@@ -67,94 +67,115 @@ def ensign_version() -> str:
         return "unknown (not installed; running from source)"
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Hash and ClamAV-scan the system.")
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """The command line, in either form: a command (`ensign-scan allow PATH`,
+    see commands.py) or the original options (`ensign-scan --allow PATH`),
+    which keep working. Commands are rewritten into the options first, so
+    everything below sees one form."""
+    parser = argparse.ArgumentParser(
+        prog=commands.PROG,
+        usage=f"{commands.PROG} [COMMAND] [ARGS ...] [OPTIONS]\n"
+              f"       {commands.PROG} [PATH ...] [OPTIONS]   (a scan)",
+        description="Hash and ClamAV-scan the system.\n\n" + commands.overview(),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    g_scan = parser.add_argument_group("options: scanning")
+    g_results = parser.add_argument_group("options: results")
+    g_decide = parser.add_argument_group("options: decisions (false positives, startup entries)")
+    g_check = parser.add_argument_group("options: checks")
+    g_setup = parser.add_argument_group("options: setup")
     parser.add_argument("--version", action="version",
                         version=f"ensign-scan {ensign_version()}")
-    parser.add_argument("targets", nargs="*",
+    g_scan.add_argument("targets", nargs="*", metavar="PATH",
                         help="Directories to scan (default: scan_targets from config)")
-    parser.add_argument("--config", metavar="PATH",
+    g_scan.add_argument("--config", metavar="PATH",
                         help="Config file (default: ~/.config/ensign-scan/config.toml)")
-    parser.add_argument("--no-scan", action="store_true",
+    g_scan.add_argument("--no-scan", action="store_true",
                         help="Hash and record files without ClamAV scanning")
-    parser.add_argument("--skip-rescans", action="store_true",
+    g_scan.add_argument("--skip-rescans", action="store_true",
                         help="Skip the infected/error/stale rescan passes")
-    parser.add_argument("--purge-missing", action="store_true",
+    g_scan.add_argument("--purge-missing", action="store_true",
                         help="Remove DB records for files that no longer exist, then exit")
-    parser.add_argument("--rescan-errors", action="store_true",
+    g_scan.add_argument("--rescan-errors", action="store_true",
                         help="Retry only files currently marked ERROR, then exit (no full scan)")
-    parser.add_argument("--verify-packages", "--verify-pacman", dest="verify_packages", action="store_true",
+    g_check.add_argument("--verify-packages", "--verify-pacman", dest="verify_packages", action="store_true",
                         help="Check installed files against the package manager's records, then exit "
                              "(can be slow; --verify-pacman is the old name)")
-    parser.add_argument("--diagnostics", action="store_true",
+    g_check.add_argument("--diagnostics", action="store_true",
                         help="Print versions, settings and counts for a bug report, then exit. "
                              "Contains no paths, usernames, hostnames or file names.")
-    parser.add_argument("--sweep", action="store_true",
+    g_scan.add_argument("--sweep", action="store_true",
                         help="After this scan, sweep files too large for ClamAV (over ~2 GiB) in "
                              "slices. Only needed with sweep_huge_files = false: the sweep is on "
                              "by default")
-    parser.add_argument("--update-rules", action="store_true",
+    g_scan.add_argument("--update-rules", action="store_true",
                         help="Rebuild the YARA rules for files too large for ClamAV from ClamAV's "
                              "current signatures, check them, then exit. Runs by itself before "
                              "every sweep when the signatures have changed.")
-    parser.add_argument("--allow", metavar="PATH", action="append", default=[],
+    g_decide.add_argument("--allow", metavar="PATH", action="append", default=[],
                         help="Mark a file ClamAV flagged as a false positive (this exact content and "
                              "signature only), then exit. Asks to confirm. Can be given more than once.")
-    parser.add_argument("--unallow", metavar="PATH", action="append", default=[],
+    g_decide.add_argument("--unallow", metavar="PATH", action="append", default=[],
                         help="Undo --allow for a file, then exit")
-    parser.add_argument("--allow-folder", metavar="FOLDER",
+    g_decide.add_argument("--allow-folder", metavar="FOLDER",
                         help="Allow every file under FOLDER that one signature flags right now "
                              "(name it with --signature), then exit. Asks once to confirm. Files "
                              "that appear or change later are flagged again.")
-    parser.add_argument("--unallow-folder", metavar="FOLDER",
+    g_decide.add_argument("--unallow-folder", metavar="FOLDER",
                         help="Undo --allow-folder for FOLDER and --signature, then exit")
-    parser.add_argument("--signature", metavar="NAME",
+    g_decide.add_argument("--signature", metavar="NAME",
                         help="The signature name for --allow-folder / --unallow-folder, as shown "
                              "in the infected list")
-    parser.add_argument("--list-allowed", action="store_true",
+    g_results.add_argument("--list-allowed", action="store_true",
                         help="List the folders and files you've allowed, then exit")
-    parser.add_argument("--list-allowed-all", action="store_true",
+    g_results.add_argument("--list-allowed-all", action="store_true",
                         help="Like --list-allowed, but also list the files inside each allowed folder")
-    parser.add_argument("--list-infected", action="store_true",
+    g_results.add_argument("--list-infected", action="store_true",
                         help="List the infected files from the last scans (all of them, or only "
                              "under the paths given), with their SHA-256, then exit. Doesn't scan")
-    parser.add_argument("--clamav-report", metavar="PATH", action="append", default=[],
+    g_results.add_argument("--clamav-report", metavar="PATH", action="append", default=[],
                         help="Prepare a false-positive report for ClamAV about a file it flagged, "
                              "then exit. Checks the file again first. Nothing is sent: you submit "
                              "it. Can be given more than once.")
-    parser.add_argument("--persistence", action="store_true",
+    g_decide.add_argument("--persistence", action="store_true",
                         help="Check the places programs use to start themselves (systemd units, "
                              "shell startup files, autostart, cron, ld.so.preload, pacman hooks) "
                              "for entries that are new, changed or gone since you acknowledged "
                              "them, then exit. Changes nothing.")
-    parser.add_argument("--acknowledge", metavar="PATH", action="append", default=[],
+    g_decide.add_argument("--acknowledge", metavar="PATH", action="append", default=[],
                         help="Accept one startup entry the persistence check lists, as it is now, "
                              "then exit. Asks to confirm. Can be given more than once.")
-    parser.add_argument("--acknowledge-all", action="store_true",
+    g_decide.add_argument("--acknowledge-all", action="store_true",
                         help="Show the persistence check, then accept everything it lists. Asks "
                              "to confirm.")
-    parser.add_argument("--yes", action="store_true",
+    g_decide.add_argument("--yes", action="store_true",
                         help="Don't ask to confirm --allow, --allow-folder, --acknowledge or "
                              "--acknowledge-all (for scripts)")
-    parser.add_argument("--protect", action="store_true",
+    g_setup.add_argument("--protect", action="store_true",
                         help="With sudo: keep your config and your decisions (allowances, "
                              "acknowledged startup entries) where only root can change them, so "
                              "nothing running as you can. Shows your config and asks first, then exit")
-    parser.add_argument("--protected", action="store_true",
+    g_setup.add_argument("--protected", action="store_true",
                         help="With sudo, before --allow, --unallow, --allow-folder, --unallow-folder, "
                              "--persistence, --acknowledge or --acknowledge-all: change your protected "
                              "decisions (see --protect) instead of root's own")
-    parser.add_argument("--uninstall", action="store_true",
+    g_setup.add_argument("--uninstall", action="store_true",
                         help="Delete everything Ensign made (with sudo: root's files too), after "
                              "listing it and asking you to type 'uninstall'. Offers to save your "
                              "decisions first, then says how to remove the program itself")
-    parser.add_argument("--unprotect", action="store_true",
+    g_setup.add_argument("--unprotect", action="store_true",
                         help="With sudo: undo --protect, so your runs use your own config and "
                              "database again. Asks first, then exit")
-    parser.add_argument("--suggest-fixes", action="store_true",
+    g_check.add_argument("--suggest-fixes", action="store_true",
                         help="List files clamd could not read, grouped by directory, then exit (no full scan). "
                              "Scoped to any targets given.")
-    args = parser.parse_args()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    takes_value = {opt for action in parser._actions if action.option_strings and action.nargs != 0
+                   for opt in action.option_strings}
+    try:
+        argv = commands.translate(argv, takes_value)
+    except commands.UsageError as exc:
+        commands.fail(exc)
+    args = parser.parse_args(argv)
     if args.signature and not (args.allow_folder or args.unallow_folder):
         parser.error("--signature goes with --allow-folder or --unallow-folder")
     if args.unallow_folder and not args.signature:

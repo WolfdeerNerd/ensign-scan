@@ -271,6 +271,28 @@ This scans everything listed in your config's `scan_targets`, runs the infected/
 
 While it runs, the bottom line of the terminal shows live progress: files done out of files to process, a bar and percentage, an estimated time remaining (ETA), how many infected files and errors have turned up so far, and the worker count. Each file's result scrolls past above it. The ETA follows the pace of roughly the last minute, so it tracks the current speed, and it shows `--` for the first few seconds or whenever nothing is finishing. When the scan is done, the ETA is replaced by the total time it took. On a narrow terminal the line keeps to the progress itself instead of wrapping: the infected and error counts and the worker count drop out together, leaving the bar, percentage and ETA, and only on a very narrow one does the ETA go too. Nothing is lost by that: infected files and errors still show in color in the per-file lines above it, and in the summary at the end. When the output isn't a terminal (a scheduled service, or piped to a file), the line is printed once at the end instead of being redrawn.
 
+### Commands
+
+From 0.11.0, every job has a short command, like pipx's or git's: `ensign-scan allow PATH` is the same run as `ensign-scan --allow PATH`. The original options in the two tables below keep working, so older scripts and notes don't change. `ensign-scan help` lists the commands, and `ensign-scan help COMMAND` (or `ensign-scan COMMAND --help`) explains one.
+
+| Command | The same as |
+|---|---|
+| `ensign-scan` or `ensign-scan scan [PATH ...]` | a scan (with no PATH, of everything in your config) |
+| `ensign-scan rescan-errors` / `purge-missing` / `update-rules` | `--rescan-errors` / `--purge-missing` / `--update-rules` |
+| `ensign-scan list infected [PATH ...]` | `--list-infected [PATH ...]` |
+| `ensign-scan list allowed` / `list allowed --all` | `--list-allowed` / `--list-allowed-all` |
+| `ensign-scan report PATH` | `--clamav-report PATH` |
+| `ensign-scan allow PATH` / `unallow PATH` | `--allow PATH` / `--unallow PATH` |
+| `ensign-scan allow-folder FOLDER --signature NAME` / `unallow-folder ...` | `--allow-folder` / `--unallow-folder` |
+| `ensign-scan persistence` | `--persistence` |
+| `ensign-scan acknowledge PATH` / `acknowledge --all` | `--acknowledge PATH` / `--acknowledge-all` |
+| `ensign-scan verify-packages` / `suggest-fixes [PATH ...]` / `diagnostics` | `--verify-packages` / `--suggest-fixes` / `--diagnostics` |
+| `sudo ensign-scan protect` / `unprotect` / `uninstall` | `--protect` / `--unprotect` / `--uninstall` |
+
+Options such as `--yes`, `--protected` and `--config` go before or after the command: `sudo ensign-scan --protected allow PATH`. From a checkout, `python3 main.py allow PATH` works the same.
+
+**A command always wins over a folder with the same name.** The first word that isn't an option is read as a command if it is one, and as a path otherwise, so `ensign-scan ~/Downloads` still scans that folder. To scan a folder that happens to be called `allow` or `list`, write `ensign-scan scan allow` or `ensign-scan ./allow`.
+
 ### Targeting and behavior flags
 
 | Command | What it does |
