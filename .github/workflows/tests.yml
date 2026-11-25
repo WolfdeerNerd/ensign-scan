@@ -244,6 +244,10 @@ jobs:
       # runs failing closed. Works in a folder of its own, not /etc or /var/lib.
       - name: Protected mode, under sudo
         run: sudo "$(command -v python)" tests/protect_test.py
+      # --uninstall with sudo: root's folders go too, and the user's files are
+      # deleted as the user, never as root. Temporary folders only.
+      - name: Uninstall, under sudo
+        run: sudo "$(command -v python)" tests/uninstall_test.py
       - name: Show the clamd log and any AppArmor denials
         if: failure()
         run: |

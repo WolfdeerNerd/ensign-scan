@@ -77,6 +77,20 @@ mv ~/.local/share/ensign ~/.local/share/ensign-scan
 ```
 Do that while no Ensign run or scheduled scan is going. Either way, if a script or timer names an old path, update it. If you never had the old folders, there's nothing to do.
 
+### Uninstalling
+
+```
+sudo ensign-scan --uninstall
+```
+This deletes everything Ensign made, yours and root's:
+- your config and data: `~/.config/ensign-scan`, `~/.local/share/ensign-scan`, and the pre-0.8.1 `ensign` folders if they hold only Ensign's files;
+- in a `data_dir` your config moved elsewhere, only Ensign's own files (and the folder, if that leaves it empty);
+- root's: `/etc/ensign-scan` and `/var/lib/ensign-scan`, which hold root's config and data and every user's protected-mode copies.
+
+It lists every path and its size first, offers to save your decisions (allowances, allowed folders, acknowledged startup entries) to a JSON file in your home, and goes ahead only when you type `uninstall`. `--yes` doesn't skip that, and it refuses without a terminal. It also refuses while a run is going. Under `sudo`, your files are deleted by a process running as you, never as root, so a symlink in your home can't turn it against anything else. Without `sudo`, only your own files go, and it says what of root's is left.
+
+What stays, and is only pointed out: the program itself (the end of the output says how to remove it, for the way it was installed: `pipx uninstall ensign-scan`, a venv, a checkout, or a package), ClamAV, which other programs may use, and any timer, service or cron job you set up to run Ensign. The saved decisions file can't be imported yet; it's there to look up what you allowed.
+
 ## Requirements
 
 This section is for running Ensign from a source checkout; an installed copy (above) pulls in its own dependencies.
@@ -290,6 +304,7 @@ These run one job and exit — no full scan.
 | `python3 main.py --acknowledge-all` | Show the persistence audit, then accept everything it lists. Asks to confirm |
 | `sudo python3 main.py --protect` | Keep your config and decisions where only root can change them (see Protected mode). Shows your config and asks first |
 | `sudo python3 main.py --unprotect` | Undo `--protect`: your runs use your own config and database again. Asks first |
+| `sudo python3 main.py --uninstall` | Delete everything Ensign made, yours and root's, after listing it and asking you to type `uninstall` (see Uninstalling). Without `sudo`, only yours |
 | `sudo python3 main.py --protected --allow PATH` | In protected mode, change your decisions: goes with `--allow`, `--unallow`, `--allow-folder`, `--unallow-folder`, `--persistence`, `--acknowledge` and `--acknowledge-all` |
 | `python3 main.py --clamav-report PATH` | Prepare a false-positive report for ClamAV about a flagged file (see A note on infected results). Nothing is sent: you submit it |
 
