@@ -172,14 +172,20 @@ def _crontab(plan: Plan, who: str) -> None:
             plan.schedules.append(f"{who} crontab: {line.strip()}")
 
 
-def user_plan(home: Path) -> Plan:
-    """Your files. Runs as you (under sudo: in a child dropped to you)."""
+def user_plan(home: Path, config: str | None = None) -> Plan:
+    """Your files. Runs as you (under sudo: in a child dropped to you).
+    `config`: the config this run was pointed at (--config or
+    $ENSIGN_CONFIG), whose data_dir is Ensign's too."""
     plan = Plan()
     config_dir = home / ".config" / "ensign-scan"
     data_dir = home / ".local" / "share" / "ensign-scan"
     # A data_dir your config moves elsewhere, or root's protected copy of it.
-    custom = [d for d in (_data_dir_setting(config_dir / "config.toml"),
+    custom = [d for d in (_data_dir_setting(Path(config)) if config else None,
+                          _data_dir_setting(config_dir / "config.toml"),
                           _data_dir_setting(protect.config_path(os.getuid()))) if d]
+    if config and not Path(config).absolute().is_relative_to(config_dir):
+        plan.kept.append(f"{config}: the config this run was given, outside Ensign's folders "
+                         f"(it's yours to delete)")
     for folder, what in ((config_dir, "your config"), (data_dir, "your database, logs and reports")):
         if _is_real_dir(folder):
             plan.items.append(Item(str(folder), what, _size(folder)))
@@ -379,8 +385,8 @@ def _plan_from(data: dict) -> Plan:
     return plan
 
 
-def _user_plan_json(home: str) -> dict:
-    return asdict(user_plan(Path(home)))
+def _user_plan_json(home: str, config: str | None = None) -> dict:
+    return asdict(user_plan(Path(home), config))
 
 
 def _delete_json(items: list[dict]) -> list[str]:
@@ -436,7 +442,7 @@ def _human(size: int) -> str:
     return f"{size} B"
 
 
-def run(confirm_word=input, ask_yes_no=None, out=rich_print) -> int:
+def run(confirm_word=input, ask_yes_no=None, out=rich_print, config: str | None = None) -> int:
     """The whole command. confirm_word and ask_yes_no are input() stand-ins
     for tests; without a terminal it refuses."""
     as_root = os.geteuid() == 0
@@ -455,7 +461,7 @@ def run(confirm_word=input, ask_yes_no=None, out=rich_print) -> int:
                 home = pwd.getpwuid(user_uid).pw_dir
                 plans.append(("you", _plan_from(as_user(user_uid, _user_plan_json, home)), user_uid))
         else:
-            plans.append(("you", user_plan(Path.home()), None))
+            plans.append(("you", user_plan(Path.home(), config), None))
     except (RuntimeError, KeyError) as exc:
         out(f"✗ Couldn't look at your files: {exc}. Nothing was changed.")
         return 1

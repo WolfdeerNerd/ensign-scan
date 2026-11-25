@@ -86,10 +86,25 @@ COMMANDS: tuple[Command, ...] = (
 BY_NAME = {c.name: c for c in COMMANDS}
 
 
+_CONFIG: str | None = None   # --config, if this run was given one (cli.py)
+
+
+def remember_config(path: str | None) -> None:
+    global _CONFIG
+    _CONFIG = path
+
+
+def config_part() -> str:
+    """" --config PATH" when this run was given one, so that a pasted hint
+    acts on the same config and database; else nothing."""
+    return f" --config {shlex.quote(_CONFIG)}" if _CONFIG else ""
+
+
 def prefix() -> str:
     """How a hint starts: under sudo, with sudo, so that pasting it acts on
-    root's records and decisions (the ones this run used), not yours."""
-    return f"sudo {PROG}" if os.geteuid() == 0 else PROG
+    root's records and decisions (the ones this run used), not yours; and
+    with this run's --config, if it had one."""
+    return (f"sudo {PROG}" if os.geteuid() == 0 else PROG) + config_part()
 
 
 class UsageError(Exception):

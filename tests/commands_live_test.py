@@ -102,7 +102,10 @@ def run(argv: list[str]) -> tuple[int, str, dict]:
     result = subprocess.run([CLI, "--config", str(config), *argv], capture_output=True, text=True,
                             timeout=300, input="", env=ENV)
     out = (result.stdout + result.stderr).replace(str(data), "DATA").replace(str(config), "CONFIG")
-    return result.returncode, normalized(out), state(data)
+    # Line breaks fall where the paths' lengths put them (run9 against
+    # run10), so each paragraph is compared with its breaks folded into spaces.
+    paragraphs = re.split(r"\n\s*\n", normalized(out))
+    return result.returncode, "\n".join(" ".join(p.split()) for p in paragraphs), state(data)
 
 
 PAIRS = [

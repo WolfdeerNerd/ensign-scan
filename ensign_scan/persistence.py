@@ -515,7 +515,7 @@ def report(audit: Audit) -> None:
         for line in _unchecked_lines(audit.unchecked):
             print_unwrapped(line)
         if os.geteuid() != 0:
-            sudo = _PROTECTED_COMMAND or "sudo ensign-scan"
+            sudo = _PROTECTED_COMMAND or "sudo ensign-scan"   # root's own config: no --config
             print(f"  Most of these need root to read. To include them: {sudo} persistence")
 
     if not audit.pending:
@@ -655,7 +655,8 @@ _PROTECTED_COMMAND: str | None = None
 def _acknowledge_command() -> str:
     """How the acknowledge hints start: root-only entries need root to
     acknowledge, and protected decisions need sudo --protected."""
-    return _PROTECTED_COMMAND or ("sudo ensign-scan" if os.geteuid() == 0 else "ensign-scan")
+    from .commands import config_part
+    return (_PROTECTED_COMMAND or ("sudo ensign-scan" if os.geteuid() == 0 else "ensign-scan")) + config_part()
 
 
 def show_protected_commands() -> None:

@@ -93,6 +93,16 @@ if os.geteuid() != 0:
             assert "scan.service" in text, "a unit that runs Ensign is pointed out"
             assert "notes.txt" not in text and "left alone" in text, text
 
+            # A config named with --config (or $ENSIGN_CONFIG): its data_dir is
+            # Ensign's too, and the config file itself is pointed out, not deleted.
+            alt = home / "alt.toml"
+            (home / "altdata").mkdir()
+            (home / "altdata" / "error_logs.txt").write_text("Ensign's\n")
+            alt.write_text('data_dir = "~/altdata"\n')
+            plan = uninstall.user_plan(home, str(alt))
+            assert str(home / "altdata") in [i.path for i in plan.items], plan.items
+            assert any("alt.toml" in k for k in plan.kept), plan.kept
+
             # A run that's going: refused before asking.
             lock = RunLock(data / "ensign.lock")
             lock.acquire()
