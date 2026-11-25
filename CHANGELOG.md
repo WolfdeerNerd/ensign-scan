@@ -6,6 +6,12 @@ Versions follow `major.minor.patch`: a new feature bumps the middle number, a fi
 
 ## Unreleased
 
+### Added
+- **Commands, in the style of pipx or git.** `ensign-scan allow PATH`, `ensign-scan list infected`, `ensign-scan uninstall` and the rest: each is the same run as its original option (`--allow PATH`, `--list-infected`, `--uninstall`), and every original option keeps working. `ensign-scan help` lists them, grouped, and `ensign-scan help COMMAND` explains one. A first word that's a command is the command; a folder with the same name is scanned with `ensign-scan scan NAME` or `./NAME`.
+
+### Changed
+- `--help` shows the commands first, then the options in groups (scanning, results, decisions, checks, setup).
+
 ## 0.10.0
 
 ### Added

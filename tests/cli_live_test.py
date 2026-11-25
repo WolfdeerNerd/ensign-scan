@@ -258,6 +258,19 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
     assert rows(db)[str(flagged)][0] == "infected"
     print("allowed-by-you test passed ✓")
 
+    # --- the same with commands (commands.py): the same runs, the same results -------------
+    run("--config", str(config), "scan", str(fp_tree), expect=3, cwd=work)
+    listed = " ".join(run("--config", str(config), "list", "infected", str(fp_tree), cwd=work).split())
+    assert "game-asset.dat" in listed and "Scanning" not in listed, listed
+    run("allow", str(flagged), "--yes", "--config", str(config), cwd=work)
+    assert rows(db)[str(flagged)][0] == "allowed"
+    assert "game-asset.dat" in run("--config", str(config), "list", "allowed", cwd=work)
+    run("--config", str(config), "unallow", str(flagged), cwd=work)
+    run("--config", str(config), "scan", str(fp_tree), expect=3, cwd=work)
+    assert rows(db)[str(flagged)][0] == "infected"
+    assert "usage: ensign-scan allow" in run("allow", expect=2, cwd=work)
+    print("commands test passed ✓")
+
     # --- --allow-folder: a folder's false positives in one go, as a snapshot -----------------
     batch = tmp / "training data"       # a space: the printed commands must quote it
     (batch / "sub").mkdir(parents=True)
