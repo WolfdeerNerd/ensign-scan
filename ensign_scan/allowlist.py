@@ -295,7 +295,11 @@ def _folder_text(folder: str) -> str:
 # protect.py and db.make_protected_writer). In that mode the file records
 # are root's own, read through a view: they are the evidence that a file was
 # flagged, and are never changed. Set once by the command line.
-_COMMAND = "ensign-scan"
+_COMMAND = "sudo ensign-scan" if os.geteuid() == 0 else "ensign-scan"   # changes decisions
+# Hints for commands that only read (list infected, list allowed): never
+# with --protected, which goes only with commands that change decisions.
+_READ = "sudo ensign-scan" if os.geteuid() == 0 else "ensign-scan"
+_READ_ONLY = frozenset({"--list-infected", "--list-allowed", "--list-allowed-all"})
 _PROTECTED = False
 
 
@@ -318,7 +322,8 @@ def _command(option: str, *words: str) -> str:
     """An ensign-scan command you can paste, in the command form ("allow
     PATH", commands.py): every argument shell-quoted."""
     from .commands import shown_as
-    return shown(f"{_COMMAND} {shown_as(option)} " + " ".join(shlex.quote(w) for w in words))
+    start = _READ if option in _READ_ONLY else _COMMAND
+    return shown(f"{start} {shown_as(option)} " + " ".join(shlex.quote(w) for w in words))
 
 
 def _flagged_statuses() -> tuple[str, ...]:
@@ -684,7 +689,7 @@ def _print_files(title: str, entries: dict, note: str, top: int | None = None) -
     for key, entry in sorted(entries.items())[:top]:
         _print_file(key if isinstance(key, str) else key[0], entry, _L1, _L2)
     if top is not None and len(entries) > top:
-        print(f"\n{_L1}… and {len(entries) - top} more: ensign-scan list allowed")
+        print(f"\n{_L1}… and {len(entries) - top} more: {_READ} list allowed")
 
 
 def allowed_report(engine: Engine, paths: list[str] | None = None, top: int = 10) -> int:
@@ -718,7 +723,7 @@ def list_allowed(engine: Engine, expand: bool = False) -> int:
         print_unwrapped(f"[yellow]! {stale} file{'s' if stale != 1 else ''} recorded as allowed "
                         f"{'have' if stale != 1 else 'has'} no allowance any more, so "
                         f"{'they count' if stale != 1 else 'it counts'} as infected (see "
-                        f"ensign-scan list infected).[/yellow]")
+                        f"{_READ} list infected).[/yellow]")
     folders, files, gone = _gather(engine)
     if not folders and not files and not gone:
         print(f"Nothing is allowed. ({_COMMAND} allow PATH marks a flagged file as a false positive.)")
@@ -726,7 +731,7 @@ def list_allowed(engine: Engine, expand: bool = False) -> int:
     if folders:
         _print_folders(folders, expand)
         if not expand:
-            print(f"\n{_L1}ensign-scan list allowed --all also lists the files in each folder.")
+            print(f"\n{_L1}{_READ} list allowed --all also lists the files in each folder.")
     if files:
         _print_files("FILES YOU ALLOWED", files, f"Undo one with {_COMMAND} unallow PATH.")
     if gone:

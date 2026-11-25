@@ -70,19 +70,26 @@ COMMANDS: tuple[Command, ...] = (
     Command("acknowledge", "PATH ... | --all",
             "Accept startup entries the persistence check lists (asks first)", "Decisions",
             "--acknowledge", takes="each", also=("--yes", "--protected")),
-    Command("verify-packages", "", "Check installed files against the package manager's records",
+    Command("verify-packages", "", "Check installed files against the package manager's records "
+            "(can be slow)",
             "Checks", "--verify-packages"),
     Command("suggest-fixes", "[PATH ...]", "List the files clamd couldn't read, by folder",
             "Checks", "--suggest-fixes", takes="paths"),
     Command("diagnostics", "", "Print versions, settings and counts for a bug report "
             "(no paths or names)", "Checks", "--diagnostics"),
     Command("protect", "", "With sudo: keep your config and decisions where only root can "
-            "change them", "Setup", "--protect"),
-    Command("unprotect", "", "With sudo: undo protect", "Setup", "--unprotect"),
+            "change them (shows your config and asks first)", "Setup", "--protect"),
+    Command("unprotect", "", "With sudo: undo protect (asks first)", "Setup", "--unprotect"),
     Command("uninstall", "", "Delete everything Ensign made (with sudo: root's files too); the "
             "program itself is removed with your installer", "Setup", "--uninstall"),
 )
 BY_NAME = {c.name: c for c in COMMANDS}
+
+
+def prefix() -> str:
+    """How a hint starts: under sudo, with sudo, so that pasting it acts on
+    root's records and decisions (the ones this run used), not yours."""
+    return f"sudo {PROG}" if os.geteuid() == 0 else PROG
 
 
 class UsageError(Exception):
@@ -114,8 +121,9 @@ def overview() -> str:
                 lines += [indent + part for part in summary[1:]]
     lines.append("")
     lines += textwrap.wrap(f"With no command, {PROG} scans everything in your config, and "
-                           f"{PROG} PATH scans PATH. Help on one command: {PROG} help COMMAND, "
-                           f"or {PROG} COMMAND --help.", columns)
+                           f"{PROG} PATH scans PATH. In a script, put paths after "
+                           f"'{PROG} scan --', so that no file name is read as a command. Help "
+                           f"on one command: {PROG} help COMMAND, or {PROG} COMMAND --help.", columns)
     return "\n".join(lines)
 
 
@@ -150,6 +158,9 @@ def _help_for(command: Command) -> str:
         same = f"{PROG} {command.flag}" + (" PATH" if command.takes == "each" else
                                            " VALUE" if command.takes == "one" else "")
         lines.append(f"The same as: {same}")
+    if command.name == "scan":
+        lines.append(f"The same as: {PROG} [PATH ...]. In a script, put paths after "
+                     f"'{PROG} scan --', so that no file name is read as a command.")
     if command.name == "list":
         lines.append(f"The same as: {PROG} --list-infected [PATH ...], --list-allowed, "
                      f"--list-allowed-all")
