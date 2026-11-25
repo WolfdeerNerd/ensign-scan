@@ -107,6 +107,9 @@ assert parsed(["allow-folder", "/f", "--sig", "S"])["signature"] == "S"
 # PATHs that start with "-", after --, stay PATHs for commands that take them.
 assert parsed(["allow", "--", "-odd"])["allow"] == ["-odd"]
 assert parsed(["allow-folder", "--signature", "S", "--", "-odd"])["allow_folder"] == "-odd"
+assert parsed(["allow", "--", "-h"])["allow"] == ["-h"], "after --, -h is a path, not a help request"
+got = parsed(["list", "infected", "--", "-odd"])
+assert got["list_infected"] and got["targets"] == ["-odd"], "a path starting with - stays a path"
 # A command that's also a file or folder where you are: never a guess.
 import os  # noqa: E402
 import tempfile  # noqa: E402

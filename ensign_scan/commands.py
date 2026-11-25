@@ -268,7 +268,8 @@ def translate(argv: list[str], takes_value: set[str], out=print) -> list[str]:
     before, rest = argv[:at], argv[at + 1:]
     if any(t in ("-h", "--help", "--version") or _matches(t, {"--help", "--version"}) for t in before):
         return argv   # asked for help or the version first: argparse answers that, as before
-    if word in BY_NAME and ("-h" in rest or "--help" in rest):
+    asked_help = rest[:rest.index("--")] if "--" in rest else rest   # after --, -h is a path
+    if word in BY_NAME and ("-h" in asked_help or "--help" in asked_help):
         out(_help_for(BY_NAME[word]))   # help runs nothing, so there's nothing to clarify
         raise SystemExit(0)
     if (word == "help" or word in BY_NAME) and os.path.lexists(word):
@@ -295,7 +296,8 @@ def translate(argv: list[str], takes_value: set[str], out=print) -> list[str]:
     if command.name == "list":
         kind, paths = (words[0], words[1:]) if words else (None, [])
         if kind == "infected" and not all_flag:
-            return before + ["--list-infected", *options, *paths]
+            # A path that starts with "-" (given after --) must stay a path.
+            return before + ["--list-infected", *options] + (["--"] if any(p.startswith("-") for p in paths) else []) + paths
         if kind == "allowed" and not paths:
             return before + ["--list-allowed-all" if all_flag else "--list-allowed", *options]
         raise UsageError("say what to list: infected [PATH ...], or allowed [--all].\n"

@@ -284,15 +284,18 @@ def root_plan() -> Plan:
             plan.kept.append(f"{folder}: not a folder owned by root, so not Ensign's to delete")
             continue
         plan.items.append(Item(str(folder), what, _size(folder)))
-    if (data_root / "system.db").exists():
+    # Only from a folder that is Ensign's (just checked): a database in a
+    # folder that's left alone isn't saved either.
+    owned = str(data_root) in {item.path for item in plan.items}
+    if owned and (data_root / "system.db").exists():
         plan.databases.append(str(data_root / "system.db"))
     users = data_root / "users"
-    if _is_real_dir(users):
+    if owned and _is_real_dir(users):
         for decisions in sorted(users.glob("*/decisions.db")):
             plan.databases.append(str(decisions))
     _check_lock(data_root, plan)
     custom = _data_dir_setting(config_root / "config.toml")
-    if custom and not str(custom).startswith(str(data_root)):
+    if custom and not custom.is_relative_to(data_root):   # a path, not text: /var/lib/ensign-scan2 isn't inside
         _ensigns_names_in(custom, "root's data_dir (Ensign's files only)", plan)
         _check_lock(custom, plan)
     _schedules([Path("/etc/systemd/system")], plan)
@@ -375,7 +378,10 @@ def delete(items: list[Item]) -> list[str]:
                     target = folder / name
                     if not _is_real_dir(target):
                         target.unlink(missing_ok=True)
-                for sub in [*_IN_SUBFOLDERS, ""]:   # then whatever that left empty
+                # Then the folders that emptied, and only those: an empty
+                # "logs" folder that held nothing of Ensign's is yours.
+                emptied = {name.split("/", 1)[0] for name in item.names if "/" in name}
+                for sub in [*sorted(emptied), ""]:
                     try:
                         (folder / sub).rmdir()
                     except OSError:
