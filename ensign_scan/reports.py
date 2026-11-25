@@ -435,12 +435,6 @@ def package_report(engine: Engine, result, backend) -> None:
         _print_excluded(excluded)
 
 
-def pacman_report(engine: Engine, result) -> None:
-    """The pacman report. Kept under its old name for existing callers."""
-    from .pkgdb.pacman import PacmanBackend
-    package_report(engine, result, PacmanBackend())
-
-
 def scan_summary(engine: Engine, paths: list[str] | None = None) -> dict[str, int]:
     """If `paths` is given, only files under those paths are counted —
     otherwise this summarizes the entire database."""
@@ -639,21 +633,3 @@ def unsaved_report(unsaved) -> list[dict]:
             print_unwrapped(f"  {shown(u.status)}: {shown(u.path)}")
     print(f"  Reason: {shown(items[0].error)}")
     return results
-
-
-def file_info(engine: Engine, filepath: str) -> None:
-    with Session(engine) as session:
-        record = session.query(FileRecord).filter(
-            FileRecord.filepath == filepath
-        ).first()
-        if record is None:
-            print_unwrapped(f"File not found in database: {shown(filepath)}")
-            return
-        print("\n=== FILE INFO ===")
-        print_unwrapped(f"Path: {shown(record.filepath)}")
-        print(f"Hash: {record.file_hash}")
-        print(f"Size: {record.file_size} bytes")
-        print(f"Scan Status: {record.scan_status}")
-        if record.threat_name:
-            print(f"Threat: {shown(record.threat_name)}")
-        print(f"Last Scanned: {record.last_scanned}")

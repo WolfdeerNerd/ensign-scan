@@ -24,7 +24,7 @@
     ACL or group grant is needed, and clamd can't read anything Ensign
     didn't give it.
 
-    Symlinks to regular files ARE followed and scanned (via safe_stat, not
+    Symlinks to regular files ARE followed and scanned (via stat_or_error, not
     safe_lstat) -- a symlink is a common, low-effort way for something to
     end up outside a scanner's reach, and this is a security tool, so that
     blind spot isn't acceptable by default. Symlinked directories are never
@@ -778,7 +778,7 @@ class Scanner:
                 path = Path(dirpath) / name
                 if self._is_excluded(path):
                     continue
-                # safe_stat (not safe_lstat) so a symlink to a regular
+                # stat_or_error (not safe_lstat) so a symlink to a regular
                 # file is followed and scanned through to its target;
                 # a broken symlink or one pointing at a socket/device
                 # just becomes None or fails is_scannable, same as any
@@ -833,7 +833,7 @@ class Scanner:
     def _on_walk_error(self, stats: TreeStats, exc: OSError) -> None:
         """os.walk's onerror hook: called when a directory can't be listed.
 
-        Every error goes to the error log, like safe_stat's failures do.
+        Every error goes to the error log, like a file that can't be stat'ed does.
         Only the ones that mean "Ensign was refused" are reported: a
         directory that vanished or was replaced mid-walk (temp files do
         this constantly) isn't a blind spot, just noise.

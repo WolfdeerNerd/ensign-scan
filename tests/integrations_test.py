@@ -13,7 +13,8 @@ from pathlib import Path as _Path
 ROOT = _Path(__file__).resolve().parent.parent
 _sys_path.path.insert(0, str(ROOT))
 from ensign_scan.pacman import PacmanMismatch, PacmanVerifyResult, _MISMATCH_RE
-from ensign_scan.reports import pacman_report
+from ensign_scan.pkgdb.pacman import PacmanBackend
+from ensign_scan.reports import package_report
 from ensign_scan.notify import build_message
 from ensign_scan import explanations, secrets
 from ensign_scan.secrets import Confidence
@@ -58,15 +59,14 @@ assert secrets.classify("/home/user/projects/android-keystore-docs/notes.md") ==
 assert secrets.classify("/home/user/MyWalletApp/screenshots/img.png") == Confidence.NONE, \
     "generic word 'wallet' embedded in an unrelated name must not match"
 
-# The two call-site thresholds behave differently, as designed.
-assert secrets.is_likely_secrets_path("/home/user/notes/mykey.pem"), \
-    "suggest_fixes() uses the wider threshold (HIGH or MEDIUM)"
+# A bare .pem is a MEDIUM match, which changes nothing yet; only HIGH does.
+assert secrets.classify("/home/user/notes/mykey.pem") == Confidence.MEDIUM
 assert not secrets.is_high_confidence_secrets_path("/home/user/notes/mykey.pem"), \
-    "scanner.py's reclassification uses the narrower threshold (HIGH only)"
+    "what Ensign stores changes for HIGH matches only"
 assert secrets.is_high_confidence_secrets_path("/home/user/.ssh/id_rsa")
 
-assert secrets.matching_reason("/home/user/Documents/notes.txt") is None
-assert secrets.matching_reason("/home/user/.ssh/id_rsa") is not None
+assert secrets.classify("/home/user/Documents/notes.txt") == Confidence.NONE
+assert secrets.classify("/home/user/.ssh/id_rsa") == Confidence.HIGH
 
 # --- clamd.py: permission vs size-limit error detection ---------------
 
@@ -102,7 +102,7 @@ assert _MISMATCH_RE.match("") is None
 assert _MISMATCH_RE.match("coreutils: 444 total files, 0 altered files") is None, \
     "per-package summary lines must never be mistaken for a mismatch"
 
-# --- pacman_report(): the four branches -------------------------------
+# --- package_report() with pacman: the four branches -------------------------------
 import tempfile
 from pathlib import Path
 from ensign_scan.config import Config
@@ -117,7 +117,7 @@ import io, contextlib
 def captured(*args):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        pacman_report(*args)
+        package_report(*args, PacmanBackend())
     return buf.getvalue()
 
 assert "not installed" in captured(s.engine, None)
