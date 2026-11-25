@@ -121,7 +121,7 @@ Under `sudo`, use the same interpreter: `sudo .venv/bin/python main.py ...`.
 
 Ensign's core scanning, hashing, and database tracking are plain Python + SQLAlchemy + ClamAV — nothing Arch-specific. It should run on any Linux distro with Python 3.11+ and ClamAV installed.
 
-The one exception is package verification: `--verify-packages`, and the "owned by package …" context line under infected files. These ask your package manager which package owns a file and whether it still matches what the package installed. Ensign picks the package manager from `/etc/os-release` (setting: `package_verification`, default `"auto"`). It supports pacman (Arch and derivatives), dpkg (Debian, Ubuntu and derivatives) and rpm (Fedora, RHEL and its rebuilds, openSUSE). On any other distribution, package verification is skipped cleanly with a note saying why, and every other command works the same. dpkg's records are MD5 checksums: good for catching accidental or careless changes, not an attacker who deliberately builds a file with a matching checksum.
+The one exception is package verification: `--verify-packages`, the "owned by package …" context line under infected files, and the "Likely false positive" label. These ask your package manager which package owns a file and whether it still matches what the package installed. Ensign picks the package manager from `/etc/os-release` (setting: `package_verification`, default `"auto"`). It supports pacman (Arch and derivatives), dpkg (Debian, Ubuntu and derivatives) and rpm (Fedora, RHEL and its rebuilds, openSUSE). On any other distribution, package verification is skipped cleanly with a note saying why, and every other command works the same. dpkg's records are MD5 checksums: good for catching accidental or careless changes, not an attacker who deliberately builds a file with a matching checksum.
 
 `notify-send` (desktop notifications) isn't Arch-specific either — it's standard Linux tooling available on most major distros, just under a different package name (e.g. Debian/Ubuntu: `libnotify-bin`).
 
@@ -138,12 +138,13 @@ Ensign makes no network connections. It talks to clamd over a local Unix socket 
 | `clamscan` | Only for files larger than clamd scans (see Large files) | Scans them, in batches, with the size limits switched off. Under `sudo`, as the `clamav` user; a file that user can't read is given to it on stdin |
 | `pacman -Qkk` / `dpkg --verify` / `rpm -Va` | Only with `--verify-packages` (whichever matches your distribution) | Read-only integrity check of installed files |
 | `pacman -Qo` / `dpkg-query -S` / `rpm -qf` `<file>` | When listing infected files (whichever matches your distribution) | Read-only lookup of which package owns a flagged file |
+| `pacman -Qo` + `pacman -Qkk <package>` / `dpkg-query -S` + `dpkg --verify <package>` / `rpm -qa` + `rpm -V <package>` | At the end of a scan with flagged files, and for `--clamav-report` | Read-only check of whether a package installed a flagged file and it's unchanged: the "Likely false positive" label (see False Positives) |
 | `pacman -Qo` + `pacman -Qkk <package>` / `dpkg-query -S` + `dpkg --verify <package>` / `rpm -qa` + `rpm -V <package>` | Only with `--persistence`, for new or changed startup entries outside your home folder | Read-only check of whether a package installed the entry, and whether it still matches (see Persistence Audit) |
 | `notify-send` | At the end of a run, if installed | Desktop notification |
 | `gdbus` | After an infected-files alert | Closes that notification after its timeout |
 | `pgrep` | When sending an infected-files alert | Checks whether a Steam game is running (see Alerts) |
 
-Ensign never changes permissions on your files, and never asks you to. It also never deletes, quarantines or edits a file: it reports. The only permissions it sets are on its own files, when you run `sudo ensign-scan --protect` (see Protected mode).
+Ensign never changes permissions on your files, and never asks you to. It also never deletes, quarantines or edits a file: it reports. The one thing it deletes is its own files, when you ask with `--uninstall` (see Uninstalling). The only permissions it sets are on its own files, when you run `sudo ensign-scan --protect` (see Protected mode).
 
 ### What Ensign can't see
 
@@ -163,7 +164,7 @@ Your config and your database belong to you, so only you (and root) can change t
 |---|---|---|
 | `excludes` or `scan_targets` in your config | Its folder is never scanned, and nothing says so | Nothing in your own runs. In protected mode it can't change your config |
 | `clamd_socket` in your config, pointed at a fake clamd it runs itself | Every file is reported clean | Ensign refuses a clamd running as you (see How clamd Reads Your Files). In protected mode it can't change your config |
-| An allowance (its file's hash and signature name) | That hit is reported as "allowed by you" for as long as the file stays the same | The "Allowed by you" count at the end of each run, and `--list-allowed`. In protected mode it can't add one |
+| An allowance (its file's hash, signature name and engine) | That hit is reported as "allowed by you" for as long as the file stays the same | The "Allowed by you" count at the end of each run, and `--list-allowed`. In protected mode it can't add one |
 | An acknowledged startup entry | The persistence audit stops listing its entry | `persistence_acknowledged.log`, which sits in the same folder, so it could edit that too. In protected mode it can't acknowledge one |
 | A file's record, set to clean | The file isn't sent to ClamAV again until the next signature rescan (`rescan_after_signature_updates`) | The signature rescan, unless your config was also changed to switch it off. A record claiming a newer signature version than clamd has is rescanned at once |
 | Ensign itself, if it's installed where you can write (a checkout, a venv in your home, `pip install --user`), or the command you type: an alias, a `PATH` entry, or a variable like `LD_PRELOAD` or `PYTHONPATH` set in your shell's startup files, which could also run an older copy of Ensign that doesn't know protected mode | Anything, protected mode included. Under `sudo`, the changed code runs as root | Nothing Ensign can do. Install it where only root can write if this matters to you. A change to your shell's startup files shows up in the persistence audit |
@@ -291,9 +292,9 @@ These run one job and exit — no full scan.
 | `python3 main.py --verify-packages` | Cross-check installed files against the package manager's own checksums, flag mismatches (can be slow, and has no time limit: Ctrl+C stops it; `--verify-pacman` still works as the old name) |
 | `python3 main.py --suggest-fixes` | List files clamd could not read, grouped by directory, optionally scoped to given targets |
 | `python3 main.py --diagnostics` | Print versions, settings and counts for a bug report. Contains no paths, usernames, hostnames or file names, and writes nothing |
-| `python3 main.py --allow PATH` | Mark a file ClamAV flagged as a false positive (see A note on infected results). Asks to confirm; `--yes` skips the question |
+| `python3 main.py --allow PATH` | Mark a file ClamAV flagged as a false positive (see False Positives). Asks to confirm; `--yes` skips the question |
 | `python3 main.py --unallow PATH` | Undo `--allow`: the file counts as infected again |
-| `python3 main.py --allow-folder FOLDER --signature NAME` | Allow every file under a folder that one signature flags right now (see A note on infected results). Asks once to confirm; `--yes` skips the question |
+| `python3 main.py --allow-folder FOLDER --signature NAME` | Allow every file under a folder that one signature flags right now (see False Positives). Asks once to confirm; `--yes` skips the question |
 | `python3 main.py --unallow-folder FOLDER --signature NAME` | Undo `--allow-folder`: those files count as infected again |
 | `python3 main.py --list-allowed` | List what you've allowed: each folder once (its signatures, how many files each allowed, and any file there that's infected now and not allowed), then each file once with its signatures and SHA-256 |
 | `python3 main.py --list-allowed-all` | The same, plus the files inside each allowed folder, listed one level in |
@@ -306,11 +307,15 @@ These run one job and exit — no full scan.
 | `sudo python3 main.py --unprotect` | Undo `--protect`: your runs use your own config and database again. Asks first |
 | `sudo python3 main.py --uninstall` | Delete everything Ensign made, yours and root's, after listing it and asking you to type `uninstall` (see Uninstalling). Without `sudo`, only yours |
 | `sudo python3 main.py --protected --allow PATH` | In protected mode, change your decisions: goes with `--allow`, `--unallow`, `--allow-folder`, `--unallow-folder`, `--persistence`, `--acknowledge` and `--acknowledge-all` |
-| `python3 main.py --clamav-report PATH` | Prepare a false-positive report for ClamAV about a flagged file (see A note on infected results). Nothing is sent: you submit it |
+| `python3 main.py --clamav-report PATH` | Prepare a false-positive report for ClamAV about a flagged file (see False Positives). Nothing is sent: you submit it |
 
 ### Only one run at a time
 
 Before it scans, purges or retries errors, Ensign takes a lock: a small file called `ensign.lock` in your data directory (`~/.local/share/ensign-scan/` unless you've set a custom `data_dir`). If another Ensign already holds it, the new one prints which process has it, exits with code 75 and scans nothing. That way a scheduled run and a manual run can't overlap and scan the same files twice.
+
+- **The lock frees itself.** It belongs to the running process, so it is released when that process ends, even after a crash or `kill -9`. There is never a stale lock to clean up.
+- **Leave the file in place.** Deleting `ensign.lock` while a run is using it can let a second run start.
+- **Read-only commands skip it.** `--verify-packages`, `--suggest-fixes` and `--diagnostics` only read the database, so they can run while a scan is going.
 
 A scan's exit code says how it went, so a script or a scheduled run can act on it:
 
@@ -367,10 +372,6 @@ ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This 
 `AlertExceedsMax yes` in clamd.conf is worth setting. Without it, clamd also says "OK" for an archive that unpacks to more than `MaxScanSize`, and Ensign can't tell from the file's size. With it, clamd flags these, and Ensign rescans them with `clamscan` (it doesn't count them as infected).
 
 Filenames that aren't valid UTF-8 (common in old archives, Wine/Proton folders and files from Windows) are tracked like any other: they're stored as their original bytes and shown with those bytes as `\xNN`, e.g. `caf\xe9.txt`.
-
-- **The lock frees itself.** It belongs to the running process, so it is released when that process ends, even after a crash or `kill -9`. There is never a stale lock to clean up.
-- **Leave the file in place.** Deleting `ensign.lock` while a run is using it can let a second run start.
-- **Read-only commands skip it.** `--verify-packages`, `--suggest-fixes` and `--diagnostics` only read the database, so they can run while a scan is going.
 
 ### If clamd still can't read some files
 
@@ -447,65 +448,7 @@ When a scan finds an infected file, or `--verify-packages` finds a mismatch, Ens
 - **Findings are grouped by threat name,** so a signature that hits many files is explained once. Each file gets a context line: size, last modified date, and whether a package owns it.
 - **All local and advisory.** Nothing is looked up online, and the notes never change a scan result.
 
-## Customizing
-
-Three optional sections in your `config.toml` extend Ensign's built-in lists. They are **additive only**: your entries are added, never replace a built-in one, and an entry that collides with a built-in is ignored with a warning.
-
-```
-[custom_threats."Win.Malware.Example-1234567-0"]
-description = "What this signature generally means."
-false_positive_note = "Optional: when it's commonly a false positive."
-
-[custom_pacman_reasons]
-"Some new mismatch type" = "What this pacman -Qkk reason means."
-
-[custom_secrets]
-high_dirs = ["myvault"]
-high_prefixes = [["mywallet_", "wallets"]]
-```
-
-- **`[custom_threats]`** adds a note for a threat name. The name must match exactly, including the numbers.
-- **`[custom_pacman_reasons]`** adds a note for a `pacman -Qkk` mismatch reason.
-- **`[custom_secrets]`** adds paths that look like secrets stores. The keys are `high_dirs`, `high_dir_paths`, `high_filenames`, `high_extensions`, `high_scoped_filenames`, `high_prefixes`, `medium_prefixes` and `medium_extensions`. Folder entries match whole folder names, in order (`myapp/keys` matches `~/myapp/keys/`, not `~/myapp-old/keys/`). A HIGH match means the file is scanned but no hash of it is stored (see How clamd Reads Your Files); a MEDIUM match changes nothing yet. See `ensign_scan/secrets.py` for what the tiers mean.
-
-The first time you run Ensign it writes a starter `config.toml` with all of these documented as comments. `config.example.toml` in the repo has the same content.
-
-## Querying the Database Directly
-
-Most day-to-day questions are covered by the commands above. But the database is just SQLite, kept locally at the path printed in the `Database:` line when Ensign starts (`~/.local/share/ensign-scan/system.db` unless you've set a custom `data_dir`) — for anything the built-in reports don't cover, `sqlite3` gets you there directly.
-
-The `files` table's `scan_status` column is one of: `clean`, `infected`, `error`, `pending`, `classified` (from earlier versions, until that file is scanned).
-
-See the details behind current errors:
-```
-sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='error';"
-```
-
-See which clean files Ensign treats as credential files (scanned, no hash kept):
-```
-sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath FROM files WHERE scan_status='clean' AND file_hash='';"
-```
-
-The list of paths/filenames/extensions used to make that call isn't arbitrary — see `docs/Classified_Paths_Research.md` for the sourcing behind each entry, and `ensign_scan/secrets.py` for the confidence tiers and how `hash_not_stored()` uses them.
-
-See infected files and what triggered them:
-```
-sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, threat_name FROM files WHERE scan_status='infected';"
-```
-
-Each hit is also kept as a finding (which engine, which signature, which content, and whether it's open, allowed, or gone because a later scan found nothing), and second opinions are in `evidence`:
-```
-sqlite3 ~/.local/share/ensign-scan/system.db "SELECT f.filepath, x.engine, x.signature, x.state FROM findings x JOIN files f ON f.id = x.file_id;"
-```
-
-Look up everything Ensign knows about one specific file:
-```
-sqlite3 ~/.local/share/ensign-scan/system.db "SELECT * FROM files WHERE filepath='/full/path/to/file';"
-
-
-```
-
-### A note on infected results
+## False Positives
 
 ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match on legitimate code patterns — for example, JS build tools that generate functions at runtime from template/markup content (Vue's `compiler-sfc`, Vite's dependency cache) can trigger a phishing-heuristic match despite being ordinary framework code. Treat an `infected` status as a reason to look closer: it doesn't prove the file is malicious. Check what the file actually is and, if it looks like legitimate tooling, search the threat name plus the library name before assuming compromise.
 
@@ -540,6 +483,62 @@ ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match 
 The answer is kept with the content it was checked against, so once the file changes it's no longer shown. It never changes a verdict, and it's left out of the report sent to ClamAV except for one line: when the package manager vouches for the file, `--clamav-report` names the package, which helps ClamAV find the file.
 
 Allowances live in Ensign's own database. Ensign doesn't touch ClamAV or its signatures, so nothing else that uses clamd is affected. (ClamAV's own allow lists, `.sfp` and `.ign2` files in its database folder, work for every program using clamd. See ClamAV's documentation if that's what you want.)
+
+## Customizing
+
+Three optional sections in your `config.toml` extend Ensign's built-in lists. They are **additive only**: your entries are added, never replace a built-in one, and an entry that collides with a built-in is ignored with a warning.
+
+```
+[custom_threats."Win.Malware.Example-1234567-0"]
+description = "What this signature generally means."
+false_positive_note = "Optional: when it's commonly a false positive."
+
+[custom_pacman_reasons]
+"Some new mismatch type" = "What this pacman -Qkk reason means."
+
+[custom_secrets]
+high_dirs = ["myvault"]
+high_prefixes = [["mywallet_", "wallets"]]
+```
+
+- **`[custom_threats]`** adds a note for a threat name. The name must match exactly, including the numbers.
+- **`[custom_pacman_reasons]`** adds a note for a `pacman -Qkk` mismatch reason.
+- **`[custom_secrets]`** adds paths that look like secrets stores. The keys are `high_dirs`, `high_dir_paths`, `high_filenames`, `high_extensions`, `high_scoped_filenames`, `high_prefixes`, `medium_prefixes` and `medium_extensions`. Folder entries match whole folder names, in order (`myapp/keys` matches `~/myapp/keys/`, not `~/myapp-old/keys/`). A HIGH match means the file is scanned but no hash of it is stored (see How clamd Reads Your Files); a MEDIUM match changes nothing yet. See `ensign_scan/secrets.py` for what the tiers mean.
+
+The first time you run Ensign it writes a starter `config.toml` with all of these documented as comments. `config.example.toml` in the repo has the same content.
+
+## Querying the Database Directly
+
+Most day-to-day questions are covered by the commands above. But the database is just SQLite, kept locally at the path printed in the `Database:` line when Ensign starts (`~/.local/share/ensign-scan/system.db` unless you've set a custom `data_dir`) — for anything the built-in reports don't cover, `sqlite3` gets you there directly.
+
+The `files` table's `scan_status` column is one of: `clean`, `infected`, `allowed` (flagged, and you allowed it), `incomplete` (not fully scanned, see Large files), `error`, `pending`, `classified` (from earlier versions, until that file is scanned).
+
+See the details behind current errors:
+```
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, scan_result FROM files WHERE scan_status='error';"
+```
+
+See which clean files Ensign treats as credential files (scanned, no hash kept):
+```
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath FROM files WHERE scan_status='clean' AND file_hash='';"
+```
+
+The list of paths/filenames/extensions used to make that call isn't arbitrary — see `docs/Classified_Paths_Research.md` for the sourcing behind each entry, and `ensign_scan/secrets.py` for the confidence tiers and how `hash_not_stored()` uses them.
+
+See infected files and what triggered them:
+```
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, threat_name FROM files WHERE scan_status='infected';"
+```
+
+Each hit is also kept as a finding (which engine, which signature, which content, and whether it's open, allowed, or gone because a later scan found nothing or the file changed), and second opinions are in `evidence`:
+```
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT f.filepath, x.engine, x.signature, x.state FROM findings x JOIN files f ON f.id = x.file_id;"
+```
+
+Look up everything Ensign knows about one specific file:
+```
+sqlite3 ~/.local/share/ensign-scan/system.db "SELECT * FROM files WHERE filepath='/full/path/to/file';"
+```
 
 ## Reporting Bugs and Security Issues
 
