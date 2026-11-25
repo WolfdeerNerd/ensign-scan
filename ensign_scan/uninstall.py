@@ -30,6 +30,7 @@ re-enter if you come back. There's no import for it yet.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import pwd
@@ -113,12 +114,56 @@ def _data_dir_setting(config_path: Path) -> Path | None:
     return Path(os.path.expanduser(value)).absolute()
 
 
+# In a folder that isn't Ensign's alone (a data_dir a config moved
+# elsewhere, maybe your home), only files Ensign is known to write go, never
+# a folder by name: a "logs" or "yara" folder there may be yours. The
+# database and the files that sit beside it only when the database really
+# is Ensign's.
+_BESIDE_DB = ("system.db", "system.db-wal", "system.db-shm", "system.db-journal", "ensign.lock",
+              "alert_state.json", "persistence_acknowledged.log", "error_logs.txt")
+_IN_SUBFOLDERS = {"logs": ("ensign-*.log",),
+                  "yara": ("clamav-gaps.json", "clamav-gaps-*.yar", "clamav-gaps*.tmp"),
+                  "clamav-reports": ("false-positive-*.txt",)}
+
+
+def _is_ensigns_database(path: Path) -> bool:
+    """An SQLite file with Ensign's files table, read without changing it."""
+    try:
+        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)
+    except (sqlite3.Error, ValueError):
+        return False
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
+        return {"filepath", "file_hash", "scan_status", "threat_name"} <= columns
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def _ensigns_names_in(folder: Path, what: str, plan: Plan) -> None:
-    """Ensign's files in a folder that may hold other things too."""
+    """Ensign's own files in a folder that may hold other things too, as
+    paths inside it (see _BESIDE_DB and _IN_SUBFOLDERS)."""
     if not _is_real_dir(folder):
         return
+    names: list[str] = []
     try:
-        names = sorted(e.name for e in folder.iterdir() if e.name in migrate._DATA_NAMES)
+        if _is_ensigns_database(folder / "system.db"):
+            names += [n for n in _BESIDE_DB if os.path.lexists(folder / n)]
+        elif os.path.lexists(folder / "system.db"):
+            plan.kept.append(f"{folder / 'system.db'}: not an Ensign database, so it and the files "
+                             f"beside it stay")
+        for sub, patterns in _IN_SUBFOLDERS.items():
+            if not _is_real_dir(folder / sub):
+                continue
+            mine = sorted(e.name for e in (folder / sub).iterdir()
+                          if not e.is_dir(follow_symlinks=False)
+                          and any(fnmatch.fnmatchcase(e.name, p) for p in patterns))
+            names += [f"{sub}/{n}" for n in mine]
+            others = sum(1 for _ in (folder / sub).iterdir()) - len(mine)
+            if others:
+                plan.kept.append(f"{folder / sub}: {others} other item{'s' if others != 1 else ''} "
+                                 f"in it aren't Ensign's, so the folder stays")
     except OSError as exc:
         plan.kept.append(f"{folder}: couldn't be read ({exc.strerror or exc})")
         return
@@ -311,16 +356,15 @@ def delete(items: list[Item]) -> list[str]:
             if lock:
                 lock.acquire()   # held while it goes, so no run starts using it midway
             if item.names:
-                for name in item.names:
+                for name in item.names:   # files only, never a folder by name
                     target = folder / name
-                    if _is_real_dir(target):
-                        shutil.rmtree(target)
-                    else:
+                    if not _is_real_dir(target):
                         target.unlink(missing_ok=True)
-                try:
-                    folder.rmdir()   # only if that left it empty
-                except OSError:
-                    pass
+                for sub in [*_IN_SUBFOLDERS, ""]:   # then whatever that left empty
+                    try:
+                        (folder / sub).rmdir()
+                    except OSError:
+                        pass
             elif _is_real_dir(folder):
                 shutil.rmtree(folder)
         except AlreadyRunning:
@@ -477,7 +521,11 @@ def run(confirm_word=input, ask_yes_no=None, out=rich_print, config: str | None 
     leftovers = [] if as_root else [str(p) for p in (protect.CONFIG_ROOT, protect.DATA_ROOT) if p.exists()]
     out("This deletes everything Ensign made" + (" (yours and root's):" if as_root else " for you:"))
     for _who, item in items:
-        inside = f" (only {', '.join(item.names)})" if item.names else ""
+        inside = ""
+        if item.names:
+            shown_names = ", ".join(item.names) if len(item.names) <= 6 else \
+                f"{len(item.names)} of Ensign's files, such as {', '.join(item.names[:3])}"
+            inside = f" (only {shown_names})"
         out(f"  {shown(item.path)}{shown(inside)}  {_human(item.size)}  · {item.what}")
     if not items:
         out("  nothing: Ensign has no files here.")

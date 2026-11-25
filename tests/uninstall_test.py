@@ -54,7 +54,13 @@ def make_home(home: Path) -> None:
     engine.dispose()
     elsewhere = home / "elsewhere"   # a data_dir that holds your own things too
     elsewhere.mkdir()
+    make_engine(f"sqlite:///{elsewhere / 'system.db'}").dispose()   # Ensign's database
     (elsewhere / "error_logs.txt").write_text("Ensign's\n")
+    (elsewhere / "logs").mkdir()
+    (elsewhere / "logs" / "ensign-20260101-000000.log").write_text("Ensign's\n")
+    (elsewhere / "logs" / "my-notes.log").write_text("yours\n")      # a logs folder you use too
+    (elsewhere / "yara").mkdir()
+    (elsewhere / "yara" / "my-rule.yar").write_text("rule mine { condition: false }\n")
     (elsewhere / "mine.txt").write_text("not Ensign's\n")
     legacy = home / ".config" / "ensign"   # the old name, but another program's here
     legacy.mkdir()
@@ -97,11 +103,22 @@ if os.geteuid() != 0:
             # Ensign's too, and the config file itself is pointed out, not deleted.
             alt = home / "alt.toml"
             (home / "altdata").mkdir()
-            (home / "altdata" / "error_logs.txt").write_text("Ensign's\n")
+            make_engine(f"sqlite:///{home / 'altdata' / 'system.db'}").dispose()
             alt.write_text('data_dir = "~/altdata"\n')
             plan = uninstall.user_plan(home, str(alt))
             assert str(home / "altdata") in [i.path for i in plan.items], plan.items
             assert any("alt.toml" in k for k in plan.kept), plan.kept
+
+            # A shared folder whose system.db isn't Ensign's: it, and the files
+            # that would sit beside Ensign's database, stay.
+            stranger = home / "stranger"
+            stranger.mkdir()
+            import sqlite3 as _sqlite3  # noqa: E402
+            _sqlite3.connect(stranger / "system.db").execute("CREATE TABLE notes (x)").connection.close()
+            (stranger / "alert_state.json").write_text("{}")
+            plan = uninstall.Plan()
+            uninstall._ensigns_names_in(stranger, "test", plan)
+            assert not plan.items and any("not an Ensign database" in k for k in plan.kept), plan
 
             # A run that's going: refused before asking.
             lock = RunLock(data / "ensign.lock")
@@ -116,7 +133,12 @@ if os.geteuid() != 0:
             assert code == 0, text
             assert not (home / ".config" / "ensign-scan").exists() and not data.exists()
             assert not (home / "elsewhere" / "error_logs.txt").exists()
+            assert not (home / "elsewhere" / "system.db").exists()
+            assert not (home / "elsewhere" / "logs" / "ensign-20260101-000000.log").exists()
             assert (home / "elsewhere" / "mine.txt").exists(), "only Ensign's files in a shared folder"
+            assert (home / "elsewhere" / "logs" / "my-notes.log").exists(), \
+                "a logs folder in a shared folder is never deleted by its name"
+            assert (home / "elsewhere" / "yara" / "my-rule.yar").exists(), "your own YARA rule stays"
             assert (home / ".config" / "ensign" / "notes.txt").exists(), "another program's folder stays"
             assert (home / ".config" / "systemd" / "user" / "scan.service").exists(), "yours to remove"
             saved = list(home.glob("ensign-scan-decisions-*.json"))

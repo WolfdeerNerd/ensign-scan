@@ -497,7 +497,7 @@ def report(audit: Audit) -> None:
     if audit.acknowledged == 0 and audit.new:
         print("[yellow]Nothing has been acknowledged yet, so every entry counts as new.[/yellow] Look "
               "through the list (entries no package owns, and those in your home folder, matter "
-              f"most), then set the baseline with {_acknowledge_command()} acknowledge --all.")
+              f"most), then set the baseline with {shown(_acknowledge_command())} acknowledge --all.")
 
     new = [(e.category, e.path, _describe(e) + _origin_note(audit, e.path), e.place) for e in audit.new]
     _print_section("NEW SINCE YOU LAST ACKNOWLEDGED", "yellow", "+", new, audit)
@@ -521,7 +521,7 @@ def report(audit: Audit) -> None:
     if not audit.pending:
         print("\n[green]✓ Nothing new, changed or gone since you last acknowledged.[/green]")
         return
-    command = _acknowledge_command()
+    command = shown(_acknowledge_command())   # a --config path is printed through rich
     print("\nIf you know where an entry came from (something you installed or set up), accept it:")
     print(f"  {command} acknowledge PATH     one entry")
     print(f"  {command} acknowledge --all      everything listed above")
