@@ -611,8 +611,36 @@ def ensure_default_config() -> None:
     if DEFAULT_CONFIG_PATH.exists() or LEGACY_CONFIG_PATH.exists():
         return
     DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DEFAULT_CONFIG_PATH.write_text(EXAMPLE_CONFIG)
-    print(f"[ensign] Wrote starter config to {DEFAULT_CONFIG_PATH}")
+    if _write_new(DEFAULT_CONFIG_PATH, EXAMPLE_CONFIG, 0o644):
+        print(f"[ensign] Wrote starter config to {DEFAULT_CONFIG_PATH}")
+
+
+def _write_new(path: Path, text: str, mode: int) -> bool:
+    """Create `path` holding `text`, whole or not at all: written under a
+    temporary name, flushed to disk, then linked into place. A crash midway
+    never leaves a cut-off config (a cut-off list of excludes, say, would
+    still load). Returns False if `path` appeared meanwhile; it's kept."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.new")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp, path)   # unlike a rename, never replaces a file that's there
+        except FileExistsError:
+            return False
+        except OSError:          # a filesystem without hard links
+            if os.path.lexists(path):
+                return False
+            os.rename(tmp, path)
+        return True
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 _MAX_COPIED_CONFIG = 1024 * 1024
@@ -632,9 +660,8 @@ def _ensure_root_config() -> None:
     _require_root_only("config file", DEFAULT_CONFIG_PATH)
     copied_from, text = _user_config_to_copy()
     DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(DEFAULT_CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text if copied_from else EXAMPLE_CONFIG)
+    if not _write_new(DEFAULT_CONFIG_PATH, text if copied_from else EXAMPLE_CONFIG, 0o600):
+        return   # another run made it meanwhile
     if copied_from:
         print(f"[ensign] First run as root: copied your config {_tilde(copied_from)} to "
               f"{DEFAULT_CONFIG_PATH}.\n"

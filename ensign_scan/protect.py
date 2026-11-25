@@ -363,8 +363,12 @@ def protect(uid: int, config_text: str, copied_from: str | None, confirm) -> Pro
         os.rename(staged, found.config)
         acl.set_only(str(found.config), uid, acl.READ)
 
-        _create_decisions(found.decisions)
-        acl.set_only(str(found.decisions), uid, acl.READ)
+        # Made whole under another name, then renamed into place: a crash
+        # midway leaves no half-made decisions file where your runs look.
+        staged_decisions = data_dir(uid) / ".decisions.db.new"
+        _create_decisions(staged_decisions)
+        acl.set_only(str(staged_decisions), uid, acl.READ)
+        os.rename(staged_decisions, found.decisions)
 
         # Nobody but the user may read them: no entry inherited from a default
         # ACL above, no group or other access.
