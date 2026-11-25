@@ -163,6 +163,60 @@ with tempfile.TemporaryDirectory() as d:
     make_engine(f"sqlite:///{path}").dispose()   # a second start changes nothing, and doesn't fail
     print("upgrade from 0.9.x test passed ✓")
 
+# --- the table rebuild is all or nothing --------------------------------------------------------
+from sqlalchemy import create_engine  # noqa: E402
+
+from ensign_scan import db as db_module  # noqa: E402
+from ensign_scan.models import Base  # noqa: E402
+
+OLD_ALLOWANCES = """
+    CREATE TABLE allowances (id INTEGER NOT NULL, file_hash VARCHAR NOT NULL,
+        threat_name TEXT NOT NULL, filepath VARCHAR NOT NULL, allowed_at DATETIME NOT NULL,
+        PRIMARY KEY (id), UNIQUE (file_hash, threat_name));
+    INSERT INTO allowances VALUES (1, 'aa', 'X', '/data/a.bin', '2026-01-01 00:00:00');
+"""
+with tempfile.TemporaryDirectory() as d:
+    path = Path(d, "decisions.db")
+    with sqlite3.connect(path) as c:
+        c.executescript(OLD_ALLOWANCES)
+    c.close()
+    engine = create_engine(f"sqlite:///{path}")
+    table = Base.metadata.tables["allowances"]
+    real_create = table.create
+
+    def power_cut(*args, **kwargs):
+        raise RuntimeError("power cut")
+    table.create = power_cut   # after the rename, before the copy
+    try:
+        with engine.begin() as conn:
+            db_module.upgrade_decision_tables(conn)
+        raise AssertionError("expected the simulated crash")
+    except RuntimeError:
+        pass
+    finally:
+        table.create = real_create
+    engine.dispose()
+    with sqlite3.connect(path) as c:
+        names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        rows = c.execute("SELECT file_hash, threat_name FROM allowances").fetchall()
+    c.close()
+    assert names == {"allowances"} and rows == [("aa", "X")], \
+        f"a crash mid-rebuild must leave the table as it was: {names} {rows}"
+
+    # A rebuild left half done (by a build without this fix): finished, nothing lost.
+    with sqlite3.connect(path) as c:
+        c.execute("ALTER TABLE allowances RENAME TO allowances_before_engine")
+    c.close()
+    engine = make_engine(f"sqlite:///{path}")   # create_all makes an empty new table first
+    with Session(engine) as session:
+        got = [(a.file_hash, a.threat_name, a.engine) for a in session.query(Allowance)]
+    engine.dispose()
+    assert got == [("aa", "X", "clamav")], got
+    with sqlite3.connect(path) as c:
+        assert not c.execute("SELECT name FROM sqlite_master WHERE name LIKE '%before_engine'").fetchall()
+    c.close()
+    print("all-or-nothing rebuild test passed ✓")
+
 # --- engines, findings and evidence during runs ------------------------------------------------
 with tempfile.TemporaryDirectory() as d:
     tree = Path(d, "tree")
