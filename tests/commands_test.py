@@ -224,6 +224,18 @@ try:
 finally:
     allowlist._COMMAND = saved
 assert commands.prefix() == ("sudo ensign-scan" if os.geteuid() == 0 else "ensign-scan")
+# A run given --config: its hints carry it, so they act on the same database.
+commands.remember_config("/tmp/my configs/alt.toml")
+try:
+    hint = allowlist._command("--unallow", "/f")
+    assert "--config '/tmp/my configs/alt.toml' unallow /f" in hint, hint
+    import shlex as _shlex  # noqa: E402
+    words = _shlex.split(hint)
+    assert parsed(words[words.index("ensign-scan") + 1:])["config"] == "/tmp/my configs/alt.toml"
+    assert commands.prefix().endswith("--config '/tmp/my configs/alt.toml'")
+finally:
+    commands.remember_config(None)
+assert commands.prefix() == ("sudo ensign-scan" if os.geteuid() == 0 else "ensign-scan")
 assert allowlist._READ == commands.prefix()
 print("every printed hint parses test passed ✓")
 

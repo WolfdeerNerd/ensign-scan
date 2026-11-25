@@ -251,6 +251,9 @@ def _main() -> int:
     args.acknowledge = [persistence.resolve_dirs(os.path.abspath(p)) for p in args.acknowledge]
     args.allow_folder = os.path.abspath(args.allow_folder) if args.allow_folder else None
     args.unallow_folder = os.path.abspath(args.unallow_folder) if args.unallow_folder else None
+    # Hints Ensign prints carry this run's --config, so pasting one acts on
+    # the same config and database.
+    commands.remember_config(os.path.abspath(args.config) if args.config else None)
     # Before anything that writes (starter config, logs, database) or prints
     # personal details (the greeting): diagnostics must be read-only and clean.
     if args.diagnostics:
@@ -262,7 +265,10 @@ def _main() -> int:
         # Before anything reads the config or the database: an uninstall
         # has to work when they're broken, too.
         from ensign_scan import uninstall
-        return uninstall.run()
+        # A config named with --config or $ENSIGN_CONFIG can move the data
+        # elsewhere (data_dir); that data is Ensign's too. Under sudo the
+        # config is root's, already in root_plan.
+        return uninstall.run(config=None if AS_ROOT else (args.config or os.environ.get("ENSIGN_CONFIG")))
     if AS_ROOT:
         # A protected user's runs stop on a decisions file made by an older
         # Ensign (they can't change it): any sudo run brings it up to date.

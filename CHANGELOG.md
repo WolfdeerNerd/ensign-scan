@@ -15,6 +15,8 @@ Versions follow `major.minor.patch`: a new feature bumps the middle number, a fi
 
 ### Fixed
 - Under `sudo`, the commands Ensign suggests start with `sudo`, so pasting one acts on root's records and decisions, the ones that run used. In protected mode, the hint for listing a folder's infected files no longer adds `--protected`, which that command refuses.
+- A run given `--config` now includes it in the commands it suggests, so pasting one acts on the same config and database.
+- `uninstall` given `--config` (or `$ENSIGN_CONFIG`) also removes Ensign's files from that config's `data_dir`, and names the config file itself, which it leaves for you.
 
 ## 0.10.0
 
