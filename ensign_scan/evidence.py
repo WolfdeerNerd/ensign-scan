@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 
 from sqlalchemy import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from . import pkgdb
@@ -44,9 +45,19 @@ _KEPT = (pkgdb.FROM_PACKAGE, pkgdb.MODIFIED, pkgdb.OWNED)
 def refresh(engine: Engine) -> int:
     """Ask the package manager about every file with an open finding.
     Returns how many files have package evidence afterwards. Does nothing
-    when package verification is off or unavailable."""
+    when package verification is off or unavailable. A second opinion that
+    fails (the database busy past its timeout, say) never fails the run:
+    it's logged, and the report goes on without it."""
     if pkgdb.active().name == "none":
         return 0
+    try:
+        return _refresh(engine)
+    except SQLAlchemyError:
+        log.exception("could not save the package manager's answers about flagged files")
+        return 0
+
+
+def _refresh(engine: Engine) -> int:
     with Session(engine) as session:
         rows = session.query(FileRecord.id, FileRecord.filepath, FileRecord.file_hash).join(
             Finding, Finding.file_id == FileRecord.id).filter(
