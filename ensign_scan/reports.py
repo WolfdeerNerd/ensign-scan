@@ -160,8 +160,8 @@ def _print_hotspots(title: str, intro: list[str], hotspots: dict[str, list[str]]
             print_unwrapped(f"  {shown(parent)}  ({label})")
     print()
     if stale_only:
-        print(f"Records for files that no longer exist: clear them with: {prefix()} purge-missing")
-    print(f"Once the cause is fixed, retry these with: {prefix()} rescan-errors")
+        print(f"Records for files that no longer exist: clear them with: {shown(prefix())} purge-missing")
+    print(f"Once the cause is fixed, retry these with: {shown(prefix())} rescan-errors")
 
 
 def integrity_report(changes) -> None:
