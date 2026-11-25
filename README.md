@@ -26,7 +26,7 @@ The idea was to be as paranoid as possible when designing this. That being said,
 ## Disclaimer
 Ensign is an independent project. It is not affiliated with Ensign InfoSecurity, The Ensign Group, the U.S. Navy or the U.S. Government.
 
-Parts of this repo were written with assistance of Claude. The architecture and design decisions were made by me. Feel free to scrutinize this code, I welcome any flaws that are found. This project is not perfect, the same way I am not. A wise man loves correction, a fool abhors it.
+Most of the code in this repo was written by Claude, working under my direction. The architecture and design decisions are mine. Every change goes through testing before it's merged, and before each release we sweep the code for bugs repeatedly and patch most, if not all, of what turns up. Feel free to scrutinize this code, I welcome any flaws that are found. This project is not perfect, the same way I am not. A wise man loves correction, a fool abhors it.
 
 ## License
 
@@ -590,6 +590,9 @@ Hence why for this build, I've opted to set followlinks to False in the walk fun
 `for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):`
 
 That way there's no endless cascade of walking a single directory. Symlinked directories are skipped entirely now — the walk sees them but never descends in. Individual files that happen to be symlinks (like a shortcut to a document) are still followed and scanned through to their real target, same as before — it's only symlinked directories that stopped getting wandered into.
+
+## Transparency
+Ensign tries to be upfront about what it can and can't do. Files it couldn't fully scan are reported as such and are never called clean, and its known limits, such as malware running as your own user, are written down in [What Ensign Touches, and What It Can't See](#what-ensign-touches-and-what-it-cant-see). If you find a gap that isn't documented, please open an issue, or report it privately if it's a security problem.
 
 ## Last Note
 This readme will be updated when needed. IE. FAQ questions that keep getting asked, or something needs further explanation. 
