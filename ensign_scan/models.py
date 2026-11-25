@@ -56,8 +56,8 @@ class ScanStatus(str, Enum):
     INCOMPLETE = "incomplete"
     # ClamAV flagged this file, and you told Ensign it's a false positive
     # (ensign-scan --allow). Only for this exact content (SHA-256) and this
-    # exact signature: if the file changes, or another signature hits it,
-    # it is flagged again. Listed in its own section every run, never
+    # exact signature and engine: if the file changes, or another signature
+    # or engine hits it, it is flagged again. Listed in its own section every run, never
     # hidden; doesn't count as infected for alerts or the exit code.
     # threat_name keeps the signature. See allowlist.py.
     ALLOWED = "allowed"

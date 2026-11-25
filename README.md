@@ -121,7 +121,7 @@ Under `sudo`, use the same interpreter: `sudo .venv/bin/python main.py ...`.
 
 Ensign's core scanning, hashing, and database tracking are plain Python + SQLAlchemy + ClamAV — nothing Arch-specific. It should run on any Linux distro with Python 3.11+ and ClamAV installed.
 
-The one exception is package verification: `--verify-packages`, and the "owned by package …" context line under infected files. These ask your package manager which package owns a file and whether it still matches what the package installed. Ensign picks the package manager from `/etc/os-release` (setting: `package_verification`, default `"auto"`). It supports pacman (Arch and derivatives), dpkg (Debian, Ubuntu and derivatives) and rpm (Fedora, RHEL and its rebuilds, openSUSE). On any other distribution, package verification is skipped cleanly with a note saying why, and every other command works the same. dpkg's records are MD5 checksums: good for catching accidental or careless changes, not an attacker who deliberately builds a file with a matching checksum.
+The one exception is package verification: `--verify-packages`, the "owned by package …" context line under infected files, and the "Likely false positive" label. These ask your package manager which package owns a file and whether it still matches what the package installed. Ensign picks the package manager from `/etc/os-release` (setting: `package_verification`, default `"auto"`). It supports pacman (Arch and derivatives), dpkg (Debian, Ubuntu and derivatives) and rpm (Fedora, RHEL and its rebuilds, openSUSE). On any other distribution, package verification is skipped cleanly with a note saying why, and every other command works the same. dpkg's records are MD5 checksums: good for catching accidental or careless changes, not an attacker who deliberately builds a file with a matching checksum.
 
 `notify-send` (desktop notifications) isn't Arch-specific either — it's standard Linux tooling available on most major distros, just under a different package name (e.g. Debian/Ubuntu: `libnotify-bin`).
 
@@ -138,12 +138,13 @@ Ensign makes no network connections. It talks to clamd over a local Unix socket 
 | `clamscan` | Only for files larger than clamd scans (see Large files) | Scans them, in batches, with the size limits switched off. Under `sudo`, as the `clamav` user; a file that user can't read is given to it on stdin |
 | `pacman -Qkk` / `dpkg --verify` / `rpm -Va` | Only with `--verify-packages` (whichever matches your distribution) | Read-only integrity check of installed files |
 | `pacman -Qo` / `dpkg-query -S` / `rpm -qf` `<file>` | When listing infected files (whichever matches your distribution) | Read-only lookup of which package owns a flagged file |
+| `pacman -Qo` + `pacman -Qkk <package>` / `dpkg-query -S` + `dpkg --verify <package>` / `rpm -qa` + `rpm -V <package>` | At the end of a scan with flagged files, and for `--clamav-report` | Read-only check of whether a package installed a flagged file and it's unchanged: the "Likely false positive" label (see A note on infected results) |
 | `pacman -Qo` + `pacman -Qkk <package>` / `dpkg-query -S` + `dpkg --verify <package>` / `rpm -qa` + `rpm -V <package>` | Only with `--persistence`, for new or changed startup entries outside your home folder | Read-only check of whether a package installed the entry, and whether it still matches (see Persistence Audit) |
 | `notify-send` | At the end of a run, if installed | Desktop notification |
 | `gdbus` | After an infected-files alert | Closes that notification after its timeout |
 | `pgrep` | When sending an infected-files alert | Checks whether a Steam game is running (see Alerts) |
 
-Ensign never changes permissions on your files, and never asks you to. It also never deletes, quarantines or edits a file: it reports. The only permissions it sets are on its own files, when you run `sudo ensign-scan --protect` (see Protected mode).
+Ensign never changes permissions on your files, and never asks you to. It also never deletes, quarantines or edits a file: it reports. The one thing it deletes is its own files, when you ask with `--uninstall` (see Uninstalling). The only permissions it sets are on its own files, when you run `sudo ensign-scan --protect` (see Protected mode).
 
 ### What Ensign can't see
 
@@ -163,7 +164,7 @@ Your config and your database belong to you, so only you (and root) can change t
 |---|---|---|
 | `excludes` or `scan_targets` in your config | Its folder is never scanned, and nothing says so | Nothing in your own runs. In protected mode it can't change your config |
 | `clamd_socket` in your config, pointed at a fake clamd it runs itself | Every file is reported clean | Ensign refuses a clamd running as you (see How clamd Reads Your Files). In protected mode it can't change your config |
-| An allowance (its file's hash and signature name) | That hit is reported as "allowed by you" for as long as the file stays the same | The "Allowed by you" count at the end of each run, and `--list-allowed`. In protected mode it can't add one |
+| An allowance (its file's hash, signature name and engine) | That hit is reported as "allowed by you" for as long as the file stays the same | The "Allowed by you" count at the end of each run, and `--list-allowed`. In protected mode it can't add one |
 | An acknowledged startup entry | The persistence audit stops listing its entry | `persistence_acknowledged.log`, which sits in the same folder, so it could edit that too. In protected mode it can't acknowledge one |
 | A file's record, set to clean | The file isn't sent to ClamAV again until the next signature rescan (`rescan_after_signature_updates`) | The signature rescan, unless your config was also changed to switch it off. A record claiming a newer signature version than clamd has is rescanned at once |
 | Ensign itself, if it's installed where you can write (a checkout, a venv in your home, `pip install --user`), or the command you type: an alias, a `PATH` entry, or a variable like `LD_PRELOAD` or `PYTHONPATH` set in your shell's startup files, which could also run an older copy of Ensign that doesn't know protected mode | Anything, protected mode included. Under `sudo`, the changed code runs as root | Nothing Ensign can do. Install it where only root can write if this matters to you. A change to your shell's startup files shows up in the persistence audit |
@@ -312,6 +313,10 @@ These run one job and exit — no full scan.
 
 Before it scans, purges or retries errors, Ensign takes a lock: a small file called `ensign.lock` in your data directory (`~/.local/share/ensign-scan/` unless you've set a custom `data_dir`). If another Ensign already holds it, the new one prints which process has it, exits with code 75 and scans nothing. That way a scheduled run and a manual run can't overlap and scan the same files twice.
 
+- **The lock frees itself.** It belongs to the running process, so it is released when that process ends, even after a crash or `kill -9`. There is never a stale lock to clean up.
+- **Leave the file in place.** Deleting `ensign.lock` while a run is using it can let a second run start.
+- **Read-only commands skip it.** `--verify-packages`, `--suggest-fixes` and `--diagnostics` only read the database, so they can run while a scan is going.
+
 A scan's exit code says how it went, so a script or a scheduled run can act on it:
 
 | Code | Meaning |
@@ -367,10 +372,6 @@ ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This 
 `AlertExceedsMax yes` in clamd.conf is worth setting. Without it, clamd also says "OK" for an archive that unpacks to more than `MaxScanSize`, and Ensign can't tell from the file's size. With it, clamd flags these, and Ensign rescans them with `clamscan` (it doesn't count them as infected).
 
 Filenames that aren't valid UTF-8 (common in old archives, Wine/Proton folders and files from Windows) are tracked like any other: they're stored as their original bytes and shown with those bytes as `\xNN`, e.g. `caf\xe9.txt`.
-
-- **The lock frees itself.** It belongs to the running process, so it is released when that process ends, even after a crash or `kill -9`. There is never a stale lock to clean up.
-- **Leave the file in place.** Deleting `ensign.lock` while a run is using it can let a second run start.
-- **Read-only commands skip it.** `--verify-packages`, `--suggest-fixes` and `--diagnostics` only read the database, so they can run while a scan is going.
 
 ### If clamd still can't read some files
 
@@ -474,7 +475,7 @@ The first time you run Ensign it writes a starter `config.toml` with all of thes
 
 Most day-to-day questions are covered by the commands above. But the database is just SQLite, kept locally at the path printed in the `Database:` line when Ensign starts (`~/.local/share/ensign-scan/system.db` unless you've set a custom `data_dir`) — for anything the built-in reports don't cover, `sqlite3` gets you there directly.
 
-The `files` table's `scan_status` column is one of: `clean`, `infected`, `error`, `pending`, `classified` (from earlier versions, until that file is scanned).
+The `files` table's `scan_status` column is one of: `clean`, `infected`, `allowed` (flagged, and you allowed it), `incomplete` (not fully scanned, see Large files), `error`, `pending`, `classified` (from earlier versions, until that file is scanned).
 
 See the details behind current errors:
 ```
@@ -493,7 +494,7 @@ See infected files and what triggered them:
 sqlite3 ~/.local/share/ensign-scan/system.db "SELECT filepath, threat_name FROM files WHERE scan_status='infected';"
 ```
 
-Each hit is also kept as a finding (which engine, which signature, which content, and whether it's open, allowed, or gone because a later scan found nothing), and second opinions are in `evidence`:
+Each hit is also kept as a finding (which engine, which signature, which content, and whether it's open, allowed, or gone because a later scan found nothing or the file changed), and second opinions are in `evidence`:
 ```
 sqlite3 ~/.local/share/ensign-scan/system.db "SELECT f.filepath, x.engine, x.signature, x.state FROM findings x JOIN files f ON f.id = x.file_id;"
 ```
@@ -501,8 +502,6 @@ sqlite3 ~/.local/share/ensign-scan/system.db "SELECT f.filepath, x.engine, x.sig
 Look up everything Ensign knows about one specific file:
 ```
 sqlite3 ~/.local/share/ensign-scan/system.db "SELECT * FROM files WHERE filepath='/full/path/to/file';"
-
-
 ```
 
 ### A note on infected results
