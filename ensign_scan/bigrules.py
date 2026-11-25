@@ -567,7 +567,7 @@ def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_ha
                 if not by_hand:
                     raise RuntimeError(drop + "; kept the previous rules in case the databases are "
                                        "damaged. If ClamAV really dropped them, accept the new "
-                                       "count with ensign-scan --update-rules")
+                                       "count with ensign-scan update-rules")
                 warning = drop
             folder = rules_dir(data_dir)
             folder.mkdir(parents=True, exist_ok=True)
@@ -607,22 +607,22 @@ def update(data_dir: Path, db_dir: Path, engine: yaraengine.Engine | None, by_ha
                 return update(data_dir, db_dir, engine, force=True)
             return Status(None, False, f"YARA rules for files too large for ClamAV couldn't be "
                                        f"loaded ({exc}). Those files get the sweep only. Retry: "
-                                       f"ensign-scan --update-rules")
+                                       f"ensign-scan update-rules")
         except Exception as exc:
             return Status(None, False, f"YARA rules for files too large for ClamAV couldn't be "
                                        f"loaded ({exc}). Those files get the sweep only. Retry: "
-                                       f"ensign-scan --update-rules")
+                                       f"ensign-scan update-rules")
     if error and loaded:
         return Status(loaded, False, f"YARA rules for files too large for ClamAV couldn't be updated "
                                      f"({error}). Using the rules from {loaded.built_at}, made from "
-                                     f"older signatures. Retry: ensign-scan --update-rules")
+                                     f"older signatures. Retry: ensign-scan update-rules")
     if error:
         return Status(None, False, f"YARA rules for files too large for ClamAV couldn't be built "
                                    f"({error}). Those files get the sweep only. Retry: "
-                                   f"ensign-scan --update-rules")
+                                   f"ensign-scan update-rules")
     if loaded is None:
         return Status(None, False, "YARA rules for files too large for ClamAV are missing. "
-                                   "Build them: ensign-scan --update-rules")
+                                   "Build them: ensign-scan update-rules")
     word = "rebuilt just now" if rebuilt else "up to date"
     message = (f"YARA rules for files too large for ClamAV: {loaded.count} "
                f"signature{'' if loaded.count == 1 else 's'}, {word} "
@@ -638,12 +638,12 @@ def _unloaded_status(data_dir: Path, engine: yaraengine.Engine, state: dict, err
     present = all((rules_dir(data_dir) / f"clamav-gaps-{b}.yar").is_file() for b in MODULE_FOR_BUCKET)
     if not present:
         return Status(None, False, "YARA rules for files too large for ClamAV are missing. "
-                                   "Build them: ensign-scan --update-rules")
+                                   "Build them: ensign-scan update-rules")
     count = sum(state.get("counts", {}).values())
     if error:
         return Status(None, False, f"YARA rules for files too large for ClamAV couldn't be updated "
                                    f"({error}). Using the rules from {state.get('built_at', '?')}, "
-                                   f"made from older signatures. Retry: ensign-scan --update-rules",
+                                   f"made from older signatures. Retry: ensign-scan update-rules",
                       available=True)
     word = "rebuilt just now" if rebuilt else "up to date"
     message = (f"YARA rules for files too large for ClamAV: {count} "

@@ -226,7 +226,7 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
     listed = " ".join(run("--config", str(config), "--list-infected", str(odd_tree), cwd=work).split())
     assert "INFECTED FILES" in listed and "eicar-caf\\xe9.com" in listed, listed
     assert "SHA-256: 275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f" in listed, listed
-    assert "--clamav-report PATH" in listed and "Scanning" not in listed, listed
+    assert "ensign-scan report PATH" in listed and "Scanning" not in listed, listed
     first = rows(db)[odd]
     assert first[0] == "infected", first
     run("--config", str(config), str(odd_tree), expect=3, cwd=work)
@@ -300,7 +300,7 @@ with tempfile.TemporaryDirectory(prefix="ensign_cli_") as tmp:
     flat = " ".join(run("--config", str(config), str(batch), expect=3, cwd=work).split())
     assert rows(db)[str(newer)][0] == "infected" and rows(db)[str(texts[0])][0] == "allowed"
     assert "NEW IN FOLDERS YOU ALLOWED (2 files)" in flat, flat     # c.jsonl and model.pkl
-    assert (f"--allow-folder {shlex.quote(str(batch))} --signature {shlex.quote(signature)}"
+    assert (f"ensign-scan allow-folder {shlex.quote(str(batch))} --signature {shlex.quote(signature)}"
             in flat), flat
     # the end of the run lists the folder (its files are counted there), as --list-allowed does
     assert "FOLDERS YOU ALLOWED (1)" in flat and "2 files allowed" in flat, flat

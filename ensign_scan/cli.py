@@ -188,7 +188,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                or args.persistence or args.acknowledge or args.acknowledge_all):
         parser.error("--protected goes with --allow, --unallow, --allow-folder, --unallow-folder, "
                      "--persistence, --acknowledge or --acknowledge-all. To see what's allowed, "
-                     "run ensign-scan --list-allowed as yourself.")
+                     "run ensign-scan list allowed as yourself.")
     return args
 
 
@@ -335,7 +335,7 @@ def _protected_refusal(args) -> str | None:
             or args.acknowledge or args.acknowledge_all):
         return ("You are protected, so your allowances and acknowledged startup entries are "
                 "root's, and your user can't change them. Change them with sudo and --protected, "
-                "for example: sudo ensign-scan --protected --allow PATH. Nothing was changed.")
+                "for example: sudo ensign-scan --protected allow PATH. Nothing was changed.")
     return None
 
 
@@ -353,7 +353,7 @@ def _protected_writer(scanner: Scanner):
     if not protect.is_protected(uid) or not path.is_file():
         print("[bold red]✗ You aren't protected,[/bold red] so there are no protected decisions to "
               "change. Without --protected, sudo changes root's own; as yourself, your own. "
-              "To protect yours: sudo ensign-scan --protect")
+              "To protect yours: sudo ensign-scan protect")
         return None
     why = protect.trust.untrusted_reason(path)
     if why:
@@ -404,9 +404,9 @@ def _run_protect(args) -> int:
         print(f"  decisions: {shown(str(found.decisions))} (empty)")
         print(f"Change the config with: sudoedit {shown(str(found.config))}")
         print("Your own ~/.config/ensign-scan/config.toml isn't read any more. "
-              "Undo all this with: sudo ensign-scan --unprotect")
+              "Undo all this with: sudo ensign-scan unprotect")
         print("Allow files and acknowledge startup entries with sudo and --protected, for example: "
-              "sudo ensign-scan --protected --allow PATH. Your runs show what needs it, as before.")
+              "sudo ensign-scan --protected allow PATH. Your runs show what needs it, as before.")
     return 0
 
 
@@ -547,7 +547,7 @@ def run_persistence(args: argparse.Namespace, engine, log_path: Path) -> int:
         if unreadable:
             print(f"[yellow]! {unreadable} couldn't be read, so they stay listed. Acknowledge them "
                   f"with sudo: sudo ensign-scan {'--protected ' if args.protected else ''}"
-                  f"--acknowledge-all[/yellow]")
+                  f"acknowledge --all[/yellow]")
             return EXIT_PERSISTENCE_PENDING
         return 0
     return EXIT_PERSISTENCE_PENDING if audit.pending else 0

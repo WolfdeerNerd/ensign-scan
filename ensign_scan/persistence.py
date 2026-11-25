@@ -497,7 +497,7 @@ def report(audit: Audit) -> None:
     if audit.acknowledged == 0 and audit.new:
         print("[yellow]Nothing has been acknowledged yet, so every entry counts as new.[/yellow] Look "
               "through the list (entries no package owns, and those in your home folder, matter "
-              "most), then set the baseline with --acknowledge-all.")
+              "most), then set the baseline with ensign-scan acknowledge --all.")
 
     new = [(e.category, e.path, _describe(e) + _origin_note(audit, e.path), e.place) for e in audit.new]
     _print_section("NEW SINCE YOU LAST ACKNOWLEDGED", "yellow", "+", new, audit)
@@ -516,7 +516,7 @@ def report(audit: Audit) -> None:
             print_unwrapped(line)
         if os.geteuid() != 0:
             sudo = _PROTECTED_COMMAND or "sudo ensign-scan"
-            print(f"  Most of these need root to read. To include them: {sudo} --persistence")
+            print(f"  Most of these need root to read. To include them: {sudo} persistence")
 
     if not audit.pending:
         print("\n[green]✓ Nothing new, changed or gone since you last acknowledged.[/green]")
@@ -524,8 +524,8 @@ def report(audit: Audit) -> None:
     # Root-only entries need root to acknowledge; protected decisions need --protected.
     command = _PROTECTED_COMMAND or ("sudo ensign-scan" if os.geteuid() == 0 else "ensign-scan")
     print("\nIf you know where an entry came from (something you installed or set up), accept it:")
-    print(f"  {command} --acknowledge PATH     one entry")
-    print(f"  {command} --acknowledge-all      everything listed above")
+    print(f"  {command} acknowledge PATH     one entry")
+    print(f"  {command} acknowledge --all      everything listed above")
     print("If you don't, look at it before you accept it: an entry you can't explain is the "
           "reason this check exists.")
 

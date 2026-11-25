@@ -80,7 +80,7 @@ with tempfile.TemporaryDirectory() as d:
     assert "don't upload the file" in evil, evil
     many = out[out.index("many00.so"):].split("File:")[0]
     assert "don't upload" not in many, "only personal folders get the upload warning"
-    assert flat.count("--clamav-report PATH") == 2, "one pointer per threat"
+    assert flat.count("ensign-scan report PATH") == 2, "one pointer per threat"
     assert "Scanning" not in out and "scanned so far" not in flat, "it must not scan"
 
     scoped = " ".join(ensign("--list-infected", f"{d}/Games").split())
@@ -105,7 +105,7 @@ with tempfile.TemporaryDirectory() as d:
     assert "\n          Js.Downloader.X  allowed 2026-11-01" in folder_part, folder_part
     assert f"\n          SHA-256: {'0' * 64}" in folder_part, folder_part
     assert f"\n  File: {d}/Downloads/tool.exe" in out, "files on their own stay at the top level"
-    assert "--list-allowed-all also lists" not in out
+    assert "list allowed --all also lists" not in out
 
     # --- the end of a run: the same layout, scoped to the run, files capped ---------------------
     sys.path.insert(0, str(ROOT))
@@ -127,7 +127,7 @@ with tempfile.TemporaryDirectory() as d:
     assert n == 1 and "FOLDERS YOU ALLOWED (1)" in flat, "a folder the scope is inside of shows"
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         allowlist.allowed_report(engine, top=0)
-    assert "and 1 more: ensign-scan --list-allowed" in buf.getvalue(), buf.getvalue()
+    assert "and 1 more: ensign-scan list allowed" in buf.getvalue(), buf.getvalue()
 
     # --- the false-positive pointer sits in line with the file's details ----------------------
     out = ensign("--list-infected")

@@ -111,7 +111,7 @@ with tempfile.TemporaryDirectory() as d:
     assert w.digest.startswith("metadata "), w
     _, out = quiet(persistence.report, first)
     assert "Nothing has been acknowledged yet" in out and "NEW SINCE YOU LAST ACKNOWLEDGED" in out, out
-    assert "--acknowledge-all" in out
+    assert "acknowledge --all" in out
     print("persistence first run test passed ✓")
 
     # --- acknowledge-all, then nothing is pending ----------------------------------------------------
