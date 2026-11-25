@@ -117,10 +117,10 @@ def status(uid: int | None = None) -> Protected | None:
         except PermissionError:
             raise Unsafe(f"you are protected, but your user can't reach root's copy of your {what} "
                          f"({path}): the permission that lets you read it is missing. Run "
-                         f"sudo ensign-scan --unprotect, then sudo ensign-scan --protect again.") from None
+                         f"sudo ensign-scan unprotect, then sudo ensign-scan protect again.") from None
         except FileNotFoundError:
             raise Unsafe(f"you are protected, but root's copy of your {what} ({path}) is missing. "
-                         f"Run sudo ensign-scan --unprotect, then sudo ensign-scan --protect "
+                         f"Run sudo ensign-scan unprotect, then sudo ensign-scan protect "
                          f"again.") from None
         except OSError as exc:
             raise Unsafe(f"you are protected, but root's copy of your {what} ({path}) can't be "
@@ -150,7 +150,7 @@ def _check_readable(found: Protected) -> None:
                 if upgradable(missing):
                     raise Unsafe(f"root's copy of your decisions was made by an older Ensign "
                                  f"({what}), and only root can upgrade it. Run any sudo command "
-                                 f"once, and it's upgraded: sudo ensign-scan --list-allowed")
+                                 f"once, and it's upgraded: sudo ensign-scan list allowed")
                 raise Unsafe(f"root's copy of your decisions was made by an older Ensign ({what}), "
                              f"and this version can't upgrade it: report it as a bug.")
             for table, columns in _expected_columns().items():
@@ -164,7 +164,7 @@ def _check_readable(found: Protected) -> None:
             # root, which SQLite does the next time root opens the file.
             raise Unsafe("root was interrupted while changing your protected decisions, and only "
                          "root can finish undoing that. Run any sudo command on them, for example: "
-                         "sudo ensign-scan --protected --persistence") from None
+                         "sudo ensign-scan --protected persistence") from None
         raise Unsafe(f"you are protected, but root's copies can't be read: {exc}") from None
 
 
@@ -235,7 +235,7 @@ def _expected_columns() -> dict[str, list[str]]:
 def target_uid() -> int:
     """The user --protect / --unprotect is for: the one who ran sudo."""
     if os.geteuid() != 0:
-        raise CantProtect("this needs root. Run it with sudo: sudo ensign-scan --protect")
+        raise CantProtect("this needs root. Run it with sudo: sudo ensign-scan protect")
     raw = os.environ.get("SUDO_UID", "")
     if not raw.isdigit() or int(raw) == 0:
         raise CantProtect("run it with sudo from your own account (not as root directly): "
@@ -429,5 +429,5 @@ def unprotect(uid: int, confirm) -> bool:
             pass
         except OSError as exc:
             raise CantProtect(f"couldn't remove {exc.filename or folder}: {exc.strerror or exc}. "
-                              f"Fix that, then run sudo ensign-scan --unprotect again.") from None
+                              f"Fix that, then run sudo ensign-scan unprotect again.") from None
     return True

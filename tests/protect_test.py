@@ -526,7 +526,7 @@ else:
     unscanned.unlink()
 
     ok, out = quiet(allowlist.allow, writer, str(tree / "asset.dat"), yes)
-    assert ok and "sudo ensign-scan --protected --unallow" in out, out
+    assert ok and "sudo ensign-scan --protected unallow" in out, out
     assert allowlist.allowed_keys(writer) == {(digest, "Test.Evil", "clamav")}
     assert root_records() == before, "root's own records are evidence only, never changed"
     with Session(root_engine) as s:
@@ -625,7 +625,7 @@ else:
         quiet(protect.unprotect, uid, yes)
         raise AssertionError("a failed --unprotect must be refused")
     except protect.CantProtect as exc:
-        assert "--unprotect again" in str(exc), exc
+        assert "ensign-scan unprotect again" in str(exc), exc
     finally:
         protect.shutil.rmtree = real_rmtree
     assert protect.config_dir(uid).exists() and not protect.data_dir(uid).exists()

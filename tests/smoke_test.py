@@ -355,8 +355,8 @@ def main():
     output = " ".join(_strip_ansi(buf.getvalue()).split())
     assert str(refused.parent) in output, "a directory with refused files is listed"
     assert "setfacl" not in output and "chmod" not in output, "no permission change is ever suggested"
-    assert "no longer on disk" in output and "--purge-missing" in output, "stale rows point at --purge-missing"
-    assert "--rescan-errors" in output
+    assert "no longer on disk" in output and "ensign-scan purge-missing" in output, "stale rows point at purge-missing"
+    assert "ensign-scan rescan-errors" in output
 
     print("\n--- unreadable directories: reported, not silently skipped ---")
     from ensign_scan.reports import unreadable_report

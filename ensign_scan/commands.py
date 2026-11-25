@@ -138,6 +138,19 @@ JOB_OPTIONS = frozenset({c.flag for c in COMMANDS if c.flag} | {
     "--list-infected", "--list-allowed", "--list-allowed-all", "--acknowledge-all", "--verify-pacman"})
 
 
+# The command each original option is shown as, in the hints Ensign prints.
+_SHOWN_AS = {c.flag: c.name for c in COMMANDS if c.flag} | {
+    "--list-infected": "list infected", "--list-allowed": "list allowed",
+    "--list-allowed-all": "list allowed --all", "--acknowledge-all": "acknowledge --all"}
+
+
+def shown_as(option: str) -> str:
+    """The command an original option is shown as in a hint: "--allow" is
+    "allow", "--list-allowed-all" is "list allowed --all". Anything else
+    (--yes, --protected) is shown as it is."""
+    return _SHOWN_AS.get(option, option)
+
+
 def _matches(token: str, options: set[str] | frozenset[str]) -> bool:
     """Whether an option on the command line is one of `options`, written
     out or shortened (argparse accepts --conf for --config)."""

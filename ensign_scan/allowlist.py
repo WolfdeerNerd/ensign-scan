@@ -314,9 +314,11 @@ def show_protected_commands() -> None:
     _COMMAND = "sudo ensign-scan --protected"
 
 
-def _command(*words: str) -> str:
-    """An ensign-scan command you can paste: every argument shell-quoted."""
-    return shown(_COMMAND + " " + " ".join(shlex.quote(w) for w in words))
+def _command(option: str, *words: str) -> str:
+    """An ensign-scan command you can paste, in the command form ("allow
+    PATH", commands.py): every argument shell-quoted."""
+    from .commands import shown_as
+    return shown(f"{_COMMAND} {shown_as(option)} " + " ".join(shlex.quote(w) for w in words))
 
 
 def _flagged_statuses() -> tuple[str, ...]:
@@ -349,7 +351,7 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
     Returns how many files under the folder were allowed."""
     folder = _folder_text(folder)
     if os.path.lexists(folder) and not os.path.isdir(folder):
-        print_unwrapped(f"[yellow]Not allowed:[/yellow] {shown(folder)} is a file, and --allow-folder "
+        print_unwrapped(f"[yellow]Not allowed:[/yellow] {shown(folder)} is a file, and allow-folder "
                         f"takes a folder. To allow one file: {_command('--allow', folder)}")
         return 0
     with Session(engine) as session:
@@ -426,7 +428,7 @@ def allow_folder(engine: Engine, folder: str, signature: str | None, confirm, to
         print(f"  Left out:  {len(code)} file{'s' if len(code) != 1 else ''} in a format that can "
               f"run code when a program loads it ({', '.join(sorted(LOADS_CODE_EXTENSIONS))}). "
               f"These stay infected. If you've checked one, allow it by itself: "
-              f"{_COMMAND} --allow PATH")
+              f"{_COMMAND} allow PATH")
         _print_some(code, top, "!")
     if not_ready:
         print(f"  Left out:  {len(not_ready)} file{'s' if len(not_ready) != 1 else ''} Ensign "
@@ -565,8 +567,8 @@ def new_in_allowed_folders(engine: Engine, paths: list[str] | None = None, top: 
         print_unwrapped(f"    Allow one:      {_command('--allow', found[0])}")
         if code:
             print(f"    {code} of these can run code when a program loads "
-                  f"{'it' if code == 1 else 'them'}; --allow-folder leaves "
-                  f"{'it' if code == 1 else 'them'} out, so allow each with {_COMMAND} --allow PATH.")
+                  f"{'it' if code == 1 else 'them'}; allow-folder leaves "
+                  f"{'it' if code == 1 else 'them'} out, so allow each with {_COMMAND} allow PATH.")
     return total
 
 
@@ -657,7 +659,7 @@ def _print_file(path: str, entry: dict, indent: str, inner: str) -> None:
 def _print_folders(folders: dict, expand: bool) -> None:
     print(f"\n[bold]=== FOLDERS YOU ALLOWED ({len(folders)}) ===[/bold]")
     print("A folder allows nothing by itself: each file in it is allowed by its own content. "
-          f"Undo one with {_COMMAND} --unallow-folder FOLDER --signature NAME.")
+          f"Undo one with {_COMMAND} unallow-folder FOLDER --signature NAME.")
     for folder, entry in folders.items():
         print_unwrapped(f"\n{_L1}Folder: {shown(folder)}")
         width = max(len(shown(t)) for t, *_ in entry["signatures"])
@@ -682,7 +684,7 @@ def _print_files(title: str, entries: dict, note: str, top: int | None = None) -
     for key, entry in sorted(entries.items())[:top]:
         _print_file(key if isinstance(key, str) else key[0], entry, _L1, _L2)
     if top is not None and len(entries) > top:
-        print(f"\n{_L1}… and {len(entries) - top} more: ensign-scan --list-allowed")
+        print(f"\n{_L1}… and {len(entries) - top} more: ensign-scan list allowed")
 
 
 def allowed_report(engine: Engine, paths: list[str] | None = None, top: int = 10) -> int:
@@ -701,7 +703,7 @@ def allowed_report(engine: Engine, paths: list[str] | None = None, top: int = 10
     if files:
         _print_files("FILES YOU ALLOWED", files,
                      "Flagged by ClamAV, and marked by you as false positives; not counted as "
-                     f"infected. Undo one with {_COMMAND} --unallow PATH.", top=top)
+                     f"infected. Undo one with {_COMMAND} unallow PATH.", top=top)
     return len(folders) + len(files)
 
 
@@ -716,17 +718,17 @@ def list_allowed(engine: Engine, expand: bool = False) -> int:
         print_unwrapped(f"[yellow]! {stale} file{'s' if stale != 1 else ''} recorded as allowed "
                         f"{'have' if stale != 1 else 'has'} no allowance any more, so "
                         f"{'they count' if stale != 1 else 'it counts'} as infected (see "
-                        f"ensign-scan --list-infected).[/yellow]")
+                        f"ensign-scan list infected).[/yellow]")
     folders, files, gone = _gather(engine)
     if not folders and not files and not gone:
-        print(f"Nothing is allowed. ({_COMMAND} --allow PATH marks a flagged file as a false positive.)")
+        print(f"Nothing is allowed. ({_COMMAND} allow PATH marks a flagged file as a false positive.)")
         return 0
     if folders:
         _print_folders(folders, expand)
         if not expand:
-            print(f"\n{_L1}ensign-scan --list-allowed-all also lists the files in each folder.")
+            print(f"\n{_L1}ensign-scan list allowed --all also lists the files in each folder.")
     if files:
-        _print_files("FILES YOU ALLOWED", files, f"Undo one with {_COMMAND} --unallow PATH.")
+        _print_files("FILES YOU ALLOWED", files, f"Undo one with {_COMMAND} unallow PATH.")
     if gone:
         _print_files("ALLOWED, BUT NOT ON DISK NOW", gone,
                      "No tracked file has this content right now; shown where it was when you "

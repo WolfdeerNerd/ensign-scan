@@ -230,7 +230,7 @@ def check(engine: yaraengine.Engine) -> None:
         (db / "daily.cvd").write_bytes(good[:600])   # cut short, as a broken download would be
         broken = bigrules.update(data, db, engine)
         assert not broken.ok and broken.failed and broken.loaded is not None, broken.message
-        assert "couldn't be updated" in broken.message and "--update-rules" in broken.message
+        assert "couldn't be updated" in broken.message and "ensign-scan update-rules" in broken.message
         assert bigrules.read_state(data).get("last_error")
         still = bigrules.update(data, db, engine)            # same broken file: tried again
         assert not still.ok and "couldn't be updated" in still.message, still.message

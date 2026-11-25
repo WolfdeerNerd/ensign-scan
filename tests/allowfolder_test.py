@@ -136,7 +136,7 @@ with tempfile.TemporaryDirectory() as d:
     assert "1 identical copy elsewhere" in out, out
     assert "can run code" in out and "model.PKL" in out, out
     assert "changed since it was scanned" in out and "identical to a left-out file" in out, out
-    assert "--unallow-folder " + shlex.quote(folder) + " --signature Test.Phish" in out, out
+    assert "ensign-scan unallow-folder " + shlex.quote(folder) + " --signature Test.Phish" in out, out
     st = statuses(engine)
     assert st["a.jsonl"] == st["b.jsonl"] == "allowed"
     assert st["copy-of-a.jsonl"] == "allowed", "same content elsewhere is the same false positive"
@@ -168,8 +168,8 @@ with tempfile.TemporaryDirectory() as d:
     count, out = quiet(allowlist.new_in_allowed_folders, engine)
     # a.jsonl, c.txt, new.jsonl, twin.txt, model.PKL: flagged by the allowed signature, not allowed
     assert count == 5 and "NEW IN FOLDERS YOU ALLOWED (5 files)" in out, out
-    assert "--allow-folder " + shlex.quote(folder) + " --signature Test.Phish" in out, out
-    assert "Allow one:" in out and "--allow " in out, out
+    assert "ensign-scan allow-folder " + shlex.quote(folder) + " --signature Test.Phish" in out, out
+    assert "Allow one:" in out and "ensign-scan allow " in out, out
     assert "1 of these can run code" in out, out
     assert "other-sig.txt" not in out and "outside.jsonl" not in out, out
     count, _ = quiet(allowlist.new_in_allowed_folders, engine, paths=[str(data / "batch")])
@@ -207,7 +207,7 @@ with tempfile.TemporaryDirectory() as d:
     # the files the folder covers are counted there, not listed again
     assert "training data/a.jsonl" not in flat and "copy-of-a.jsonl" in flat, flat
     # the infected file in the folder that isn't allowed is pointed out
-    assert "1 file here is infected now and not allowed" in flat and "--list-infected" in flat, flat
+    assert "1 file here is infected now and not allowed" in flat and "ensign-scan list infected" in flat, flat
     print("list-allowed folders test passed ✓")
 
     # --- only a folder allow of pickles: nothing happens, nothing is remembered -------------------
@@ -252,7 +252,7 @@ with tempfile.TemporaryDirectory() as d:
 
     # --- a file given as the folder: pointed to --allow, not told to scan ------------------------
     n, out = quiet(allowlist.allow_folder, engine, str(data / "batch" / "b.jsonl"), "Test.Phish", yes)
-    assert n == 0 and "is a file" in out and "--allow " in out and "Scan it first" not in out, out
+    assert n == 0 and "is a file" in out and "ensign-scan allow " in out and "Scan it first" not in out, out
     print("file-as-folder test passed ✓")
 
     # --- undoing a folder forgets the folders inside it, for that signature ---------------------

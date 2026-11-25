@@ -159,8 +159,8 @@ def _print_hotspots(title: str, intro: list[str], hotspots: dict[str, list[str]]
             print_unwrapped(f"  {shown(parent)}  ({label})")
     print()
     if stale_only:
-        print("Records for files that no longer exist: clear them with --purge-missing.")
-    print("Once the cause is fixed, retry these with: --rescan-errors")
+        print("Records for files that no longer exist: clear them with: ensign-scan purge-missing")
+    print("Once the cause is fixed, retry these with: ensign-scan rescan-errors")
 
 
 def integrity_report(changes) -> None:
@@ -567,7 +567,7 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
                       f"threat (all are recorded in the database)")
             results.append({"filepath": filepath, "threat": threat, "scanned": scanned})
         print()
-        _note("›", "Think it's a false positive? ensign-scan --clamav-report PATH checks the file "
+        _note("›", "Think it's a false positive? ensign-scan report PATH checks the file "
               "again and prepares a report for ClamAV (nothing is sent for you).", indent=len(_DETAIL))
     return results
 

@@ -281,7 +281,7 @@ def write_export(home: Path, decisions: dict) -> Path:
         made_by = "unknown (running from source)"
     body = {"ensign_version": made_by, "made": stamp,
             "note": "Your Ensign decisions, saved by --uninstall. There's no import yet: "
-                    "re-enter what you need with --allow, --allow-folder and --acknowledge.",
+                    "re-enter what you need with ensign-scan allow, allow-folder and acknowledge.",
             "databases": decisions}
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -443,7 +443,7 @@ def run(confirm_word=input, ask_yes_no=None, out=rich_print) -> int:
     sudo_uid = os.environ.get("SUDO_UID")
     user_uid = int(sudo_uid) if as_root and sudo_uid and sudo_uid.isdigit() and int(sudo_uid) else None
     if confirm_word is input and not sys.stdin.isatty():
-        out("✗ --uninstall asks you to type a word to confirm, and there's no terminal here. "
+        out("✗ uninstall asks you to type a word to confirm, and there's no terminal here. "
             "Run it from one. (--yes doesn't skip this: it can't be undone.)")
         return 1
 
@@ -462,7 +462,7 @@ def run(confirm_word=input, ask_yes_no=None, out=rich_print) -> int:
 
     busy = [p.busy for _, p, _ in plans if p.busy]
     if busy:
-        out(f"✗ {busy[0]}. Let it finish (or stop it), then run --uninstall again. Nothing was changed.")
+        out(f"✗ {busy[0]}. Let it finish (or stop it), then run ensign-scan uninstall again. Nothing was changed.")
         return 1
 
     failed: list[str] = []
@@ -479,7 +479,7 @@ def run(confirm_word=input, ask_yes_no=None, out=rich_print) -> int:
             out(f"  left alone: {shown(note)}")
     if leftovers:
         out("Root's files stay, since only root can delete them: " + ", ".join(leftovers)
-            + ". Remove them too with: sudo ensign-scan --uninstall")
+            + ". Remove them too with: sudo ensign-scan uninstall")
     schedules = [s for _, p, _ in plans for s in p.schedules]
     if schedules:
         out("These run Ensign, and you set them up, so they stay; remove or disable them yourself:")
