@@ -697,7 +697,8 @@ def run(args: argparse.Namespace, config: Config) -> int:
         print("\n=== Processing Rescans ===")
         scanner.rescan_infected()
         scanner.rescan_errors()
-        scanner.rescan_stale()
+        if config.rescan_after_days > 0:   # 0 turns it off, like the other settings
+            scanner.rescan_stale()
     if scan and (args.sweep or config.sweep_huge_files):
         print("\n=== Sweeping Files Too Large for ClamAV ===")
         scanner.sweep_huge([str(t) for t in targets])

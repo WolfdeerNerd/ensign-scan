@@ -84,7 +84,13 @@ def is_scannable(st: os.stat_result) -> bool:
 # title or plant a clickable link -- so a filename containing them could
 # rewrite or disguise Ensign's own output, including its verdict on that
 # very file ("terminal escape injection").
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+#
+# Also the Unicode characters that reorder or break a line without showing
+# anything ("Trojan Source"): the bidirectional controls (U+202E, RIGHT-TO-LEFT
+# OVERRIDE, turns "invoice<U+202E>fdp.exe" into what reads as "invoiceexe.pdf"),
+# the directional marks, and the line and paragraph separators, which some
+# terminals and notification servers break the line at.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]")
 _NAMED_CONTROLS = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
 
@@ -103,7 +109,33 @@ def printable(text: object) -> str:
     except UnicodeEncodeError:
         pass  # a stray surrogate that didn't come from a filename: leave it
     return _CONTROL_CHARS.sub(
-        lambda m: _NAMED_CONTROLS.get(m.group(), f"\\x{ord(m.group()):02x}"), text)
+        lambda m: _NAMED_CONTROLS.get(m.group(), f"\\x{ord(m.group()):02x}" if ord(m.group()) < 0x100
+                                      else f"\\u{ord(m.group()):04x}"), text)
+
+
+def shell_quote(word: str) -> str:
+    """shlex.quote for a word in a hint you paste, that stays pasteable when
+    the word holds something printable() would write out (a control
+    character, a bidi control, a byte that isn't UTF-8). Such a word is
+    written in bash's $'...' form, which zsh reads too: what's shown is
+    plain text, and the shell turns the escapes back into the exact name."""
+    import shlex
+    if printable(word) == word:
+        return shlex.quote(word)
+    out = []
+    for c in word:
+        o = ord(c)
+        if 0xDC80 <= o <= 0xDCFF:        # a byte that isn't UTF-8 (surrogateescape)
+            out.append(f"\\x{o - 0xDC00:02x}")
+        elif c in ("\\", "'"):
+            out.append("\\" + c)
+        elif c in _NAMED_CONTROLS:
+            out.append(_NAMED_CONTROLS[c])
+        elif _CONTROL_CHARS.match(c):    # a character: \u, so the shell writes its UTF-8
+            out.append(f"\\x{o:02x}" if o < 0x80 else f"\\u{o:04x}")
+        else:
+            out.append(c)
+    return "$'" + "".join(out) + "'"
 
 
 def human_size(n: int) -> str:
@@ -197,20 +229,3 @@ def sha256_fd(fd: int) -> str:
         offset += len(chunk)
     return hasher.hexdigest()
 
-
-def sha256_file(path: Path) -> str | None:
-    """SHA-256 hex digest of a file, or None on read failure.
-
-    open() follows symlinks by default, so this works unchanged for a
-    symlink path that safe_stat() already confirmed points at a
-    regular, non-empty file.
-    """
-    hasher = hashlib.sha256()
-    try:
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(CHUNK_SIZE), b""):
-                hasher.update(chunk)
-    except OSError as exc:
-        log.error("read failed for %s: %s", path, exc)
-        return None
-    return hasher.hexdigest()

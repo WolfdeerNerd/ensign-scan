@@ -152,6 +152,11 @@ try:
             return s
 
         engine = scan(sweep=False).engine
+        # A rescan_after_days longer than a date can hold means nothing is stale,
+        # not an OverflowError at the end of the scan.
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            scanner().rescan_stale(days=1_000_000)
+        assert "No stale files" in said.getvalue(), said.getvalue()
         assert all(v[0] == "incomplete" for v in statuses(engine).values()), statuses(engine)
 
         # --- the sweep -------------------------------------------------------------------------

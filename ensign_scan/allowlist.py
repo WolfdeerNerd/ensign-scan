@@ -30,7 +30,6 @@ not touched, so nothing else using clamd is affected (unlike ClamAV's own
 from __future__ import annotations
 
 import os
-import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,7 +38,7 @@ from sqlalchemy import or_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from .fsutil import open_for_scan, print_unwrapped, sha256_fd, shown
+from .fsutil import open_for_scan, print_unwrapped, sha256_fd, shell_quote, shown
 from .models import (
     ENGINE_CLAMAV,
     ENGINE_CLAMAV_YARA,
@@ -155,7 +154,7 @@ def _candidate(engine: Engine, path: str) -> _Candidate | str:
         if record is None:
             if _PROTECTED:
                 return ("Root has no record of this file. Scan it with sudo first: "
-                        "sudo ensign-scan " + shown(shlex.quote(path)))
+                        "sudo ensign-scan " + shown(shell_quote(path)))
             return "Ensign has no record of this file. Scan it first."
         if record.scan_status == ScanStatus.ALLOWED.value and not _PROTECTED:
             return "This file is already allowed."
@@ -335,7 +334,7 @@ def _command(option: str, *words: str) -> str:
     PATH", commands.py): every argument shell-quoted."""
     from .commands import shown_as
     start = _read() if option in _READ_ONLY else _cmd()
-    return shown(f"{start} {shown_as(option)} " + " ".join(shlex.quote(w) for w in words))
+    return shown(f"{start} {shown_as(option)} " + " ".join(shell_quote(w) for w in words))
 
 
 def _flagged_statuses() -> tuple[str, ...]:
