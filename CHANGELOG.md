@@ -13,6 +13,9 @@ Versions follow `major.minor.patch`: a new feature bumps the middle number, a fi
 - `--help` shows the commands first, then the options in groups (scanning, results, decisions, checks, setup).
 - The commands Ensign suggests in its output use the new form: `ensign-scan allow PATH`, `ensign-scan list infected`, `sudo ensign-scan --protected unallow PATH`. The original options they stand for still work.
 
+### Fixed
+- Under `sudo`, the commands Ensign suggests start with `sudo`, so pasting one acts on root's records and decisions, the ones that run used. In protected mode, the hint for listing a folder's infected files no longer adds `--protected`, which that command refuses.
+
 ## 0.10.0
 
 ### Added

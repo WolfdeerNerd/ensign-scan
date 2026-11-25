@@ -175,6 +175,10 @@ for argv in (["help", "allow"], ["allow", "--help"], ["allow", "-h"], ["list", "
     assert code == 0 and f"usage: ensign-scan {argv[-1] if argv[0] == 'help' else argv[0]}" in text, (argv, text)
 code, text = outcome(["help", "allow"])
 assert "The same as: ensign-scan --allow PATH" in text, text
+code, text = outcome(["help", "scan"])
+assert "The same as: ensign-scan [PATH ...]" in text and "scan --" in text, text
+code, text = outcome(["help"])
+assert "put paths after 'ensign-scan scan --'" in " ".join(text.split()), text
 code, text = outcome(["--help"])
 assert code == 0 and text.index("commands (") < text.index("options: scanning"), \
     "--help shows the commands before the options"
@@ -198,6 +202,29 @@ for option, shown in commands._SHOWN_AS.items():
                   "--acknowledge", "--acknowledge-all"):
         # The protected-mode hints: sudo ensign-scan --protected <command>
         assert parsed(["--protected", *hint]) == parsed(["--protected", option, *value, *extra]), option
+
+# In protected mode, hints that change decisions start with
+# `sudo ensign-scan --protected`; hints that only read never take
+# --protected, which would be refused. Under sudo, every hint has sudo.
+import os  # noqa: E402
+
+from ensign_scan import allowlist  # noqa: E402
+
+saved = allowlist._COMMAND
+try:
+    allowlist.show_protected_commands()
+    read = allowlist._command("--list-infected", "/f")
+    change = allowlist._command("--unallow", "/f")
+    assert change.startswith("sudo ensign-scan --protected unallow"), change
+    assert "--protected" not in read and read.endswith("list infected /f"), read
+    for hint in (read, change):
+        words = hint.split()
+        words = words[words.index("ensign-scan") + 1:]
+        cli.parse_args(words)   # parses (exits if not)
+finally:
+    allowlist._COMMAND = saved
+assert commands.prefix() == ("sudo ensign-scan" if os.geteuid() == 0 else "ensign-scan")
+assert allowlist._READ == commands.prefix()
 print("every printed hint parses test passed ✓")
 
 print("\nAll command tests passed ✓")

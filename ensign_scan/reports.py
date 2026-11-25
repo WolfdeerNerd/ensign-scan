@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from . import explanations, pkgdb
 from .clamd import is_permission_error
+from .commands import prefix
 from .fsutil import human_size as _human_size, print_unwrapped, printable, shown
 from .models import is_open_failed
 from .models import FileRecord, ScanStatus, path_under
@@ -159,8 +160,8 @@ def _print_hotspots(title: str, intro: list[str], hotspots: dict[str, list[str]]
             print_unwrapped(f"  {shown(parent)}  ({label})")
     print()
     if stale_only:
-        print("Records for files that no longer exist: clear them with: ensign-scan purge-missing")
-    print("Once the cause is fixed, retry these with: ensign-scan rescan-errors")
+        print(f"Records for files that no longer exist: clear them with: {prefix()} purge-missing")
+    print(f"Once the cause is fixed, retry these with: {prefix()} rescan-errors")
 
 
 def integrity_report(changes) -> None:
@@ -567,7 +568,7 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
                       f"threat (all are recorded in the database)")
             results.append({"filepath": filepath, "threat": threat, "scanned": scanned})
         print()
-        _note("›", "Think it's a false positive? ensign-scan report PATH checks the file "
+        _note("›", f"Think it's a false positive? {prefix()} report PATH checks the file "
               "again and prepares a report for ClamAV (nothing is sent for you).", indent=len(_DETAIL))
     return results
 
