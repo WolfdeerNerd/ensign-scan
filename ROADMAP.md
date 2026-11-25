@@ -37,6 +37,7 @@ Decided, no order yet:
 
 Not decided. Discussion welcome:
 
+- **Import saved decisions.** `--uninstall` can save your allowances and acknowledged startup entries to a JSON file; reading that file back in after a reinstall, checked entry by entry against the files as they are then.
 - **Name the provider of `.UNOFFICIAL` signatures** in `--clamav-report`, by finding which signature file the name comes from.
 - **Hidden payloads.** Files that go beyond their normal scope.
 - **Temp and RAM-backed folders.** Scan `/tmp`, `/var/tmp`, `/dev/shm` and `/run/user/<uid>`, where anyone can write and malware is often staged, and look again at excluding `~/.cache`. Ensign skips files that vanish before it reaches them, which is right for ordinary churn, but in a temp folder a file that ran and deleted itself looks the same, so these folders would report such files instead of skipping them quietly. Shared folders hold other users' files, which Ensign can't open, so the report would say so. Programs that run from RAM and delete their own file need a look at running processes, which needs its own research.

@@ -144,6 +144,10 @@ def parse_args() -> argparse.Namespace:
                         help="With sudo, before --allow, --unallow, --allow-folder, --unallow-folder, "
                              "--persistence, --acknowledge or --acknowledge-all: change your protected "
                              "decisions (see --protect) instead of root's own")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="Delete everything Ensign made (with sudo: root's files too), after "
+                             "listing it and asking you to type 'uninstall'. Offers to save your "
+                             "decisions first, then says how to remove the program itself")
     parser.add_argument("--unprotect", action="store_true",
                         help="With sudo: undo --protect, so your runs use your own config and "
                              "database again. Asks first, then exit")
@@ -233,6 +237,11 @@ def _main() -> int:
         return 0
     if args.protect or args.unprotect:
         return _run_protect(args)
+    if args.uninstall:
+        # Before anything reads the config or the database: an uninstall
+        # has to work when they're broken, too.
+        from ensign_scan import uninstall
+        return uninstall.run()
     if AS_ROOT:
         # A protected user's runs stop on a decisions file made by an older
         # Ensign (they can't change it): any sudo run brings it up to date.
