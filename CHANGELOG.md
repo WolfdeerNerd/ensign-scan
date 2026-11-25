@@ -21,6 +21,9 @@ Versions follow `major.minor.patch`: a new feature bumps the middle number, a fi
 - `uninstall` with `sudo` no longer saves other users' protected decisions into your home when you ask it to save yours: only root's own and your own.
 - `uninstall` points out an Ensign folder that is a link to somewhere else, and leaves it, rather than skipping it without a word.
 - `uninstall` given `--config` (or `$ENSIGN_CONFIG`) also removes Ensign's files from that config's `data_dir`, and names the config file itself, which it leaves for you.
+- `uninstall`, in a shared `data_dir`, no longer removes an empty `logs`, `yara` or `clamav-reports` folder that never held Ensign's files: only folders that its own deletions emptied.
+- `uninstall` with `sudo` no longer skips root's `data_dir` when its name only starts like `/var/lib/ensign-scan` (`/var/lib/ensign-scan2`, say). And when `/var/lib/ensign-scan` isn't root's (so it's left alone), the decisions in it aren't offered for saving either.
+- After `--`, every word is a path: `ensign-scan allow -- -h` allows a file called `-h` instead of showing help, and `ensign-scan list infected -- -odd` lists a folder called `-odd` instead of failing.
 
 ## 0.10.0
 

@@ -62,6 +62,7 @@ def make_home(home: Path) -> None:
     (elsewhere / "yara").mkdir()
     (elsewhere / "yara" / "my-rule.yar").write_text("rule mine { condition: false }\n")
     (elsewhere / "mine.txt").write_text("not Ensign's\n")
+    (elsewhere / "clamav-reports").mkdir()   # empty, and never held Ensign's files: yours
     legacy = home / ".config" / "ensign"   # the old name, but another program's here
     legacy.mkdir()
     (legacy / "notes.txt").write_text("another program\n")
@@ -139,6 +140,8 @@ if os.geteuid() != 0:
             assert (home / "elsewhere" / "logs" / "my-notes.log").exists(), \
                 "a logs folder in a shared folder is never deleted by its name"
             assert (home / "elsewhere" / "yara" / "my-rule.yar").exists(), "your own YARA rule stays"
+            assert (home / "elsewhere" / "clamav-reports").is_dir(), \
+                "an empty folder that held nothing of Ensign's stays"
             assert (home / ".config" / "ensign" / "notes.txt").exists(), "another program's folder stays"
             assert (home / ".config" / "systemd" / "user" / "scan.service").exists(), "yours to remove"
             saved = list(home.glob("ensign-scan-decisions-*.json"))
@@ -235,5 +238,29 @@ with tempfile.TemporaryDirectory() as d:
     assert (home / "elsewhere" / "mine.txt").exists()
     shutil.rmtree(home, ignore_errors=True)
     print("uninstall with sudo test passed ✓")
+
+    # root's data_dir beside /var/lib/ensign-scan (a name that only starts
+    # the same) is outside it, so Ensign's files there are found.
+    data_root.mkdir()
+    sibling = Path(str(data_root) + "2")
+    sibling.mkdir()
+    make_engine(f"sqlite:///{sibling / 'system.db'}").dispose()
+    config_root.mkdir()
+    (config_root / "config.toml").write_text(f'data_dir = "{sibling}"\n')
+    protect.CONFIG_ROOT, protect.DATA_ROOT = config_root, data_root
+    try:
+        plan = uninstall.root_plan()
+        assert str(sibling) in [i.path for i in plan.items], plan.items
+        # A data root that isn't root's is left alone, and so are its databases.
+        make_engine(f"sqlite:///{data_root / 'system.db'}").dispose()
+        os.chown(data_root, ordinary.pw_uid, ordinary.pw_gid)
+        plan = uninstall.root_plan()
+        assert str(data_root) not in [i.path for i in plan.items], plan.items
+        assert str(data_root / "system.db") not in plan.databases, plan.databases
+    finally:
+        protect.CONFIG_ROOT, protect.DATA_ROOT = real_roots
+    for leftover in (config_root, data_root, sibling):
+        shutil.rmtree(leftover, ignore_errors=True)
+    print("root's data_dir checks passed ✓")
 
 print("\nAll uninstall tests passed ✓")
