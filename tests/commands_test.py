@@ -132,6 +132,9 @@ with tempfile.TemporaryDirectory() as d:
         assert parsed(["scan", "--", "allow"])["targets"] == ["allow"]
         # Only the first word is checked: a folder named like a later word is just a path.
         assert parsed(["scan", "allow"])["targets"] == ["allow"]
+        # Help on a command runs nothing, so it's shown even then.
+        code, text = outcome(["allow", "--help"])
+        assert code == 0 and "usage: ensign-scan allow" in text, text
         # A command with nothing by its name here is still the command.
         assert parsed(["unallow", "/x"])["unallow"] == ["/x"]
     finally:

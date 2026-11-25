@@ -242,6 +242,9 @@ def translate(argv: list[str], takes_value: set[str], out=print) -> list[str]:
     before, rest = argv[:at], argv[at + 1:]
     if any(t in ("-h", "--help", "--version") or _matches(t, {"--help", "--version"}) for t in before):
         return argv   # asked for help or the version first: argparse answers that, as before
+    if word in BY_NAME and ("-h" in rest or "--help" in rest):
+        out(_help_for(BY_NAME[word]))   # help runs nothing, so there's nothing to clarify
+        raise SystemExit(0)
     if (word == "help" or word in BY_NAME) and os.path.lexists(word):
         raise _ambiguous(word)   # clarify, never guess
     if word == "help":
@@ -256,9 +259,6 @@ def translate(argv: list[str], takes_value: set[str], out=print) -> list[str]:
     command = BY_NAME.get(word)
     if command is None:
         return argv   # a path, as before
-    if "-h" in rest or "--help" in rest:
-        out(_help_for(command))
-        raise SystemExit(0)
     options, words = _split(rest, takes_value)
     all_flag = "--all" in options
     options = [o for o in options if o != "--all"]
