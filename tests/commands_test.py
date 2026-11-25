@@ -146,6 +146,26 @@ assert "The same as: ensign-scan --allow PATH" in text, text
 code, text = outcome(["--help"])
 assert code == 0 and text.index("commands (") < text.index("options: scanning"), \
     "--help shows the commands before the options"
+# Help or the version asked for first wins, as before, whatever follows.
+for argv in (["-h", "allow"], ["--help", "list"], ["--he", "allow"]):
+    code, text = outcome(argv)
+    assert code == 0 and "commands (each also has" in text, (argv, text)
+code, text = outcome(["--version", "allow"])
+assert code == 0 and text.startswith("ensign-scan "), text
 print("help test passed ✓")
+
+# Every hint Ensign prints (commands.shown_as) is a command line that means
+# the same as the option it stands for.
+for option, shown in commands._SHOWN_AS.items():
+    value = ["/x"] if option in ("--allow", "--unallow", "--clamav-report", "--acknowledge",
+                                 "--allow-folder", "--unallow-folder") else []
+    extra = ["--signature", "S"] if option in ("--allow-folder", "--unallow-folder") else []
+    hint = shown.split() + value + extra
+    assert parsed(hint) == parsed([option, *value, *extra]), (option, hint)
+    if option in ("--allow", "--unallow", "--allow-folder", "--unallow-folder", "--persistence",
+                  "--acknowledge", "--acknowledge-all"):
+        # The protected-mode hints: sudo ensign-scan --protected <command>
+        assert parsed(["--protected", *hint]) == parsed(["--protected", option, *value, *extra]), option
+print("every printed hint parses test passed ✓")
 
 print("\nAll command tests passed ✓")

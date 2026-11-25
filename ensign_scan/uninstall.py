@@ -462,7 +462,8 @@ def run(confirm_word=input, ask_yes_no=None, out=rich_print) -> int:
 
     busy = [p.busy for _, p, _ in plans if p.busy]
     if busy:
-        out(f"✗ {busy[0]}. Let it finish (or stop it), then run ensign-scan uninstall again. Nothing was changed.")
+        out(f"✗ {busy[0]}. Let it finish (or stop it), then run {'sudo ' if as_root else ''}ensign-scan uninstall again. "
+            "Nothing was changed.")
         return 1
 
     failed: list[str] = []

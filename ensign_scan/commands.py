@@ -210,6 +210,8 @@ def translate(argv: list[str], takes_value: set[str], out=print) -> list[str]:
         return argv
     word = argv[at]
     before, rest = argv[:at], argv[at + 1:]
+    if any(t in ("-h", "--help", "--version") or _matches(t, {"--help", "--version"}) for t in before):
+        return argv   # asked for help or the version first: argparse answers that, as before
     if word == "help":
         wanted = [w for w in rest if not w.startswith("-")]
         if not wanted:
