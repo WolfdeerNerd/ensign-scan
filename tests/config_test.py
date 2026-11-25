@@ -182,3 +182,17 @@ with tempfile.TemporaryDirectory() as d:
     assert run.returncode == 1 and "Config error" in run.stdout, (run.returncode, run.stdout, run.stderr)
     assert "Traceback" not in run.stdout + run.stderr, run.stderr
 print("config error on the command line test passed ✓")
+
+# A config Ensign writes appears whole or not at all, and never replaces one
+# that's there (config._write_new).
+with tempfile.TemporaryDirectory() as d:
+    import stat
+
+    from ensign_scan.config import _write_new
+    target = Path(d, "config.toml")
+    assert _write_new(target, "a = 1\n", 0o600) and target.read_text() == "a = 1\n"
+    assert stat.S_IMODE(target.stat().st_mode) & 0o077 == 0
+    assert not _write_new(target, "b = 2\n", 0o600), "an existing config is kept"
+    assert target.read_text() == "a = 1\n"
+    assert sorted(p.name for p in Path(d).iterdir()) == ["config.toml"], "no temporary file left"
+print("whole-or-nothing config write test passed ✓")
