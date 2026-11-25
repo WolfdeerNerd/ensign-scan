@@ -175,6 +175,8 @@ for argv in (["help", "allow"], ["allow", "--help"], ["allow", "-h"], ["list", "
     assert code == 0 and f"usage: ensign-scan {argv[-1] if argv[0] == 'help' else argv[0]}" in text, (argv, text)
 code, text = outcome(["help", "allow"])
 assert "The same as: ensign-scan --allow PATH" in text, text
+code, text = outcome(["help", "help"])
+assert code == 0 and "commands (each also has" in text, text
 code, text = outcome(["help", "scan"])
 assert "The same as: ensign-scan [PATH ...]" in text and "scan --" in text, text
 code, text = outcome(["help"])

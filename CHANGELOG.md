@@ -18,6 +18,8 @@ Versions follow `major.minor.patch`: a new feature bumps the middle number, a fi
 - Under `sudo`, the commands Ensign suggests start with `sudo`, so pasting one acts on root's records and decisions, the ones that run used. In protected mode, the hint for listing a folder's infected files no longer adds `--protected`, which that command refuses.
 - A run given `--config` now includes it in the commands it suggests, so pasting one acts on the same config and database.
 - `uninstall`, in a `data_dir` that isn't Ensign's alone (your home, say), could delete a folder of yours by its name: a `logs`, `yara` or `clamav-reports` folder, or a `system.db` some other program made. There it now deletes only files Ensign is known to write (`logs/ensign-*.log`, its YARA rules, its reports), and the database and the files beside it only when the database is Ensign's. A folder goes only if that leaves it empty.
+- `uninstall` with `sudo` no longer saves other users' protected decisions into your home when you ask it to save yours: only root's own and your own.
+- `uninstall` points out an Ensign folder that is a link to somewhere else, and leaves it, rather than skipping it without a word.
 - `uninstall` given `--config` (or `$ENSIGN_CONFIG`) also removes Ensign's files from that config's `data_dir`, and names the config file itself, which it leaves for you.
 
 ## 0.10.0

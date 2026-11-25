@@ -109,9 +109,11 @@ def _data_dir_setting(config_path: Path) -> Path | None:
     except (OSError, ValueError):
         return None
     value = raw.get("data_dir")
-    if not isinstance(value, str) or not value.strip():
+    # Ensign refuses a data_dir that doesn't start with / or ~/
+    # (config.py), so no data was ever kept at one.
+    if not isinstance(value, str) or not value.strip().startswith(("/", "~/")):
         return None
-    return Path(os.path.expanduser(value)).absolute()
+    return Path(os.path.expanduser(value.strip()))
 
 
 # In a folder that isn't Ensign's alone (a data_dir a config moved
@@ -232,6 +234,9 @@ def user_plan(home: Path, config: str | None = None) -> Plan:
         plan.kept.append(f"{config}: the config this run was given, outside Ensign's folders "
                          f"(it's yours to delete)")
     for folder, what in ((config_dir, "your config"), (data_dir, "your database, logs and reports")):
+        if os.path.islink(folder):
+            plan.kept.append(f"{folder}: a link (to {os.readlink(folder)}), not a folder, so "
+                             f"neither it nor what it points to is deleted. Remove them yourself")
         if _is_real_dir(folder):
             plan.items.append(Item(str(folder), what, _size(folder)))
             _check_lock(folder, plan)
@@ -319,6 +324,16 @@ def read_decisions(db_paths: list[str]) -> dict:
         if any(rows.values()):
             found[path] = rows
     return found
+
+
+def _exportable(root_databases: list[str], user_uid: int | None) -> list[str]:
+    """Root's databases that may be saved into your home: root's own, and
+    your own protected decisions. Never another user's protected decisions:
+    they list where that user's files are and what they allowed."""
+    users = protect.DATA_ROOT / "users"
+    mine = users / str(user_uid) / "decisions.db" if user_uid is not None else None
+    return [p for p in root_databases
+            if not Path(p).is_relative_to(users) or (mine is not None and Path(p) == mine)]
 
 
 def write_export(home: Path, decisions: dict) -> Path:
@@ -562,7 +577,7 @@ def run(confirm_word=input, ask_yes_no=None, out=rich_print, config: str | None 
 
         if want_export:
             try:
-                decisions = read_decisions(databases.get("root", []))
+                decisions = read_decisions(_exportable(databases.get("root", []), user_uid))
                 if user_uid is not None:
                     decisions.update(as_user(user_uid, read_decisions, databases.get("you", [])))
                     saved = as_user(user_uid, _export_json, pwd.getpwuid(user_uid).pw_dir, decisions)
