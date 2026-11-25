@@ -32,7 +32,8 @@ if os.environ.get("ENSIGN_TEST_PACMAN") != "1":
 
 from ensign_scan import pacman  # noqa: E402
 from ensign_scan.db import make_engine  # noqa: E402
-from ensign_scan.reports import pacman_report  # noqa: E402
+from ensign_scan.pkgdb.pacman import PacmanBackend  # noqa: E402
+from ensign_scan.reports import package_report  # noqa: E402
 
 assert pacman.available(), "ENSIGN_TEST_PACMAN=1 but pacman isn't on PATH"
 
@@ -74,10 +75,10 @@ if os.path.exists(planted):
 with tempfile.TemporaryDirectory() as d:
     engine = make_engine(f"sqlite:///{d}/live.db")
     with contextlib.redirect_stdout(io.StringIO()) as buf:
-        pacman_report(engine, result)
+        package_report(engine, result, PacmanBackend())
     out = buf.getvalue()
     assert "PACMAN FILE INTEGRITY" in out, out
     assert "parser may need updating" not in out, out
-print("pacman_report test passed ✓")
+print("package report (pacman) test passed ✓")
 
 print("\nAll live pacman tests passed ✓")

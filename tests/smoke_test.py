@@ -141,7 +141,7 @@ def main():
 
     # Symlink to a regular file must be followed and scanned -- this is
     # the whole point of switching is_scannable/process_file from
-    # safe_lstat to safe_stat.
+    # safe_lstat to a stat that follows symlinks (now stat_or_error).
     real_target = tmp / "outside_tree" / "real_secret.txt"
     real_target.parent.mkdir(parents=True)
     real_target.write_text("actual content")
@@ -610,8 +610,9 @@ def main():
     assert "2.0 KiB" in _out and "no longer on disk" in _out
     print("list_infected grouping test passed ✓")
 
-    # --- pacman_report: unverified files kept apart from real mismatches ---
+    # --- package_report (pacman): unverified files kept apart from real mismatches ---
     from ensign_scan import reports as _rp
+    from ensign_scan.pkgdb.pacman import PacmanBackend as _PacmanBackend
     from ensign_scan.pacman import PacmanMismatch as _PM, PacmanVerifyResult as _PR
     _ms = [_PM("libutempter", "/usr/lib/utempter/utempter", "GID mismatch"),
            _PM("filesystem", "/etc/shadow", "failed to calculate SHA256 checksum")]
@@ -626,7 +627,7 @@ def main():
         try:
             _b = io.StringIO()
             with contextlib.redirect_stdout(_b):
-                _rp.pacman_report(_eng_pm, _PR(mismatches=_ms, candidate_line_count=len(_ms)))
+                _rp.package_report(_eng_pm, _PR(mismatches=_ms, candidate_line_count=len(_ms)), _PacmanBackend())
             return " ".join(_strip_ansi(_b.getvalue()).split())
         finally:
             os.geteuid = _orig
@@ -638,7 +639,7 @@ def main():
     assert "rkhunter: 5 files (Permission denied)" in _user and "and 2 more" in _user
     assert "1 backup/config file" in _user
     assert "even as root" in _render(0), "a root run must not blame missing root"
-    print("pacman_report unverified-split test passed ✓")
+    print("package report unverified-split test passed ✓")
 
     server.shutdown()
     print("\nAll smoke tests passed ✓")

@@ -163,8 +163,8 @@ def _has_run(parts: list[str], entry: str) -> bool:
 
 def classify(path: str) -> Confidence:
     """Classify how confidently `path` looks like a secrets/credentials
-    store. See module docstring for what each tier means and how the
-    two call sites use different thresholds."""
+    store. See the module docstring for what each tier means (only HIGH
+    changes what Ensign does, so far)."""
     lower = path.lower().replace("\\", "/")
     parts = _parts(path)
     basename = parts[-1] if parts else ""
@@ -201,11 +201,6 @@ def classify(path: str) -> Confidence:
                 return Confidence.MEDIUM
 
     return Confidence.NONE
-
-
-def is_likely_secrets_path(path: str) -> bool:
-    """HIGH or MEDIUM confidence."""
-    return classify(path) != Confidence.NONE
 
 
 def is_high_confidence_secrets_path(path: str) -> bool:
@@ -359,15 +354,6 @@ def skip_reason(path: str, real_path: str, st_mode: int) -> str | None:
     if classify(path) == Confidence.HIGH or classify(real_path) == Confidence.HIGH:
         return SKIP_REASON
     return None
-
-
-def matching_reason(path: str) -> str | None:
-    """Human-readable reason for a match, or None."""
-    conf = classify(path)
-    if conf == Confidence.NONE:
-        return None
-    basename = os.path.basename(path)
-    return f"{conf.value}-confidence match on {basename!r}"
 
 
 # ----------------------------------------------------------------------
