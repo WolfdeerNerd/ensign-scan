@@ -14,6 +14,9 @@ authors = [{ name = "WolfdeerNerd" }]
 dependencies = [
     "sqlalchemy>=2.0",
     "rich",
+    # The sweep's YARA pass for files too large for ClamAV (see README, Large
+    # files). Tested from 1.23; a new major version is checked before allowing it.
+    "yara-x>=1.23,<2",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -28,8 +31,9 @@ classifiers = [
 
 
 [project.optional-dependencies]
-# The sweep's YARA pass for files too large for ClamAV (see README, Large files).
-yara = ["yara-x"]
+# yara-x is a default dependency since 0.10.0. The extra is kept, empty, so
+# `pipx install 'ensign-scan[yara]'` from older instructions still works.
+yara = []
 
 [project.urls]
 Homepage = "https://github.com/WolfdeerNerd/ensign-scan"
