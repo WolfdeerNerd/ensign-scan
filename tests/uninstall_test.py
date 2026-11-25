@@ -153,6 +153,32 @@ if os.geteuid() != 0:
             if real_home is not None:
                 os.environ["HOME"] = real_home
 
+# --- the export under sudo never carries another user's decisions -------------------------------
+users = protect.DATA_ROOT / "users"
+root_dbs = [str(protect.DATA_ROOT / "system.db"), str(users / "1000" / "decisions.db"),
+            str(users / "1001" / "decisions.db")]
+assert uninstall._exportable(root_dbs, 1000) == root_dbs[:2], "only root's own and yours"
+assert uninstall._exportable(root_dbs, None) == root_dbs[:1]
+
+# --- a data_dir Ensign would refuse is no place Ensign kept data -------------------------------
+with tempfile.TemporaryDirectory() as d:
+    bad = Path(d, "c.toml")
+    for value, expect in (('"data"', None), ('"./data"', None), ('""', None), ("3", None),
+                          ('"/srv/ensign"', Path("/srv/ensign"))):
+        bad.write_text(f"data_dir = {value}\n")
+        assert uninstall._data_dir_setting(bad) == expect, (value, uninstall._data_dir_setting(bad))
+
+# --- Ensign's folder as a link: pointed out, nothing behind it deleted -------------------------
+with tempfile.TemporaryDirectory() as d:
+    home = Path(d, "home")
+    real = Path(d, "elsewhere-data")
+    real.mkdir()
+    (home / ".local" / "share").mkdir(parents=True)
+    os.symlink(real, home / ".local" / "share" / "ensign-scan")
+    plan = uninstall.user_plan(home)
+    assert not plan.items and any("a link" in k for k in plan.kept), plan
+print("export, data_dir and link checks passed ✓")
+
 # --- with sudo -----------------------------------------------------------------------------------
 if os.geteuid() != 0:
     print("\nAll uninstall tests passed ✓ (the root part is skipped: run with sudo for it)")

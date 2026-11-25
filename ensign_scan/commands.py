@@ -275,7 +275,7 @@ def translate(argv: list[str], takes_value: set[str], out=print) -> list[str]:
         raise _ambiguous(word)   # clarify, never guess
     if word == "help":
         wanted = [w for w in rest if not w.startswith("-")]
-        if not wanted:
+        if not wanted or wanted[0] == "help":
             out(overview())
         elif wanted[0] in BY_NAME:
             out(_help_for(BY_NAME[wanted[0]]))
