@@ -43,12 +43,15 @@ pipx install ensign-scan
 ```
 Arch marks the system Python as externally managed, so a plain `pip install` outside a virtual environment is refused. pipx installs Ensign into its own isolated environment and puts the `ensign-scan` command on your `PATH`. Update it later with `pipx upgrade ensign-scan`.
 
-Optional, for the YARA pass on files too large for ClamAV (see Large files): install `pipx install 'ensign-scan[yara]'` instead, or add it to an existing install with `pipx inject ensign-scan yara-x`. Then `pipx upgrade ensign-scan --include-injected` keeps both up to date.
+This also installs yara-x, the engine for the sweep's YARA pass on files too large for ClamAV (see Large files). Already have Ensign from before 0.10.0? Upgrading brings yara-x with it:
+```
+pipx upgrade ensign-scan
+```
 
 **With pip, in a virtual environment (any distro):**
 ```
 python3 -m venv ~/.venvs/ensign
-~/.venvs/ensign/bin/pip install ensign-scan          # or 'ensign-scan[yara]' for the YARA pass
+~/.venvs/ensign/bin/pip install ensign-scan
 ~/.venvs/ensign/bin/ensign-scan --help
 ```
 
@@ -95,11 +98,11 @@ What stays, and is only pointed out: the program itself (the end of the output s
 
 This section is for running Ensign from a source checkout; an installed copy (above) pulls in its own dependencies.
 
-To get started with Ensign you need Python 3.11 or newer, SQLAlchemy, and rich. Ensign requires Python 3.11+ specifically for the `tomllib` module, used for config parsing.
+To get started with Ensign you need Python 3.11 or newer, SQLAlchemy, rich and yara-x. Ensign requires Python 3.11+ specifically for the `tomllib` module, used for config parsing.
 
 A `requirements.txt` file is included.
 
-If you have pip installed, the command is:
+If you have pip installed, the command is (yara-x included):
 ```
 pip install -r requirements.txt
 ```
@@ -109,7 +112,7 @@ If you have pacman installed, the command is:
 sudo pacman -S --needed python-sqlalchemy python-rich
 ```
 
-Optional: yara-x, for the sweep's YARA pass (see Large files). It isn't in the Arch repositories, and Arch refuses a plain `pip install` outside a virtual environment, so run the checkout from one:
+pacman has no yara-x, the engine for the sweep's YARA pass (see Large files), and Arch refuses a plain `pip install` outside a virtual environment. Without it, everything works except that pass, and each sweep says it's off. To have it, run the checkout from a virtual environment:
 ```
 python3 -m venv --system-site-packages .venv   # keeps pacman's sqlalchemy and rich
 .venv/bin/pip install yara-x
@@ -360,7 +363,7 @@ ClamAV can't scan files over about 2 GiB at all, with any tool or setting. This 
 
 **YARA, for what the slices miss.** A slice has its own start and end, so two kinds of ClamAV signature can't match in one: those tied to a position (a byte offset, a distance from the end of the file, an executable's entry point or sections), and patterns that can stretch further than the slices overlap (1 MiB). When a YARA engine is installed, the sweep also runs those signatures over the whole file in one pass, after the slices. Ensign translates them from ClamAV's own databases into YARA rules; everything else stays with the slices. A hit flags the file infected like a slice hit, and the report says YARA found it. A file with no hit is still **not fully scanned**: the YARA pass covers what the slices miss, nothing more.
 
-- **Engine:** yara-x (`pip install yara-x`), VirusTotal's rewrite of YARA in Rust. The original YARA only gets bug fixes now, and yara-x is memory-safe, which matters for an engine that parses untrusted files inside Ensign's own process. Without it, the sweep runs as before and the run says the YARA pass is off.
+- **Engine:** yara-x, VirusTotal's rewrite of YARA in Rust, installed with Ensign since 0.10.0. The original YARA only gets bug fixes now, and yara-x is memory-safe, which matters for an engine that parses untrusted files inside Ensign's own process. Without it, the sweep runs as before and the run says the YARA pass is off.
 - **Kept current with freshclam:** before any run that sweeps, Ensign compares ClamAV's databases with the ones the rules were made from, and rebuilds the rules if freshclam has changed them. `python3 main.py --update-rules` rebuilds them on demand and shows what was translated and what was skipped.
 - **Checked every time:** a rebuild that fails (an unreadable or damaged database, say), or one that suddenly yields fewer than half the rules it did last time, is shown in red at the top of the run, before scanning starts. The previous rules stay in use, and the run tries again next time. A new yara-x version also triggers a rebuild. The rules must also pass a self-test each time they load, or they aren't used. A drop in the count you know is real (ClamAV retired signatures) is accepted by running `--update-rules`.
 - **Runs in its own process:** yara-x reads a file by mapping it into memory, and if another program makes the file shorter mid-read (a game update, say), the kernel stops the reading process outright. So the YARA pass runs in a separate process that gets the file Ensign already has open: if it is stopped, the run goes on, and the file is noted as changed during the YARA pass and stays not fully scanned. It runs as the same user as Ensign (so as root under `sudo`), and it leaves no core dump when it is stopped: its memory holds pieces of the files it scans, so a dump would copy them to disk (and set off your desktop's crash alert). A file YARA can't finish within an hour is noted as timed out, and isn't tried again until it changes or the signatures move on.
