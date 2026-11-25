@@ -48,7 +48,7 @@ A change that fixes a bug comes with a test that fails without the fix.
 - Update the README when behaviour, a setting or a command changes. `config.example.toml` and the copy in `ensign_scan/config.py` must stay identical (a test checks this).
 - **No personal or system details** in code, tests, commits or the PR text: no home-directory paths with a real name, no hostnames, no email addresses. CI checks for home-directory paths.
 - **No links to AI chat sessions or conversations** in commits or PR descriptions. Using AI tools to help is fine; say so in the PR if you did, and make sure you understand and have tested what you submit.
-- Don't bump the version; releases are done separately.
+- Don't bump the version; releases are done separately. If users will notice your change, add a line for it under "Unreleased" in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
