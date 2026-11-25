@@ -526,8 +526,19 @@ The answer is kept with the content it was checked against, so once the file cha
 
 Allowances live in Ensign's own database. Ensign doesn't touch ClamAV or its signatures, so nothing else that uses clamd is affected. (ClamAV's own allow lists, `.sfp` and `.ign2` files in its database folder, work for every program using clamd. See ClamAV's documentation if that's what you want.)
 
-### For Steam users,
-### A note on Proton's 'Z:' drive
+## Reporting Bugs and Security Issues
+
+**Security vulnerabilities:** please don't open a public issue. Report them privately through the repository's **Security** tab (Advisories → Report a vulnerability). `SECURITY.md` explains what counts as a security bug for Ensign and what to expect after you report one.
+
+**Bugs, false positives and feature ideas:** open an issue and pick the matching form. The bug and detection forms ask for the output of:
+```
+ensign-scan --diagnostics
+```
+It reports versions, settings and counts only: no paths, usernames, hostnames or file names. Anything else you paste (output, tracebacks) can contain those, so please redact them first, and never attach a scanned file or your Ensign database.
+
+If a flagged file's threat name doesn't end in `.UNOFFICIAL`, the signature is ClamAV's own, and only ClamAV can fix it. The issue page links to their report forms.
+
+## For Steam users: a note on Proton's 'Z:' drive
 
 When developing Ensign, there wasn't anything to stop the walk from wandering and rescanning symlinks since I didn't understand them. You can imagine my surprise when the db was gradually growing in size despite not installing any updates or playing any new games. After some digging I found the culprit. Steam's Z: drive in Proton. The Z: drive allows steam to see and interact with your file system on linux. Nothing wrong with that. 
 
@@ -541,18 +552,5 @@ Hence why for this build, I've opted to set followlinks to False in the walk fun
 
 That way there's no endless cascade of walking a single directory. Symlinked directories are skipped entirely now — the walk sees them but never descends in. Individual files that happen to be symlinks (like a shortcut to a document) are still followed and scanned through to their real target, same as before — it's only symlinked directories that stopped getting wandered into.
 
-
-## Reporting Bugs and Security Issues
-
-**Security vulnerabilities:** please don't open a public issue. Report them privately through the repository's **Security** tab (Advisories → Report a vulnerability). `SECURITY.md` explains what counts as a security bug for Ensign and what to expect after you report one.
-
-**Bugs, false positives and feature ideas:** open an issue and pick the matching form. The bug and detection forms ask for the output of:
-```
-ensign-scan --diagnostics
-```
-It reports versions, settings and counts only: no paths, usernames, hostnames or file names. Anything else you paste (output, tracebacks) can contain those, so please redact them first, and never attach a scanned file or your Ensign database.
-
-If a flagged file's threat name doesn't end in `.UNOFFICIAL`, the signature is ClamAV's own, and only ClamAV can fix it. The issue page links to their report forms.
-
-### Last Note
+## Last Note
 This readme will be updated when needed. IE. FAQ questions that keep getting asked, or something needs further explanation. 
