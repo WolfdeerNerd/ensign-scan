@@ -334,6 +334,17 @@ with tempfile.TemporaryDirectory() as d:
     with Session(engine) as session:
         known = {r.id for r in session.query(FileRecord)}
         assert {f.file_id for f in session.query(Finding)} <= known
+    # One Scanner for both runs: the set of files with findings it keeps
+    # (scanner._has_findings) learns about a hit found during its own run.
+    same = Scanner(config, clamd=clamd)
+    (tree / "late.dat").write_bytes(b"EVIL found late")
+    quiet(same.scan_tree, tree)
+    (tree / "late.dat").write_bytes(b"harmless now")
+    quiet(same.scan_tree, tree)
+    assert finding_states(engine, "late.dat") == [("clamav", "Test.Evil", "gone")], \
+        finding_states(engine, "late.dat")
+    (tree / "late.dat").unlink()
+    quiet(same.purge_missing)
     print("finding lifecycle test passed ✓")
 
     # --- evidence: what the package manager says, never a verdict --------------------------------

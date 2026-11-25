@@ -176,6 +176,14 @@ quiet(scanner.scan_tree, tree)
 with Session(scanner.engine) as s:
     got = {Path(r.filepath).name: r.scan_status for r in s.query(FileRecord)}
 assert got == {"asset.dat": ScanStatus.ALLOWED.value, "forged.dat": ScanStatus.INFECTED.value}, got
+# Findings live in your own database, and follow root's allowances.
+from ensign_scan import findings  # noqa: E402
+from ensign_scan.models import Finding  # noqa: E402
+findings.tidy(scanner.engine)
+with Session(scanner.engine) as s:
+    states = {Path(r.filepath).name: f.state for f, r in s.query(Finding, FileRecord).join(
+        FileRecord, FileRecord.id == Finding.file_id)}
+assert states == {"asset.dat": "allowed", "forged.dat": "open"}, states
 _, out = quiet(allowlist.list_allowed, scanner.engine, expand=True)
 assert "FOLDERS YOU ALLOWED (1)" in out, "root's folder allowance is read too"
 assert "asset.dat" in out and "1 file here is infected now and not allowed" in out, out

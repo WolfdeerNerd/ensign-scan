@@ -492,6 +492,7 @@ class Scanner:
         self._oversized_lock = threading.Lock()
         self._clamscans: _ClamscanPool | None = None
         self._allowed_keys: set[tuple[str, str, str]] | None = None  # see _allowed()
+        self._finding_ids: set[int] | None = None   # see _has_findings()
         self.clamd_max_threads: int | None = None  # set when the worker count is resolved
         # Scan workers busy on a file right now: they share the CPU budget
         # with the clamscans.
@@ -563,6 +564,19 @@ class Scanner:
                 if self._allowed_keys is None:
                     self._allowed_keys = allowlist.allowed_keys(self.engine)
         return self._allowed_keys
+
+    def _has_findings(self, file_id: int | None) -> bool:
+        """Whether a file has findings that aren't gone. Read once per run
+        and kept up to date by _upsert_file, so the millions of clean
+        results of a big scan don't each ask the database (findings are
+        only ever about flagged files). One run at a time (runlock.py)."""
+        if file_id is None:
+            return False
+        if self._finding_ids is None:
+            with self._prepare_lock:
+                if self._finding_ids is None:
+                    self._finding_ids = findings.file_ids(self.engine)
+        return file_id in self._finding_ids
 
     def _scan_limit(self) -> int:
         return (self.limits or DEFAULT_LIMITS).scan_limit
@@ -1501,6 +1515,7 @@ class Scanner:
                 FileRecord.scan_status: ScanStatus.INCOMPLETE.value,
                 FileRecord.threat_name: f"{LIMITS_EXCEEDED_PREFIX}.MaxFileSize",
                 FileRecord.threat_engine: None,
+                FileRecord.last_error: None,
                 FileRecord.scan_result: summary,
                 FileRecord.sig_version: self._sig_version,
                 FileRecord.last_scanned: utcnow(),
@@ -1736,12 +1751,20 @@ class Scanner:
                     record.last_scanned = utcnow()
                     if outcome.status in (ScanStatus.CLEAN, ScanStatus.INFECTED, ScanStatus.ALLOWED):
                         record.sig_version = self._sig_version
-                    session.flush()   # a new record needs its id for its findings
-                    if previous_hash is not None and actual is not None and actual != previous_hash:
-                        # Its findings were about other content, whatever this
-                        # scan says (an error leaves no finding to replace them).
-                        findings.content_changed(session, record.id)
-                    findings.record_outcome(session, record, outcome)
+                    hit = outcome.status in (ScanStatus.INFECTED, ScanStatus.ALLOWED)
+                    if hit:
+                        session.flush()   # a new record needs its id for its findings
+                    if self._has_findings(record.id):
+                        if previous_hash is not None and actual is not None and actual != previous_hash:
+                            # Its findings were about other content, whatever this
+                            # scan says (an error leaves no finding to replace them).
+                            findings.content_changed(session, record.id)
+                        findings.record_outcome(session, record, outcome)
+                    elif hit:
+                        findings.record_outcome(session, record, outcome)
+                    if hit:
+                        self._has_findings(record.id)   # loads the set, if not yet
+                        self._finding_ids.add(record.id)
                 elif previous_hash is not None and digest is not None and (
                         digest != previous_hash
                         or (not digest and previous_stat
@@ -1753,7 +1776,8 @@ class Scanner:
                     record.last_error = None
                     record.sig_version = None
                     record.last_scanned = None
-                    findings.content_changed(session, record.id)
+                    if self._has_findings(record.id):
+                        findings.content_changed(session, record.id)
                 session.commit()
             except Exception:
                 session.rollback()

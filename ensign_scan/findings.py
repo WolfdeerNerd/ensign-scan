@@ -13,10 +13,15 @@ The rules, kept by the scanner in the same transaction as the verdict:
   ClamAV's signatures). The hit it reports is open, or allowed if you
   allowed it; any other open ClamAV hit on that file is gone, since ClamAV
   no longer reports it. A clean result makes them all gone.
-* A file whose content changed since its hits were found (a --no-scan run
-  sees a new hash) has them all gone: they were about other content.
-* An error, or a sweep that couldn't scan a file whole, changes nothing:
-  no engine has given a new answer.
+* A file whose content changed since its hits were found has them all
+  gone, whatever the new scan says (an error included): they were about
+  other content.
+* A sweep of a file too large for ClamAV that finished and found nothing
+  makes its ClamAV-engine hits gone (clamav_found_nothing). One that
+  couldn't recheck the part that found a hit changes nothing (see
+  scanner._earlier_hit_stands).
+* An error on unchanged content changes nothing: no engine has given a
+  new answer, and the file keeps its verdict (scanner._upsert_file).
 
 tidy() runs at the start of each run: it removes findings and evidence of
 files that are no longer recorded, and brings each finding's state in line
@@ -56,6 +61,12 @@ def record_outcome(session: Session, record: FileRecord, outcome) -> None:
             _gone(session, record.id, CLAMAV_ENGINES, keep=found.id)
     elif status == ScanStatus.CLEAN and outcome.engine in CLAMAV_ENGINES:
         _gone(session, record.id, CLAMAV_ENGINES)
+
+
+def file_ids(engine: Engine) -> set[int]:
+    """The files that have findings which aren't gone."""
+    with Session(engine) as session:
+        return {row[0] for row in session.query(Finding.file_id).filter(Finding.state != GONE).distinct()}
 
 
 def content_changed(session: Session, file_id: int) -> None:
