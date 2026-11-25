@@ -24,6 +24,9 @@ Versions follow `major.minor.patch`: a new feature bumps the middle number, a fi
 - `uninstall`, in a shared `data_dir`, no longer removes an empty `logs`, `yara` or `clamav-reports` folder that never held Ensign's files: only folders that its own deletions emptied.
 - `uninstall` with `sudo` no longer skips root's `data_dir` when its name only starts like `/var/lib/ensign-scan` (`/var/lib/ensign-scan2`, say). And when `/var/lib/ensign-scan` isn't root's (so it's left alone), the decisions in it aren't offered for saving either.
 - After `--`, every word is a path: `ensign-scan allow -- -h` allows a file called `-h` instead of showing help, and `ensign-scan list infected -- -odd` lists a folder called `-odd` instead of failing.
+- File names with Unicode that reorders or breaks a line without showing anything (right-to-left override, the directional isolates and marks, the line and paragraph separators) are now written out as `‮` and so on, everywhere Ensign shows a name: the terminal, the log, notifications. `invoice‮fdp.exe` can no longer pass itself off as `invoiceexe.pdf` in a report.
+- A command Ensign suggests for a file whose name has a control character or such Unicode in it can be pasted again: the name is written in the shell's `$'...'` form, which bash and zsh turn back into the exact name.
+- `rescan_after_days` set very high (a million days, say) crashed the run at the end of the scan; now nothing is stale. Set to 0, it rescanned every file on every run; now 0 turns it off, like the other settings. The example config now explains it.
 
 ## 0.10.0
 

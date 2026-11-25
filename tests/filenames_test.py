@@ -99,6 +99,34 @@ assert shown(HOSTILE["window title"]) == "evil\\x1b]0;all clear\\x07.com"
 assert shown(HOSTILE["line breaks and tab"]) == "evil\\n\\[green]OK\\[/green]\\r\\t.com", \
     "named escapes for the common three, and rich markup still neutralised"
 assert shown("évité 日本語 🦊.txt") == "évité 日本語 🦊.txt", "ordinary non-ASCII is untouched"
+# Unicode that reorders or breaks the line without showing anything ("Trojan
+# Source"): RIGHT-TO-LEFT OVERRIDE makes "invoice<RLO>fdp.exe" read as
+# "invoiceexe.pdf"; the isolates, marks and line separators do the same kind of thing.
+for name in ("invoice\u202efdp.exe", "a\u2066b\u2069c", "a\u200fb", "a\u2028b", "a\u2029b", "a\u061cb"):
+    for out in (shown(name), notify._body_text(name)):
+        assert not any(c in out for c in "\u202e\u2066\u2069\u200f\u2028\u2029\u061c"), repr(out)
+assert shown("invoice\u202efdp.exe") == "invoice\\u202efdp.exe", shown("invoice\u202efdp.exe")
+assert shown("שלום مرحبا.txt") == "שלום مرحبا.txt", "right-to-left names themselves are untouched"
+
+# A hint with such a name in it is still one you can paste: the escaped name
+# is written in bash's $'...' form, which reads the escapes back as the bytes.
+import shutil as _shutil  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+
+from rich.console import Console as _Console  # noqa: E402
+
+from ensign_scan.fsutil import shell_quote  # noqa: E402
+
+if _shutil.which("bash"):
+    for name in [*HOSTILE.values(), "invoice\u202efdp.exe", "it's", "back\\slash", "a[b]c",
+                 os.fsdecode(b"caf\xe9.txt"), "mix'\\\x07\u2066'", "$HOME `x`"]:
+        screen = io.StringIO()
+        _Console(file=screen, width=500, color_system=None).print(shown(f"printf %s {shell_quote(name)}"),
+                                                                  soft_wrap=True)
+        pasted = screen.getvalue().rstrip("\n")
+        assert pasted.isprintable(), repr(pasted)
+        got = _subprocess.run(["bash", "-c", pasted], capture_output=True).stdout
+        assert got == os.fsencode(name), (name, pasted, got)
 print("control-character test passed ✓")
 
 with tempfile.TemporaryDirectory() as d:

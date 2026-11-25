@@ -39,6 +39,9 @@ sweep_huge_files = true
 # clamped, with a warning); 0 turns that trigger off.
 resweep_after_signature_updates = 30
 resweep_after_days = 30
+
+# Rescan an unchanged, previously-clean file once this many days have passed
+# since its last scan, whatever the signatures did meanwhile. 0 turns it off.
 rescan_after_days = 90
 
 # Rescan an unchanged, previously-clean file once the virus-signature

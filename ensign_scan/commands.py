@@ -17,11 +17,12 @@ command.
 from __future__ import annotations
 
 import os
-import shlex
 import shutil
 import sys
 import textwrap
 from dataclasses import dataclass, field
+
+from .fsutil import shell_quote
 
 PROG = "ensign-scan"
 
@@ -97,7 +98,7 @@ def remember_config(path: str | None) -> None:
 def config_part() -> str:
     """" --config PATH" when this run was given one, so that a pasted hint
     acts on the same config and database; else nothing."""
-    return f" --config {shlex.quote(_CONFIG)}" if _CONFIG else ""
+    return f" --config {shell_quote(_CONFIG)}" if _CONFIG else ""
 
 
 def prefix() -> str:
@@ -159,7 +160,7 @@ def _original_form(name: str) -> str:
 
 
 def _ambiguous(word: str) -> UsageError:
-    path = shlex.quote(f"./{word}")
+    path = shell_quote(f"./{word}")
     return UsageError(
         f"{word!r} is a command, and there's also a file or folder called {word} here. "
         f"Which did you mean?\n"

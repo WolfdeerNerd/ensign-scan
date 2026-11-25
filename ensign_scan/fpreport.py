@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -35,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from .config import HOME
 from .diagnostics import _pkg_version, _scrub
-from .fsutil import NotScannable, human_size, open_for_scan, print_unwrapped, shown
+from .fsutil import NotScannable, human_size, open_for_scan, print_unwrapped, shell_quote, shown
 from .models import FileRecord, ScanStatus, utcnow
 
 FORM_URL = "https://www.clamav.net/reports/fp"
@@ -233,8 +232,8 @@ def make_report(scanner, config, path_text: str) -> Path | None:
     print("       (named here only: the report doesn't contain it)")
     print("    3. Paste the report's details into the form, and say in your own")
     print("       words why it's a false positive.")
-    sig = shlex.quote(current)
-    print_unwrapped(f"  Or with ClamAV's own tool: clamsubmit -p {shown(shlex.quote(str(path)))} "
+    sig = shell_quote(current)
+    print_unwrapped(f"  Or with ClamAV's own tool: clamsubmit -p {shown(shell_quote(str(path)))} "
                     f"-V {shown(sig)} -N 'Your name' -e 'you@example.com'")
     print("  [yellow]Submitting sends the file's whole contents to Cisco (ClamAV's owner).[/yellow]")
     print("  [yellow]Only submit a file with nothing private in it.[/yellow]")

@@ -36,7 +36,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import shlex
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -65,7 +64,8 @@ from .clamd import (
 )
 from .config import HOME, Config
 from .db import make_engine
-from .fsutil import NotScannable, human_size, is_scannable, open_for_scan, safe_lstat, sha256_fd, shown, stat_or_error
+from .fsutil import (NotScannable, human_size, is_scannable, open_for_scan, safe_lstat, sha256_fd, shell_quote,
+                     shown, stat_or_error)
 from .models import (
     ENGINE_CLAMAV,
     ENGINE_CLAMAV_YARA,
@@ -113,7 +113,7 @@ def own_clamd_message(uid: int, socket_path: str) -> str:
         "reports every file clean. Ensign won't send it any files. See what owns the "
         # Quoted for the shell: the path comes from a config that, unprotected,
         # anything running as you can write, and this line is meant to be pasted.
-        f"socket with: ss -xlp | grep -F -- {shlex.quote(socket_path)}, and check "
+        f"socket with: ss -xlp | grep -F -- {shell_quote(socket_path)}, and check "
         "clamd_socket in your config."
     )
 
@@ -1830,7 +1830,14 @@ class Scanner:
 
     def rescan_stale(self, days: int | None = None) -> None:
         days = days if days is not None else self.config.rescan_after_days
-        cutoff = utcnow() - timedelta(days=days)
+        try:
+            cutoff = utcnow() - timedelta(days=days)
+        except OverflowError:
+            # Longer than a date can hold (rescan_after_days = 1000000, say):
+            # nothing is that old, so nothing is stale. Not a crash at the end
+            # of a scan.
+            print(f"\nNo stale files: nothing was scanned more than {days} days ago.")
+            return
         self._rescan(
             f"stale (>{days} days)",
             (FileRecord.last_scanned < cutoff) | (FileRecord.last_scanned.is_(None)),
