@@ -1,6 +1,7 @@
 """Database engine construction for Ensign."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
@@ -114,6 +115,36 @@ def _upgrade_to_findings(conn) -> None:
         "FROM files WHERE scan_status IN ('infected', 'allowed')")
 
 
+@contextmanager
+def _ddl_transaction(conn):
+    """One real transaction around schema changes. Python's sqlite3 module
+    (in its default mode) opens a transaction before INSERT, UPDATE and
+    DELETE, but not before CREATE, ALTER or DROP: those run on their own
+    and are kept at once. A crash in the middle of a table rebuild would
+    then leave it half done. Here BEGIN is sent explicitly, so either all
+    of it is kept, or none."""
+    raw = conn.connection.driver_connection
+    raw.commit()                    # nothing of the caller's is pending; never mix it in
+    before = raw.isolation_level
+    raw.isolation_level = None      # the module sends no BEGIN or COMMIT of its own
+    try:
+        raw.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            raw.execute("ROLLBACK")
+            raise
+        raw.execute("COMMIT")
+    finally:
+        raw.isolation_level = before
+
+
+def _needs_rebuild(conn, table: str, old: str) -> bool:
+    columns = [row[1] for row in conn.exec_driver_sql(f"PRAGMA main.table_info({table})")]
+    leftover = conn.exec_driver_sql(f"PRAGMA main.table_info({old})").fetchall()
+    return bool(leftover) or (bool(columns) and "engine" not in columns)
+
+
 def upgrade_decision_tables(conn) -> bool:
     """Give allowances and allowed_folders their engine column (0.10.0),
     in this database's own tables (main), if they don't have it. Returns
@@ -122,30 +153,50 @@ def upgrade_decision_tables(conn) -> bool:
     Every allowance made before was for ClamAV, the only engine there was,
     and stays exactly that: a hit from another engine is never covered by
     one. The engine is also part of each table's unique key, which SQLite
-    can't change in place, so each table is rebuilt once, in one
-    transaction: renamed, made again from models.py, copied, dropped.
+    can't change in place, so each table is rebuilt once, in one real
+    transaction (_ddl_transaction): renamed, made again from models.py,
+    copied, dropped.
+
+    A rebuild that a build of 0.10.0 before this fix left half done (the
+    renamed table still there) is finished here: its rows are copied into
+    the new table, so no allowance is lost.
 
     Also used on protected decisions files (protect.upgrade_all), which root
     upgrades the same way. The rebuild stays inside the same file, so it
     keeps the file's owner, mode and ACL."""
     changed = False
     for table in ("allowances", "allowed_folders"):
-        columns = [row[1] for row in conn.exec_driver_sql(f"PRAGMA main.table_info({table})")]
-        if not columns or "engine" in columns:
-            continue   # not in this database (made later by create_all), or already done
         old = f"{table}_before_engine"
-        conn.exec_driver_sql(f"ALTER TABLE main.{table} RENAME TO {old}")
-        # The renamed table keeps its indexes' names; free them for the new one.
-        for (index,) in conn.exec_driver_sql(
-                "SELECT name FROM main.sqlite_master WHERE type = 'index' AND tbl_name = ? "
-                "AND sql IS NOT NULL", (old,)).fetchall():
-            conn.exec_driver_sql(f'DROP INDEX main."{index}"')
-        Base.metadata.tables[table].create(conn)
-        copied = ", ".join(columns)
-        conn.exec_driver_sql(
-            f"INSERT INTO main.{table} ({copied}, engine) SELECT {copied}, 'clamav' FROM main.{old}")
-        conn.exec_driver_sql(f"DROP TABLE main.{old}")
-        changed = True
+        if not _needs_rebuild(conn, table, old):
+            continue   # the usual case: checked without taking the write lock
+        with _ddl_transaction(conn):
+            columns = [row[1] for row in conn.exec_driver_sql(f"PRAGMA main.table_info({table})")]
+            leftover = [row[1] for row in conn.exec_driver_sql(f"PRAGMA main.table_info({old})")]
+            if leftover and (not columns or "engine" in columns):
+                # Half done earlier: finish it.
+                if not columns:
+                    Base.metadata.tables[table].create(conn)
+                copied = ", ".join(c for c in leftover if c != "id")
+                conn.exec_driver_sql(
+                    f"INSERT OR IGNORE INTO main.{table} ({copied}, engine) "
+                    f"SELECT {copied}, 'clamav' FROM main.{old}")
+                conn.exec_driver_sql(f"DROP TABLE main.{old}")
+                changed = True
+                continue
+            if not columns or "engine" in columns:
+                continue   # not in this database (made later by create_all), or already done
+            conn.exec_driver_sql(f"ALTER TABLE main.{table} RENAME TO {old}")
+            # The renamed table keeps its indexes' names; free them for the new one.
+            for (index,) in conn.exec_driver_sql(
+                    "SELECT name FROM main.sqlite_master WHERE type = 'index' AND tbl_name = ? "
+                    "AND sql IS NOT NULL", (old,)).fetchall():
+                conn.exec_driver_sql(f'DROP INDEX main."{index}"')
+            Base.metadata.tables[table].create(conn)
+            copied = ", ".join(columns)
+            conn.exec_driver_sql(
+                f"INSERT INTO main.{table} ({copied}, engine) SELECT {copied}, 'clamav' FROM main.{old}")
+            conn.exec_driver_sql(f"DROP TABLE main.{old}")
+            changed = True
     return changed
 
 
