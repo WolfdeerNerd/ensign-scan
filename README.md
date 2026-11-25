@@ -291,7 +291,7 @@ From 0.11.0, every job has a short command, like pipx's or git's: `ensign-scan a
 
 Options such as `--yes`, `--protected` and `--config` go before or after the command: `sudo ensign-scan --protected allow PATH`. From a checkout, `python3 main.py allow PATH` works the same.
 
-**A command always wins over a folder with the same name.** The first word that isn't an option is read as a command if it is one, and as a path otherwise, so `ensign-scan ~/Downloads` still scans that folder. To scan a folder that happens to be called `allow` or `list`, write `ensign-scan scan allow` or `ensign-scan ./allow`. In a script that passes paths it didn't choose (a list of downloads, say), put them after `scan --`: `ensign-scan scan -- "$path"`. Then no file name can ever be read as a command.
+**Command or path.** The first word that isn't an option is read as a command if it is one, and as a path otherwise, so `ensign-scan ~/Downloads` still scans that folder. If the word is a command and there's also a file or folder by that name where you are, Ensign doesn't guess: it stops and shows both ways to say what you meant, `ensign-scan ./allow` for the folder and the original option (`ensign-scan --allow PATH`) for the command. In a script that passes paths it didn't choose (a list of downloads, say), put them after `scan --`: `ensign-scan scan -- "$path"`. Then no file name can ever be read as a command.
 
 ### Targeting and behavior flags
 

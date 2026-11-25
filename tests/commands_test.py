@@ -107,6 +107,35 @@ assert parsed(["allow-folder", "/f", "--sig", "S"])["signature"] == "S"
 # PATHs that start with "-", after --, stay PATHs for commands that take them.
 assert parsed(["allow", "--", "-odd"])["allow"] == ["-odd"]
 assert parsed(["allow-folder", "--signature", "S", "--", "-odd"])["allow_folder"] == "-odd"
+# A command that's also a file or folder where you are: never a guess.
+import os  # noqa: E402
+import tempfile  # noqa: E402
+
+here = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    try:
+        os.mkdir("allow")
+        open("purge-missing", "w").close()
+        open("help", "w").close()
+        for argv, original in ((["allow", "/x"], "ensign-scan --allow PATH"),
+                               (["purge-missing"], "ensign-scan --purge-missing"),
+                               (["--yes", "allow"], "ensign-scan --allow PATH"),
+                               (["help"], "ensign-scan --help")):
+            code, text = outcome(argv)
+            assert code == 2 and "also a file or folder" in text and original in text, (argv, text)
+            assert f"ensign-scan ./{argv[-1] if argv[0] != 'allow' else 'allow'}" in text, text
+        # Both ways it suggests work, and so do the other ways around it.
+        assert parsed(["./allow"])["targets"] == ["./allow"]
+        assert parsed(["--allow", "/x"])["allow"] == ["/x"]
+        assert parsed(["--purge-missing"])["purge_missing"] is True
+        assert parsed(["scan", "--", "allow"])["targets"] == ["allow"]
+        # Only the first word is checked: a folder named like a later word is just a path.
+        assert parsed(["scan", "allow"])["targets"] == ["allow"]
+        # A command with nothing by its name here is still the command.
+        assert parsed(["unallow", "/x"])["unallow"] == ["/x"]
+    finally:
+        os.chdir(here)
 print("command or path test passed ✓")
 
 # Wrong uses: exit 2, saying what's wrong and showing the command's usage.
