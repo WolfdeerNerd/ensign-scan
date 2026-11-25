@@ -157,7 +157,7 @@ def _ensigns_names_in(folder: Path, what: str, plan: Plan) -> None:
             if not _is_real_dir(folder / sub):
                 continue
             mine = sorted(e.name for e in (folder / sub).iterdir()
-                          if not e.is_dir(follow_symlinks=False)
+                          if not _is_real_dir(e)
                           and any(fnmatch.fnmatchcase(e.name, p) for p in patterns))
             names += [f"{sub}/{n}" for n in mine]
             others = sum(1 for _ in (folder / sub).iterdir()) - len(mine)
