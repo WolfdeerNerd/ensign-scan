@@ -3,12 +3,17 @@ that flagged them. Evidence never changes a verdict: a flagged file stays
 flagged until a scan says otherwise or you allow it. It's shown next to the
 hit, so you can decide faster.
 
-The one source so far is the package manager (pkgdb.origins): did a
-package install this file, and is it still exactly what the package put
-there? A file that is gets the "likely false positive" label. A package is
-not a guarantee -- an AUR package is a script anyone can publish, and a
-compromised mirror is rare but possible -- so the label says what was
-checked, and the file stays flagged.
+Two sources so far:
+
+  package  the package manager (pkgdb.origins): did a package install this
+           file, and is it still exactly what the package put there?
+  steam    Steam's record of a game's files (steam.py): is a flagged file in
+           a game folder exactly what Steam installed for that game?
+
+A yes from either gets the "likely false positive" label. Neither is a
+guarantee -- an AUR package is a script anyone can publish, a game is only
+as trustworthy as its developer, and Steam's record is in your home folder
+-- so the label says what was checked, and the file stays flagged.
 
 Each fact is stored with the hash of the content it was checked against
 (models.Evidence), and shown only while the finding is about that same
@@ -28,7 +33,7 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import pkgdb
+from . import pkgdb, steam
 from .findings import OPEN
 from .fsutil import NotScannable, open_for_scan, sha256_fd
 from .models import Evidence, FileRecord, Finding, utcnow
@@ -36,6 +41,8 @@ from .models import Evidence, FileRecord, Finding, utcnow
 log = logging.getLogger(__name__)
 
 SOURCE_PACKAGE = "package"
+SOURCE_STEAM = "steam"
+_ORDER = {SOURCE_PACKAGE: 0, SOURCE_STEAM: 1}   # how they're listed under a file
 
 # pkgdb states worth keeping. UNOWNED and UNKNOWN say nothing either way,
 # so they aren't stored (and an older answer is removed).
@@ -43,25 +50,71 @@ _KEPT = (pkgdb.FROM_PACKAGE, pkgdb.MODIFIED, pkgdb.OWNED)
 
 
 def refresh(engine: Engine) -> int:
-    """Ask the package manager about every file with an open finding.
-    Returns how many files have package evidence afterwards. Does nothing
-    when package verification is off or unavailable. A second opinion that
-    fails (the database busy past its timeout, say) never fails the run:
-    it's logged, and the report goes on without it."""
-    if pkgdb.active().name == "none":
-        return 0
+    """Ask every source about every file with an open finding. Returns how
+    many pieces of evidence there are afterwards. The package manager isn't
+    asked when package verification is off or unavailable. A second opinion
+    that fails (the database busy past its timeout, say) never fails the
+    run: it's logged, and the report goes on without it."""
+    kept = 0
+    if pkgdb.active().name != "none":
+        try:
+            kept += _refresh(engine)
+        except SQLAlchemyError:
+            log.exception("could not save the package manager's answers about flagged files")
     try:
-        return _refresh(engine)
+        kept += _refresh_steam(engine)
     except SQLAlchemyError:
-        log.exception("could not save the package manager's answers about flagged files")
-        return 0
+        log.exception("could not save Steam's answers about flagged files")
+    return kept
+
+
+def _open_flagged(session: Session):
+    return session.query(FileRecord.id, FileRecord.filepath, FileRecord.file_hash).join(
+        Finding, Finding.file_id == FileRecord.id).filter(
+        Finding.state == OPEN, Finding.content_hash == FileRecord.file_hash).distinct().all()
+
+
+def _store(session: Session, file_id: int, source: str, verdict: str | None, subject, digest) -> bool:
+    """Save one source's answer about a file (replacing the last), or remove
+    the last one when there's no answer worth keeping (verdict None)."""
+    existing = session.query(Evidence).filter(Evidence.file_id == file_id, Evidence.source == source).first()
+    if verdict is None or not digest:
+        if existing is not None:
+            session.delete(existing)
+        return False
+    if existing is None:
+        existing = Evidence(file_id=file_id, source=source)
+        session.add(existing)
+    existing.verdict = verdict
+    existing.subject = subject
+    existing.content_hash = digest
+    existing.checked_at = utcnow()
+    return True
+
+
+def _refresh_steam(engine: Engine) -> int:
+    """Steam's record, for flagged files in Steam game folders. steam.check
+    hashes the file itself and answers only for the flagged content."""
+    with Session(engine) as session:
+        rows = [r for r in _open_flagged(session) if "/steamapps/common/" in r.filepath]
+        if not rows:
+            return 0
+        records, kept = steam.Records(), 0
+        for file_id, filepath, digest in rows:
+            try:
+                answer = steam.check(records, filepath, digest) if digest else None
+            except Exception:  # a second opinion failing must not fail the run
+                log.exception("could not check a flagged file against Steam's records")
+                answer = None
+            kept += _store(session, file_id, SOURCE_STEAM, answer and answer.verdict,
+                           answer and answer.game, digest)
+        session.commit()
+        return kept
 
 
 def _refresh(engine: Engine) -> int:
     with Session(engine) as session:
-        rows = session.query(FileRecord.id, FileRecord.filepath, FileRecord.file_hash).join(
-            Finding, Finding.file_id == FileRecord.id).filter(
-            Finding.state == OPEN, Finding.content_hash == FileRecord.file_hash).distinct().all()
+        rows = _open_flagged(session)
         if not rows:
             return 0
         try:
@@ -72,22 +125,9 @@ def _refresh(engine: Engine) -> int:
         kept = 0
         for file_id, filepath, digest in rows:
             state, package = answers.get(filepath, (pkgdb.UNKNOWN, None))
-            existing = session.query(Evidence).filter(
-                Evidence.file_id == file_id, Evidence.source == SOURCE_PACKAGE).first()
             if state in _KEPT and digest and _hash_now(filepath) != digest:
                 state = pkgdb.UNKNOWN   # the answer is about other content than what was flagged
-            if state not in _KEPT or not digest:
-                if existing is not None:
-                    session.delete(existing)
-                continue
-            if existing is None:
-                existing = Evidence(file_id=file_id, source=SOURCE_PACKAGE)
-                session.add(existing)
-            existing.verdict = state
-            existing.subject = package
-            existing.content_hash = digest
-            existing.checked_at = utcnow()
-            kept += 1
+            kept += _store(session, file_id, SOURCE_PACKAGE, state if state in _KEPT else None, package, digest)
         session.commit()
         return kept
 
@@ -105,27 +145,48 @@ def _hash_now(filepath: str) -> str | None:
         os.close(fd)
 
 
-def for_files(session: Session, files: dict[int, str | None]) -> dict[int, Evidence]:
-    """{file id: package evidence} for files given as {id: current hash},
-    only where the evidence was checked against that same content."""
-    result: dict[int, Evidence] = {}
+def for_files(session: Session, files: dict[int, str | None]) -> dict[int, list[Evidence]]:
+    """{file id: its evidence, package first} for files given as {id:
+    current hash}, only where the evidence was checked against that same
+    content."""
+    result: dict[int, list[Evidence]] = {}
     ids = list(files)
     for start in range(0, len(ids), 500):   # see allowlist.reconcile: SQLite's variable limit
         for row in session.query(Evidence).filter(
-                Evidence.file_id.in_(ids[start:start + 500]), Evidence.source == SOURCE_PACKAGE):
+                Evidence.file_id.in_(ids[start:start + 500]), Evidence.source.in_(tuple(_ORDER))):
             if files.get(row.file_id) and row.content_hash == files[row.file_id]:
-                result[row.file_id] = row
+                result.setdefault(row.file_id, []).append(row)
+    for facts in result.values():
+        facts.sort(key=lambda e: _ORDER[e.source])
     return result
 
 
 def likely_false_positive(found: Evidence | None) -> bool:
-    """A package installed exactly this content (decision: only an
-    unchanged package file earns the label)."""
-    return found is not None and found.verdict == pkgdb.FROM_PACKAGE
+    """A package, or Steam, installed exactly this content (decisions: only
+    an unchanged package file, or a file Steam's record lists with these
+    exact bytes, earns the label)."""
+    return found is not None and (
+        (found.source == SOURCE_PACKAGE and found.verdict == pkgdb.FROM_PACKAGE)
+        or (found.source == SOURCE_STEAM and found.verdict == steam.MATCH))
+
+
+def label(found: Evidence) -> str:
+    """The label in front of describe()'s line."""
+    if likely_false_positive(found):
+        return "Likely false positive"
+    return "Steam" if found.source == SOURCE_STEAM else "Package"
 
 
 def describe(found: Evidence) -> str:
     """One line for the reports."""
+    if found.source == SOURCE_STEAM:
+        game = found.subject or "a game"
+        if found.verdict == steam.MATCH:
+            return (f"Installed by Steam for {game}: Steam's record of this build has exactly these bytes. "
+                    f"That's only as trustworthy as the game's developer, and the record is in your home "
+                    f"folder, where anything running as you could change it.")
+        return (f"Steam's record for {game} lists this file with other contents. The game may have "
+                f"changed it itself (some rewrite their own files), or something else did.")
     package = found.subject or "a package"
     if found.verdict == pkgdb.FROM_PACKAGE:
         # The label already says "likely false positive": say what was checked.
