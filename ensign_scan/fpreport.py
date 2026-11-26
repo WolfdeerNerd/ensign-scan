@@ -198,6 +198,23 @@ def make_report(scanner, config, path_text: str) -> Path | None:
     if state == pkgdb.FROM_PACKAGE and package:
         backend = pkgdb.active().name
         lines.append(f"Package:          installed by {package} ({backend}), unchanged since")
+    # Steam's record, asked now too. The game's name is in the report on
+    # purpose: a file in a game folder is usually unique to that game, and
+    # it's what ClamAV's analysts need to find the file themselves.
+    from . import steam
+    try:
+        answer = steam.check(steam.Records(), str(path), sha256)
+    except Exception:  # a second opinion failing must not stop the report
+        answer = None
+    if answer is not None and answer.verdict == steam.MATCH:
+        lines.append(f"Steam:            installed by Steam for {answer.game}, exactly as Steam's "
+                     f"record of the current build lists it")
+    elif answer is not None and answer.verdict == steam.DIFFERS:
+        lines.append(f"Steam:            a file of {answer.game}, but with other contents than "
+                     f"Steam's record of the current build")
+    elif answer is not None and answer.verdict == steam.WORKSHOP:
+        lines.append(f"Steam:            part of a Steam Workshop item for {answer.game} "
+                     f"(community-made content)")
     lines += [
         "",
         "Why I believe this is a false positive:",
@@ -232,6 +249,8 @@ def make_report(scanner, config, path_text: str) -> Path | None:
     print("       (named here only: the report doesn't contain it)")
     print("    3. Paste the report's details into the form, and say in your own")
     print("       words why it's a false positive.")
+    print("  [dim]ClamAV's form asks for an email address. Consider one that isn't tied to[/dim]")
+    print("  [dim]your Steam account or anything else of yours.[/dim]")
     sig = shell_quote(current)
     print_unwrapped(f"  Or with ClamAV's own tool: clamsubmit -p {shown(shell_quote(str(path)))} "
                     f"-V {shown(sig)} -N 'Your name' -e 'you@example.com'")
