@@ -42,8 +42,10 @@ import json
 import logging
 import os
 import re
+import textwrap
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.engine import Engine
@@ -160,14 +162,23 @@ def _tokens(blob: bytes) -> set[bytes]:
     return {blob[i:i + 8] for i in range(0, len(blob), 8)}
 
 
-def _names(names: list[str]) -> str:
-    shown = ", ".join(names[:_MAX_NAMES])
-    return shown + (f" and {len(names) - _MAX_NAMES} more" if len(names) > _MAX_NAMES else "")
+def _listed(label: str, names: list[str]) -> list[str]:
+    """A label, then its names one per line under it, the last one ending
+    the list (or "and N more.")."""
+    shown_names = names[:_MAX_NAMES]
+    rest = len(names) - len(shown_names)
+    lines = [label]
+    for i, name in enumerate(shown_names):
+        last = i == len(shown_names) - 1
+        lines.append(f"    {name}{'.' if last and not rest else ','}")
+    if rest:
+        lines.append(f"    and {rest} more.")
+    return lines
 
 
 def compare(old_files: bytes, old_code: dict[str, str], new_files: bytes, new_code: dict[str, str],
-            encrypted: bool) -> list[str]:
-    """The reasons an update is worth a look; [] if none."""
+            encrypted: bool) -> list[list[str]]:
+    """The reasons an update is worth a look, each as its lines; [] if none."""
     touched = len(_tokens(new_files) - _tokens(old_files))   # files added or changed
     if encrypted:
         return []   # no names to tell code from data
@@ -176,14 +187,13 @@ def compare(old_files: bytes, old_code: dict[str, str], new_files: bytes, new_co
                               and _suffix(n) in PROGRAMS)
     added_scripts = [n for n in added if _suffix(n) in SCRIPTS]
     reasons = []
+    small = f"A small update ({touched} file{'s' if touched != 1 else ''} added or changed)"
     if touched <= SMALL and added:
-        reasons.append(f"A small update ({touched} file{'s' if touched != 1 else ''} added or changed) "
-                       f"adds code: {_names(added)}.")
+        reasons.append(_listed(f"{small} adds code:", added))
     if touched <= SMALL and changed_programs:
-        reasons.append(f"A small update ({touched} file{'s' if touched != 1 else ''} added or changed) "
-                       f"changes a program: {_names(changed_programs)}.")
+        reasons.append(_listed(f"{small} changes a program:", changed_programs))
     if added_scripts and not (touched <= SMALL and added):
-        reasons.append(f"The update adds scripts: {_names(added_scripts)}.")
+        reasons.append(_listed("The update adds scripts:", added_scripts))
     return reasons
 
 
@@ -227,16 +237,33 @@ def _workshop_item(item: Path) -> tuple[list[str], str] | None:
             fingerprint.update(f"{rel}\0{st.st_size}\0{st.st_mtime_ns}\0".encode("utf-8", "surrogateescape"))
     if not code and not protected:
         return None
-    detail = []
+    detail: list[str] = []
     programs = [c for c in code if _suffix(c) in PROGRAMS]
     scripts = [c for c in code if _suffix(c) in SCRIPTS]
     if programs:
-        detail.append(f"Programs: {_names(programs)}.")
+        detail += _listed("Programs:", programs)
     if scripts:
-        detail.append(f"Scripts: {_names(scripts)}.")
+        detail += _listed("Scripts:", scripts)
     if protected:
-        detail.append(f"Password-protected archives: {_names(protected)}.")
+        detail += _listed("Password-protected archives:", protected)
     return detail, fingerprint.hexdigest()[:12]
+
+
+def _workshop_updated(library: Path, appid: str) -> dict[str, str]:
+    """{item id: the day Steam last updated it} from appworkshop_<appid>.acf.
+    Steam keeps no item names on disk (those are on its servers)."""
+    text = steam._read_text(library / "steamapps" / "workshop" / f"appworkshop_{appid}.acf")
+    state = steam.parse_vdf(text).get("appworkshop", {}) if text else {}
+    items = state.get("workshopitemsinstalled", {}) if isinstance(state, dict) else {}
+    days = {}
+    for item, info in items.items() if isinstance(items, dict) else ():
+        stamp = info.get("timeupdated") if isinstance(info, dict) else None
+        if _number(item) and _number(stamp):
+            try:
+                days[item] = datetime.fromtimestamp(int(stamp), timezone.utc).strftime("%Y-%m-%d")
+            except (OverflowError, OSError, ValueError):
+                pass
+    return days
 
 
 def _workshop(library: Path, apps: dict[str, tuple[str | None, dict[str, str]]]) -> list[Finding]:
@@ -252,12 +279,17 @@ def _workshop(library: Path, apps: dict[str, tuple[str | None, dict[str, str]]])
             items = sorted(d for d in app.iterdir() if _number(d.name) and d.is_dir() and not d.is_symlink())
         except OSError:
             continue
+        updated = _workshop_updated(library, app.name) if items else {}
         for item in items:
             result = _workshop_item(item)
             if result:
                 detail, fp = result
+                when = f" (updated {updated[item.name]})" if item.name in updated else ""
+                head = [f"Workshop item {item.name}{when}",
+                        f"    {os.fsdecode(item)}",
+                        f"    https://steamcommunity.com/sharedfiles/filedetails/?id={item.name}"]
                 found.append(Finding(f"workshop-{app.name}-{item.name}-{fp}", "workshop", app.name, game,
-                                     [f"Workshop item {item.name}: {line}" for line in detail]))
+                                     head + [f"    {line}" for line in detail]))
     return found
 
 
@@ -331,7 +363,8 @@ def watch(engine: Engine, home: Path) -> None:
                         pending[key] = SteamPending(key=key, kind="update", appid=appid, game=game,
                                                     library=str(library),
                                                     detail="\n".join([f"Depot {depot}, build {manifest}:",
-                                                                      *reasons]))
+                                                                      *(f"    {line}" for reason in reasons
+                                                                        for line in reason)]))
                         session.add(pending[key])
                     row.manifest, row.files, row.code = manifest, files, json.dumps(code)
                     row.game = name or row.game
@@ -358,6 +391,8 @@ def watch(engine: Engine, home: Path) -> None:
                 pending[key] = SteamPending(key=key, kind="workshop", appid=f.appid, game=f.game,
                                             library=f.library, detail="\n".join(f.detail))
                 session.add(pending[key])
+            else:   # what's there now, in the current layout
+                pending[key].detail, pending[key].game = "\n".join(f.detail), f.game
         for row in list(snapshots.values()):
             if gone(row.library, row.appid):
                 session.delete(row)
@@ -408,13 +443,21 @@ def report(findings: list[Finding]) -> None:
     from .fsutil import print_unwrapped, shown
     if not findings:
         return
+    from rich.console import Console
+    width = max(40, Console().width - 1)
     rprint(f"\n=== STEAM: WORTH A LOOK ({len(findings)}) ===")
     rprint("Ensign read Steam's files only. Each of these is a reason to look, not a verdict.")
     for kind in ("update", "rename", "workshop"):
         group = [f for f in findings if f.kind == kind]
         if not group:
             continue
-        rprint(f"\n[bold]{_KIND[kind]}[/bold] ({len(group)}): {_WHY[kind]}")
+        heading = f"{_KIND[kind]} ({len(group)}): {_WHY[kind]}"
+        rprint("")
+        for i, line in enumerate(textwrap.wrap(heading, width - 4, break_long_words=False)):
+            if i == 0:
+                rprint(f"    [bold]{_KIND[kind]}[/bold]{line[len(_KIND[kind]):]}")
+            else:
+                rprint(f"    {line}")
         for f in group:
             print_unwrapped(f"\n  {shown(f.game)} (app {f.appid})")
             for line in f.detail:

@@ -95,6 +95,11 @@ def password_zip(path: Path) -> None:
     path.write_bytes(bytes(data))
 
 
+def flat(lines) -> str:
+    """Lines as one string, whitespace folded: what they say, not their layout."""
+    return " ".join(" ".join(lines).split())
+
+
 def keys(engine, kind=None) -> list[str]:
     return sorted(f.key for f in steamwatch.open_findings(engine) if kind is None or f.kind == kind)
 
@@ -122,7 +127,7 @@ for name, (files, expected) in cases.items():
     if expected is None:
         assert reasons == [], (name, reasons)
     else:
-        assert len(reasons) == 1 and expected in reasons[0], (name, reasons)
+        assert len(reasons) == 1 and expected in flat(reasons[0]), (name, reasons)
 enc_files, enc_code, enc = steamwatch._snapshot(manifest(1, {**base, "run.bat": b"x"}, encrypted=True))
 assert enc and enc_code == {} and steamwatch.compare(old_files, old_code, enc_files, enc_code, enc) == [], \
     "no names, no guess"
@@ -151,6 +156,8 @@ with tempfile.TemporaryDirectory() as d:
             (workshop / item / rel).parent.mkdir(parents=True, exist_ok=True)
             (workshop / item / rel).write_bytes(data)
     (workshop / "504").mkdir()
+    (apps / "workshop" / "appworkshop_10.acf").write_text(
+        '"AppWorkshop" { "WorkshopItemsInstalled" { "501" { "timeupdated" "1764000000" } } }')
     password_zip(workshop / "504" / "pack.zip")
     elsewhere = Path(d, "elsewhere")
     elsewhere.mkdir()
@@ -165,8 +172,14 @@ with tempfile.TemporaryDirectory() as d:
     assert keys(engine, "update") == [] and keys(engine, "rename") == [], "nothing to compare with yet"
     listed = keys(engine, "workshop")
     assert [k.split("-")[2] for k in listed] == ["501", "504", "505"], listed
-    details = {f.key.split("-")[2]: f.detail for f in steamwatch.open_findings(engine)}
-    assert "Programs: wallpaper.exe" in details["501"][0] and "Password-protected" in details["504"][0], details
+    details = {f.key.split("-")[2]: flat(f.detail) for f in steamwatch.open_findings(engine)}
+    assert "Programs: wallpaper.exe." in details["501"] and "Password-protected archives: pack.zip." in details["504"]
+    assert "filedetails/?id=501" in details["501"] and str(workshop / "501") in details["501"], details
+    assert "Workshop item 501 (updated 2025-11-24)" in details["501"] and "(updated" not in details["505"], details
+    # More names than are shown: the list ends with how many more.
+    lines = steamwatch._listed("Programs:", [f"{i}.exe" for i in range(8)])
+    assert lines[0] == "Programs:" and lines[1] == "    0.exe," and lines[5] == "    4.exe," \
+        and lines[-1] == "    and 3 more.", lines
 
     # A run with nothing new changes nothing.
     steamwatch.watch(engine, home)
@@ -177,7 +190,7 @@ with tempfile.TemporaryDirectory() as d:
     steamwatch.watch(engine, home)
     assert keys(engine, "update") == ["update-10-11-222"], keys(engine)
     found = [f for f in steamwatch.open_findings(engine) if f.kind == "update"][0]
-    assert "adds code: run.bat" in " ".join(found.detail) and found.game == "Rodent Race", found
+    assert "adds code: run.bat." in flat(found.detail) and found.game == "Rodent Race", found
     game_files["run.bat"] = b"x"
 
     # A big update that only changes programs: not listed (the noisy signal).

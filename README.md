@@ -454,6 +454,8 @@ Steam's record of a game says where a file came from, not whether it's safe (see
 
 These were measured before they were chosen: across 80 legitimate updates on one gaming machine, the three update rules fired 0, 2 and 3 times. "An update changes a program" fired 25 times, so it isn't one of them.
 
+A Workshop item is listed with its folder, its Workshop page address (as text: Ensign doesn't open it, and the page shows the item's name, which Steam keeps on its servers, not on your disk) and the day Steam last updated it, then its programs and scripts one per line.
+
 Each finding has an ID, which says exactly what it's about: the build's manifest, the item's current files, the game's new name. It's listed until you acknowledge it (`ensign-scan acknowledge-steam ID`, or `--all`), and anything that changes after that gets a new ID and is listed again. `ensign-scan steam` shows the list without scanning. In protected mode, acknowledging needs `sudo --protected`, and the list prints the command to paste.
 
 **What it never does:** change, delete or move anything of Steam's, unsubscribe from or disable an item, start or stop a game, or contact Steam. It reads Steam's text files and manifests and lists folders; it hashes nothing. `steam_watch = false` turns it off.
