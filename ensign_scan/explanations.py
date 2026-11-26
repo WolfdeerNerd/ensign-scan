@@ -253,9 +253,10 @@ KNOWN_FAMILIES = (
 def known_family(threat_name: str | None) -> str | None:
     """The family part of a ClamAV name (Win.Trojan.Vidar-123-0 -> "Vidar")
     when it's one of KNOWN_FAMILIES, else None."""
-    if not threat_name:
+    match = _NAME_RE.match(threat_name) if threat_name else None
+    if match is None:   # empty, or a name with a line break in it
         return None
-    parts = _NAME_RE.match(threat_name)["body"].split(".")
+    parts = match["body"].split(".")
     if parts and parts[0] == "PUA":
         parts = parts[1:]
     if len(parts) < 3:

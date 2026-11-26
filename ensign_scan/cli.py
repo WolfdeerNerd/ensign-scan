@@ -808,7 +808,8 @@ def run(args: argparse.Namespace, config: Config) -> int:
     format_mismatch_report(scanner.engine, paths=args.targets or None)
     allowlist.new_in_allowed_folders(scanner.engine, paths=args.targets or None)
     allowlist.allowed_report(scanner.engine, paths=args.targets or None)
-    steam_pending = _steam_section(scanner.engine, config)
+    # The Steam watch is about everything you scan, so a run of chosen paths skips it.
+    steam_pending = False if args.targets else _steam_section(scanner.engine, config)
     # Results the database refused are reported (and alerted on) from memory,
     # so a failed save can never turn a detection into "nothing found".
     infected += unsaved_report(scanner.unsaved)

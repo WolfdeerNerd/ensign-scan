@@ -233,7 +233,8 @@ def _in_workshop(path: Path) -> tuple[Path, str] | None:
     <library>/steamapps/workshop/content/<appid>/<item>/..., else None."""
     parts = path.parts
     for i in range(len(parts) - 5, 0, -1):   # at least <appid>/<item>/<file> after content
-        if parts[i:i + 3] == ("steamapps", "workshop", "content") and parts[i + 3].isdigit():
+        if parts[i:i + 3] == ("steamapps", "workshop", "content") and parts[i + 3].isascii() \
+                and parts[i + 3].isdigit():
             return Path(*parts[:i]), parts[i + 3]
     return None
 
@@ -329,6 +330,33 @@ class Records:
                         listed |= manifest.get(key, set())
                     break
         return (name, listed) if listed else None
+
+
+def unchanged_since(filepath: str, when: float) -> bool:
+    """True when nothing an answer about this file depends on has changed
+    since `when` (a timestamp): the file itself (its change time moves with
+    any write), and for a game folder, every appmanifest of its library and
+    every manifest in the depotcache folders it could be read from. Then the
+    answer can stand without hashing the file again (a flagged game file can
+    be 80 GB). Anything that can't be checked counts as changed."""
+    path = Path(filepath)
+    try:
+        if path.stat().st_ctime >= when:
+            return False
+        if _in_workshop(path) is not None:
+            return True
+        found = _in_library(path)
+        if found is None:
+            return False
+        library = found[0]
+        caches = Records._caches(library, path.stat().st_uid)
+        newest = max([p.stat().st_mtime for p in (library / "steamapps").glob("appmanifest_*.acf")]
+                     + [c.stat().st_mtime for c in caches if c.is_dir()]
+                     + [m.stat().st_mtime for c in caches if c.is_dir() for m in c.glob("*.manifest")],
+                     default=float("inf"))
+    except OSError:
+        return False
+    return newest < when
 
 
 def _hashes(path: Path) -> tuple[str, bytes] | None:

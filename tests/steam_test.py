@@ -219,6 +219,19 @@ with tempfile.TemporaryDirectory() as d:
             "Extra.dll, the unknown game, the loose file and the Proton prefix: nothing"
         assert record(engine, game / "bin/Game.dll").scan_status == "infected", "evidence never changes a verdict"
 
+        # Nothing changed since: the answers stand without hashing the files again.
+        import time  # noqa: E402
+        real_hashes, calls = steam._hashes, []
+        steam._hashes = lambda p: calls.append(p) or real_hashes(p)
+        try:
+            time.sleep(0.05)
+            assert evidence.refresh(engine) == 4 and calls == [], calls
+            later = time.time() + 5   # a manifest edited after the answers
+            os.utime(library / "depotcache" / "11_222.manifest", (later, later))
+            assert evidence.refresh(engine) == 4 and len(calls) == 3, "checked again: the record changed"
+        finally:
+            steam._hashes = real_hashes
+
         # Encrypted names work the same way.
         (library / "depotcache" / "11_222.manifest").write_bytes(manifest(11, shipped, encrypted=True))
         assert evidence.refresh(engine) == 4

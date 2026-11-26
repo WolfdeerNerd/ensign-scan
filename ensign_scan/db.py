@@ -76,6 +76,9 @@ def _migrate(engine: Engine, decision_tables: bool = True) -> None:
     _ensure_column(engine, "directories", "ctime_ns", "INTEGER")
     _ensure_column(engine, "files", "format_mismatch", "TEXT")
     _ensure_column(engine, "files", "last_error", "TEXT")
+    # The Steam watch's tables, as first released without a library column.
+    _ensure_column(engine, "steam_snapshots", "library", "TEXT")
+    _ensure_column(engine, "steam_pending", "library", "TEXT")
     _upgrade_data(engine)
 
 

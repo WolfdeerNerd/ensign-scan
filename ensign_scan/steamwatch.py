@@ -64,12 +64,17 @@ _MAX_WALK = 50_000              # files looked at per Workshop item, at most
 
 # What an ID looks like: kind, app id, then the parts that pin down what was
 # looked at. Only these characters, so a pasted command needs no quoting.
-_KEY = re.compile(r"(workshop-\d+-\d+-[0-9a-f]{12}|update-\d+-\d+-\d+|rename-\d+-[0-9a-f]{12})")
+_KEY = re.compile(r"(workshop-[0-9]+-[0-9]+-[0-9a-f]{12}|update-[0-9]+-[0-9]+-[0-9]+|rename-[0-9]+-[0-9a-f]{12})")
 _PROTECTED = False   # set for protected runs: acknowledging then needs sudo --protected
 
 
 def valid_key(key: str) -> bool:
-    return _KEY.fullmatch(key) is not None
+    return isinstance(key, str) and _KEY.fullmatch(key) is not None
+
+
+def _number(text) -> bool:
+    """An ID made of ASCII digits only ("١٢٣".isdigit() is True too)."""
+    return isinstance(text, str) and text.isascii() and text.isdigit()
 
 
 def show_protected_commands() -> None:
@@ -84,6 +89,7 @@ class Finding:
     appid: str
     game: str
     detail: list[str]
+    library: str | None = None
 
 
 # ----------------------------------------------------------------------
@@ -107,9 +113,9 @@ def libraries(home: Path) -> list[Path]:
     return list(found)
 
 
-def _apps(library: Path) -> dict[str, tuple[str, dict[str, str]]]:
-    """{appid: (name, {depot: manifest id})} for the games installed there."""
-    apps: dict[str, tuple[str, dict[str, str]]] = {}
+def _apps(library: Path) -> dict[str, tuple[str | None, dict[str, str]]]:
+    """{appid: (name or None, {depot: manifest id})} for the games installed there."""
+    apps: dict[str, tuple[str | None, dict[str, str]]] = {}
     try:
         acfs = sorted((library / "steamapps").glob("appmanifest_*.acf"))
     except OSError:
@@ -117,13 +123,13 @@ def _apps(library: Path) -> dict[str, tuple[str, dict[str, str]]]:
     for acf in acfs:
         text = steam._read_text(acf)
         state = steam.parse_vdf(text).get("appstate", {}) if text else {}
-        if not isinstance(state, dict) or not str(state.get("appid", "")).isdigit():
+        if not isinstance(state, dict) or not _number(state.get("appid")):
             continue
         depots = state.get("installeddepots", {})
         depots = {d: v["manifest"] for d, v in depots.items()
-                  if d.isdigit() and isinstance(v, dict) and str(v.get("manifest", "")).isdigit()} \
+                  if _number(d) and isinstance(v, dict) and _number(v.get("manifest"))} \
             if isinstance(depots, dict) else {}
-        name = state.get("name") if isinstance(state.get("name"), str) else f"app {state['appid']}"
+        name = state.get("name") if isinstance(state.get("name"), str) and state["name"].strip() else None
         apps[state["appid"]] = (name, depots)
     return apps
 
@@ -191,6 +197,8 @@ def _workshop_item(item: Path) -> tuple[list[str], str] | None:
     seen = 0
     for dirpath, dirnames, names in os.walk(item):
         dirnames.sort()
+        if seen > _MAX_WALK:
+            break   # an item this big: what's been seen so far is what's listed
         for n in sorted(names):
             seen += 1
             if seen > _MAX_WALK:
@@ -231,17 +239,17 @@ def _workshop_item(item: Path) -> tuple[list[str], str] | None:
     return detail, fingerprint.hexdigest()[:12]
 
 
-def _workshop(library: Path, apps: dict[str, tuple[str, dict[str, str]]]) -> list[Finding]:
+def _workshop(library: Path, apps: dict[str, tuple[str | None, dict[str, str]]]) -> list[Finding]:
     content = library / "steamapps" / "workshop" / "content"
     found = []
     try:
-        app_dirs = sorted(d for d in content.iterdir() if d.name.isdigit() and d.is_dir() and not d.is_symlink())
+        app_dirs = sorted(d for d in content.iterdir() if _number(d.name) and d.is_dir() and not d.is_symlink())
     except OSError:
         return found
     for app in app_dirs:
-        game = apps.get(app.name, (f"app {app.name}", {}))[0]
+        game = apps.get(app.name, (None, {}))[0] or f"app {app.name}"
         try:
-            items = sorted(d for d in app.iterdir() if d.name.isdigit() and d.is_dir() and not d.is_symlink())
+            items = sorted(d for d in app.iterdir() if _number(d.name) and d.is_dir() and not d.is_symlink())
         except OSError:
             continue
         for item in items:
@@ -269,6 +277,7 @@ def watch(engine: Engine, home: Path) -> None:
     """Look at Steam now: record each installed depot's build, note what's
     worth a look since last time, and refresh the Workshop findings."""
     libs = libraries(home)
+    seen_libs = {str(lib) for lib in libs}
     with Session(engine) as session:
         snapshots = {(r.appid, r.depot): r for r in session.query(SteamSnapshot)}
         pending = {r.key: r for r in session.query(SteamPending)}
@@ -276,17 +285,22 @@ def watch(engine: Engine, home: Path) -> None:
         workshop: dict[str, Finding] = {}
         for library in libs:
             apps = _apps(library)
-            for appid, (game, depots) in apps.items():
+            for appid, (name, depots) in apps.items():
                 installed.add(appid)
+                game = name or f"app {appid}"
                 known = [r for (a, _d), r in snapshots.items() if a == appid]
-                if known and known[0].game and known[0].game != game:
+                for row in known:
+                    row.library = str(library)
+                if name and known and known[0].game and known[0].game != name:
                     key = f"rename-{appid}-{hashlib.sha1(game.encode('utf-8', 'replace')).hexdigest()[:12]}"
                     if key not in pending:
                         pending[key] = SteamPending(key=key, kind="rename", appid=appid, game=game,
+                                                    library=str(library),
                                                     detail=f"Renamed: it was called {known[0].game}.")
                         session.add(pending[key])
-                for row in known:
-                    row.game = game
+                if name:   # no name in the appmanifest: keep the one we had, so it's no "rename"
+                    for row in known:
+                        row.game = name
                 for depot, manifest in depots.items():
                     row = snapshots.get((appid, depot))
                     if row is not None and row.manifest == manifest:
@@ -302,8 +316,8 @@ def watch(engine: Engine, home: Path) -> None:
                         log.debug("can't read Steam manifest %s: %s", path, e)
                         continue
                     if row is None:   # first sight: record it, nothing to compare with yet
-                        row = SteamSnapshot(appid=appid, depot=depot, manifest=manifest, game=game,
-                                            files=files, code=json.dumps(code))
+                        row = SteamSnapshot(appid=appid, depot=depot, manifest=manifest, game=name,
+                                            library=str(library), files=files, code=json.dumps(code))
                         session.add(row)
                         snapshots[(appid, depot)] = row
                         continue
@@ -315,29 +329,38 @@ def watch(engine: Engine, home: Path) -> None:
                     key = f"update-{appid}-{depot}-{manifest}"
                     if reasons and key not in pending:
                         pending[key] = SteamPending(key=key, kind="update", appid=appid, game=game,
+                                                    library=str(library),
                                                     detail="\n".join([f"Depot {depot}, build {manifest}:",
                                                                       *reasons]))
                         session.add(pending[key])
-                    row.manifest, row.files, row.code, row.game = manifest, files, json.dumps(code), game
+                    row.manifest, row.files, row.code = manifest, files, json.dumps(code)
+                    row.game = name or row.game
                     row.seen_at = utcnow()
             for f in _workshop(library, apps):
+                f.library = str(library)
                 workshop[f.key] = f
-        # Workshop findings are what's there now; the others stay until acknowledged,
-        # or until the game is no longer installed.
+
+        def gone(library: str | None, appid: str) -> bool:
+            """No longer installed, as far as can be seen: its library is here
+            and lists no such game. A library that isn't (a drive not mounted)
+            says nothing, so what was found there is kept."""
+            return library in seen_libs and appid not in installed
+
+        # Workshop findings are what's there now (in the libraries that are
+        # here); the others stay until acknowledged, or the game is gone.
         for key, row in list(pending.items()):
-            if (row.kind == "workshop" and key not in workshop) or \
-                    (row.kind != "workshop" and libs and row.appid not in installed):
+            if (row.kind == "workshop" and row.library in seen_libs and key not in workshop) or \
+                    (row.kind != "workshop" and gone(row.library, row.appid)):
                 session.delete(row)
                 del pending[key]
         for key, f in workshop.items():
             if key not in pending:
                 pending[key] = SteamPending(key=key, kind="workshop", appid=f.appid, game=f.game,
-                                            detail="\n".join(f.detail))
+                                            library=f.library, detail="\n".join(f.detail))
                 session.add(pending[key])
-        if libs:
-            for (appid, _depot), row in list(snapshots.items()):
-                if appid not in installed:
-                    session.delete(row)
+        for row in list(snapshots.values()):
+            if gone(row.library, row.appid):
+                session.delete(row)
         session.commit()
 
 
@@ -349,8 +372,11 @@ def open_findings(engine: Engine, decisions: Engine | None = None) -> list[Findi
     with Session(engine) as session:
         rows = session.query(SteamPending).order_by(SteamPending.kind, SteamPending.game,
                                                     SteamPending.key).all()
+        # Only IDs in the form Ensign writes: the list goes into a command you
+        # may paste with sudo, and this table is in a database you (and so,
+        # anything running as you) can write.
         return [Finding(r.key, r.kind, r.appid, r.game or f"app {r.appid}", (r.detail or "").split("\n"))
-                for r in rows if r.key not in acked]
+                for r in rows if r.key not in acked and valid_key(r.key)]
 
 
 def acknowledge(decisions: Engine, keys: list[str]) -> int:
@@ -393,7 +419,7 @@ def report(findings: list[Finding]) -> None:
             print_unwrapped(f"\n  {shown(f.game)} (app {f.appid})")
             for line in f.detail:
                 print_unwrapped(f"      {shown(line)}")
-            print(f"      ID: {f.key}")
+            print(f"      ID: {shown(f.key)}")
     keys = " ".join(f.key for f in findings)
     if _PROTECTED:
         rprint("\n  Looked at them? Your decisions are protected, so acknowledging needs sudo:")

