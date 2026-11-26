@@ -252,4 +252,60 @@ with tempfile.TemporaryDirectory() as d:
     assert time_limits == [0], f"ClamAV's two-minute per-file limit is switched off: {time_limits}"
     print("large-file rescan test passed ✓")
 
+# --- a file in a Steam game folder: the report names the game, and Steam's answer ------------
+def _steam_manifest(depot: int, files: dict[str, bytes]) -> bytes:
+    import struct  # noqa: E402
+    import zipfile  # noqa: E402
+
+    def varint(n):
+        out = b""
+        while True:
+            b, n = n & 0x7F, n >> 7
+            out += bytes([b | (0x80 if n else 0)])
+            if not n:
+                return out
+
+    def field(number, value):
+        return (varint(number << 3) + varint(value) if isinstance(value, int)
+                else varint(number << 3 | 2) + varint(len(value)) + value)
+
+    payload = b"".join(field(1, field(1, rel.replace("/", "\\").encode()) + field(3, 0)
+                             + field(4, hashlib.sha1(rel.replace("/", "\\").lower().encode()).digest())
+                             + field(5, hashlib.sha1(data).digest()))
+                       for rel, data in files.items())
+    meta = field(1, depot)
+    raw = (struct.pack("<II", 0x71F617D0, len(payload)) + payload + struct.pack("<II", 0x1F4812BE, len(meta))
+           + meta + struct.pack("<I", 0x32C415AB))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("z", raw)
+    return buf.getvalue()
+
+
+with tempfile.TemporaryDirectory() as d:
+    library = Path(d, "games")
+    game = library / "steamapps" / "common" / "Example Game"
+    (game / "bin").mkdir(parents=True)
+    (library / "depotcache").mkdir()
+    content = b"MZ example game plugin, EVIL-looking bytes"
+    (game / "bin" / "plugin.dll").write_bytes(content)
+    (library / "steamapps" / "appmanifest_100.acf").write_text(
+        '"AppState" { "appid" "100" "name" "Example Game" "installdir" "Example Game" '
+        '"InstalledDepots" { "101" { "manifest" "7" } } }')
+    (library / "depotcache" / "101_7.manifest").write_bytes(_steam_manifest(101, {"bin/plugin.dll": content}))
+    Path(d, "data").mkdir()
+    config = Config(db_url=f"sqlite:///{d}/data/system.db", log_file=Path(d, "data", "e.txt"), max_workers=2)
+    s = Scanner(config, clamd=FakeClamd())
+    quiet(s.scan_tree, library)
+    out, text = quiet(fpreport.make_report, s, config, str(game / "bin" / "plugin.dll"))
+    report = out.read_text()
+    assert "Steam:            installed by Steam for Example Game, exactly as Steam's record" in report, report
+    assert str(library) not in report and "plugin.dll" not in report, "the game, but no path or file name"
+    assert "email address" in text and "isn't tied to your Steam account" in text, text
+    # Content Steam's record doesn't have: said so, honestly.
+    (library / "depotcache" / "101_7.manifest").write_bytes(_steam_manifest(101, {"bin/plugin.dll": b"other"}))
+    out, _ = quiet(fpreport.make_report, s, config, str(game / "bin" / "plugin.dll"))
+    assert "with other contents than Steam's record" in out.read_text()
+    print("Steam line test passed ✓")
+
 print("\nAll ClamAV report tests passed ✓")
