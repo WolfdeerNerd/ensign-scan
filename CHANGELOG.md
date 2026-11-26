@@ -6,7 +6,8 @@ Versions follow `major.minor.patch`: a new feature bumps the middle number, a fi
 
 ## Unreleased
 
-Nothing yet.
+### Added
+- A second opinion from Steam: a flagged file in a Steam game folder is looked up in Steam's own record of that game (the depot manifests in `depotcache`, which list every file of your installed build with its SHA-1). When the record has the file with exactly these bytes, the report labels it **Likely false positive**, as it does for an unchanged package file; when the record lists it with other contents, the report says so. Local and read-only: nothing is downloaded, and only the flagged file is hashed. It never changes a verdict.
 
 ## 0.11.0
 

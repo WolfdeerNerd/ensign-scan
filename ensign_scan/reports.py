@@ -543,13 +543,12 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
                 if found_by:
                     from .allowlist import engine_label
                     print(f"{_DETAIL}Found by: {shown(engine_label(found_by))}")
-                fact = facts.get(file_id)
-                _note("›", _file_facts(filepath, owner=fact is None), label="Context",
+                file_facts = facts.get(file_id, [])
+                has_package = any(f.source == evidence.SOURCE_PACKAGE for f in file_facts)
+                _note("›", _file_facts(filepath, owner=not has_package), label="Context",
                       indent=len(_DETAIL))
-                if fact is not None:
-                    label = ("Likely false positive" if evidence.likely_false_positive(fact)
-                             else "Package")
-                    _note("›", evidence.describe(fact), label=label, indent=len(_DETAIL))
+                for fact in file_facts:
+                    _note("›", evidence.describe(fact), label=evidence.label(fact), indent=len(_DETAIL))
                 # The hash of the content that was flagged: paste it into
                 # VirusTotal's search. A lookup sends only the hash, which
                 # can't be turned back into the file; uploading sends the file.

@@ -284,7 +284,8 @@ class Evidence(Base):
 
     One row per (file, source), replaced each time it's checked, tied to the
     content it was checked against: a fact about other content isn't shown.
-    Sources: "package" (pacman, dpkg or rpm owns the file; see pkgdb.origins)."""
+    Sources: "package" (pacman, dpkg or rpm owns the file; see pkgdb.origins)
+    and "steam" (Steam's record of a game's files; see steam.py)."""
     __tablename__ = "evidence"
     __table_args__ = (UniqueConstraint("file_id", "source"),)
 

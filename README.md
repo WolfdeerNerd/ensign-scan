@@ -505,7 +505,14 @@ ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match 
 - **Likely false positive** when a package installed the file and it's still exactly what the package put there. A package is not a guarantee: an AUR package is a script anyone can publish. So the file stays flagged until you decide;
 - **Package** when a package owns it but the file differs from what it installed (worth a closer look), or couldn't be compared.
 
-The answer is kept with the content it was checked against, so once the file changes it's no longer shown. It never changes a verdict, and it's left out of the report sent to ClamAV except for one line: when the package manager vouches for the file, `--clamav-report` names the package, which helps ClamAV find the file.
+**A second opinion from Steam.** For a flagged file in a Steam game folder (`steamapps/common/<game>/...`), Ensign also looks it up in Steam's own record of that game: the depot manifests in Steam's `depotcache` folder, which list every file of the build you have installed with its SHA-1 (what "Verify integrity of game files" checks against). Nothing is downloaded and nothing is sent; Ensign reads those files and hashes only the flagged file. Under the file, the report then says:
+
+- **Likely false positive** when Steam's record has the file with exactly these bytes. It's only as trustworthy as the game's developer, and the record is in your home folder, where anything running as you could change it along with the file. So the file stays flagged until you decide;
+- **Steam** when Steam's record lists the file with other contents. Some games rewrite their own files, so on its own this isn't a warning: the game may have changed it, or something else did.
+
+A file the record doesn't list gets no line. Files elsewhere (a Wine prefix outside Steam, say) aren't covered.
+
+The answer is kept with the content it was checked against, so once the file changes it's no longer shown. It never changes a verdict, and it's left out of the report sent to ClamAV except for one line: when the package manager vouches for the file, `--clamav-report` names the package, which helps ClamAV find the file. (Steam's answer isn't in that report.)
 
 Allowances live in Ensign's own database. Ensign doesn't touch ClamAV or its signatures, so nothing else that uses clamd is affected. (ClamAV's own allow lists, `.sfp` and `.ign2` files in its database folder, work for every program using clamd. See ClamAV's documentation if that's what you want.)
 
