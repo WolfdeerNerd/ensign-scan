@@ -114,9 +114,9 @@ from ensign_scan.explanations import known_family  # noqa: E402
 for name, family in {"Win.Infostealer.Vidar-123-0": "Vidar", "Win.Trojan.LummaStealer-1": "LummaStealer",
                      "Win.Malware.Stealc-10012345-0": "Stealc", "Win.Trojan.DarkKomet-1234-1": "DarkKomet",
                      "PUA.Win.Trojan.Remcos-9-0": "Remcos",
-                     # your hits, which name no known family:
-                     "Win.Packed.Mikey-9859688-0": None, "Win.Packer.MalwareCrypter-6620810-1": None,
-                     "Win.Exploit.CVE_2015_2503-1": None, "Js.Downloader.Jsdownloader-6260766-0": None,
+                     # names that are no known family: packers, exploits, generic downloaders
+                     "Win.Packed.Generic-100-0": None, "Win.Packer.Crypter-200-1": None,
+                     "Win.Exploit.CVE_2017_0199-1": None, "Js.Downloader.Agent-300-0": None,
                      "Win.Trojan.Generic-1": None, "Heuristics.Encrypted.Zip": None, None: None, "": None}.items():
     assert known_family(name) == family, (name, known_family(name))
 print("manifest format test passed ✓")
