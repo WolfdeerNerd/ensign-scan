@@ -16,6 +16,7 @@ if sys.version_info < (3, 11):
 
 import argparse
 import dataclasses
+import logging
 import os
 import time
 from pathlib import Path
@@ -27,7 +28,7 @@ from rich import get_console, print
 from ensign_scan.config import AS_ROOT, HOME, HOSTNAME, Config, ensure_default_config, legacy_notice
 from ensign_scan import (
     allowlist, bigrules, commands, diagnostics, evidence, explanations, findings, fpreport, logo, logsetup, migrate, notify,
-    persistence, pkgdb, protect, secrets,
+    persistence, pkgdb, protect, secrets, steamwatch,
 )
 from ensign_scan.fsutil import print_unwrapped, shown
 from ensign_scan.runlock import AlreadyRunning, RunLock
@@ -51,6 +52,9 @@ EXIT_INFECTED = 3  # the run finished and infected files are present (outranks E
 # --persistence: startup entries are new, changed or gone since you last
 # acknowledged them. Entries it couldn't read (no root) don't count.
 EXIT_PERSISTENCE_PENDING = 4
+# The Steam watch lists something you haven't acknowledged (steamwatch.py):
+# after a scan with nothing infected and nothing unsaved, or from `steam`.
+EXIT_STEAM_PENDING = 5
 
 
 def ensign_version() -> str:
@@ -147,9 +151,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g_decide.add_argument("--acknowledge-all", action="store_true",
                         help="Show the persistence check, then accept everything it lists. Asks "
                              "to confirm.")
+    g_decide.add_argument("--steam", action="store_true",
+                        help="List what the Steam watch found (Workshop items carrying programs or "
+                             "scripts, game updates worth a look, renamed games), then exit. Reads "
+                             "Steam's files only; changes nothing.")
+    g_decide.add_argument("--acknowledge-steam", metavar="ID", action="append", default=[],
+                        help="Mark one Steam watch finding as looked at, by the ID it's listed with, "
+                             "then exit. Asks to confirm. Can be given more than once.")
+    g_decide.add_argument("--acknowledge-steam-all", action="store_true",
+                        help="Show the Steam watch, then mark everything it lists as looked at. "
+                             "Asks to confirm.")
     g_decide.add_argument("--yes", action="store_true",
-                        help="Don't ask to confirm --allow, --allow-folder, --acknowledge or "
-                             "--acknowledge-all (for scripts)")
+                        help="Don't ask to confirm --allow, --allow-folder, --acknowledge, "
+                             "--acknowledge-all or --acknowledge-steam (for scripts)")
     g_setup.add_argument("--protect", action="store_true",
                         help="With sudo: keep your config and your decisions (allowances, "
                              "acknowledged startup entries) where only root can change them, so "
@@ -185,10 +199,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.protect and args.unprotect:
         parser.error("--protect and --unprotect can't be used together")
     if args.protected and not (args.allow or args.unallow or args.allow_folder or args.unallow_folder
-                               or args.persistence or args.acknowledge or args.acknowledge_all):
+                               or args.persistence or args.acknowledge or args.acknowledge_all
+                               or args.acknowledge_steam):
         parser.error("--protected goes with --allow, --unallow, --allow-folder, --unallow-folder, "
-                     "--persistence, --acknowledge or --acknowledge-all. To see what's allowed, "
-                     "run ensign-scan list allowed as yourself.")
+                     "--persistence, --acknowledge, --acknowledge-all or --acknowledge-steam. To see "
+                     "what's allowed, run ensign-scan list allowed as yourself.")
     return args
 
 
@@ -296,6 +311,7 @@ def _main() -> int:
                 return 1
             allowlist.show_protected_commands()
             persistence.show_protected_commands()
+            steamwatch.show_protected_commands()
     # Before the starter config: it must never be written next to an old
     # config that's about to move into the new place.
     moved, not_moved = migrate.move_legacy_folders(args.config)
@@ -338,9 +354,9 @@ def _protected_refusal(args) -> str | None:
                 "--config and $ENSIGN_CONFIG aren't used. If you didn't set ENSIGN_CONFIG "
                 "yourself, find out what did (your shell's startup files, for a start).")
     if (args.allow or args.unallow or args.allow_folder or args.unallow_folder
-            or args.acknowledge or args.acknowledge_all):
-        return ("You are protected, so your allowances and acknowledged startup entries are "
-                "root's, and your user can't change them. Change them with sudo and --protected, "
+            or args.acknowledge or args.acknowledge_all or args.acknowledge_steam or args.acknowledge_steam_all):
+        return ("You are protected, so your allowances and acknowledgments (startup entries, the "
+                "Steam watch) are root's, and your user can't change them. Change them with sudo and --protected, "
                 "for example: sudo ensign-scan --protected allow PATH. Nothing was changed.")
     return None
 
@@ -434,6 +450,7 @@ def _after_config(args, config: Config) -> int:
     # writes and must take the lock like any other.
     writes = (args.purge_missing or args.rescan_errors or args.allow or args.unallow
               or args.allow_folder or args.unallow_folder or args.acknowledge or args.acknowledge_all
+              or args.acknowledge_steam or args.acknowledge_steam_all or args.steam
               or args.update_rules)
     readonly = (args.verify_packages or args.suggest_fixes or args.list_allowed or args.list_allowed_all
                 or args.list_infected
@@ -559,6 +576,78 @@ def run_persistence(args: argparse.Namespace, engine, log_path: Path) -> int:
     return EXIT_PERSISTENCE_PENDING if audit.pending else 0
 
 
+def run_steam(args: argparse.Namespace, engine, decisions) -> int:
+    """--steam, --acknowledge-steam, --acknowledge-steam-all (steamwatch.py).
+    The watch is yours: it reads your Steam folders and keeps its records in
+    your database. With sudo, only --protected --acknowledge-steam ID, which
+    writes the IDs to your protected decisions and reads nothing of yours."""
+    confirm = _confirm(args.yes)
+    if AS_ROOT:
+        if args.protected and args.acknowledge_steam:
+            bad = [k for k in args.acknowledge_steam if not steamwatch.valid_key(k)]
+            if bad:
+                print(f"[red]✗ Not an ID the Steam watch lists:[/red] {shown(bad[0])}. Nothing acknowledged.")
+                return 2
+            if not confirm(f"Acknowledge {len(args.acknowledge_steam)} Steam watch "
+                           f"finding{'s' if len(args.acknowledge_steam) != 1 else ''}? [y/N] "):
+                print("Nothing acknowledged.")
+                return 0
+            count = steamwatch.acknowledge(decisions, args.acknowledge_steam)
+            print(f"[green]✓ Acknowledged {count}[/green] (in your protected decisions).")
+            return 0
+        print("The Steam watch is yours: run it without sudo (ensign-scan steam). In protected mode, "
+              "acknowledge with: sudo ensign-scan --protected acknowledge-steam ID ... "
+              "(ensign-scan steam prints the command).")
+        return 2
+    steamwatch.watch(engine, HOME)
+    findings = steamwatch.open_findings(engine)
+    if args.acknowledge_steam and not args.acknowledge_steam_all:
+        listed = {f.key for f in findings}
+        unknown = [k for k in args.acknowledge_steam if k not in listed]
+        if unknown:
+            print(f"[red]✗ Not listed now:[/red] {shown(unknown[0])}. Copy the ID from "
+                  f"ensign-scan steam. Nothing acknowledged.")
+            return 2
+        if not confirm(f"Acknowledge {len(args.acknowledge_steam)} Steam watch "
+                       f"finding{'s' if len(args.acknowledge_steam) != 1 else ''}? [y/N] "):
+            print("Nothing acknowledged.")
+            return EXIT_STEAM_PENDING
+        steamwatch.acknowledge(decisions, args.acknowledge_steam)
+        left = len(findings) - len(set(args.acknowledge_steam))
+        print(f"[green]✓ Acknowledged {len(set(args.acknowledge_steam))}.[/green]"
+              + (f" {left} still listed." if left else ""))
+        return EXIT_STEAM_PENDING if left else 0
+    if not findings:
+        print("The Steam watch has nothing to show: no Workshop items carrying code, and no updates "
+              "or renames worth a look since it started watching.")
+        return 0
+    steamwatch.report(findings)
+    if args.acknowledge_steam_all:
+        print()
+        if not confirm(f"Acknowledge all {len(findings)} listed above? [y/N] "):
+            print("Nothing acknowledged.")
+            return EXIT_STEAM_PENDING
+        count = steamwatch.acknowledge(decisions, [f.key for f in findings])
+        print(f"[green]✓ Acknowledged {count}.[/green]")
+        return 0
+    return EXIT_STEAM_PENDING
+
+
+def _steam_section(engine, config: Config) -> bool:
+    """The Steam watch at the end of a scan. True if something is listed.
+    A failure is logged, never fails the run."""
+    if not config.steam_watch or AS_ROOT:
+        return False
+    try:
+        steamwatch.watch(engine, HOME)
+        findings = steamwatch.open_findings(engine)
+    except Exception:  # a watch failing must not fail the scan
+        logging.getLogger(__name__).exception("the Steam watch failed")
+        return False
+    steamwatch.report(findings)
+    return bool(findings)
+
+
 def run(args: argparse.Namespace, config: Config) -> int:
     greet(config)
 
@@ -587,6 +676,8 @@ def run(args: argparse.Namespace, config: Config) -> int:
         return 0
     if args.persistence or args.acknowledge or args.acknowledge_all:
         return run_persistence(args, decisions, log_path)
+    if args.steam or args.acknowledge_steam or args.acknowledge_steam_all:
+        return run_steam(args, scanner.engine, decisions)
     if args.clamav_report:
         if not scanner.clamd.ping():
             print("[red]✗ clamd is not answering on its socket.[/red] The file is scanned again "
@@ -717,6 +808,7 @@ def run(args: argparse.Namespace, config: Config) -> int:
     format_mismatch_report(scanner.engine, paths=args.targets or None)
     allowlist.new_in_allowed_folders(scanner.engine, paths=args.targets or None)
     allowlist.allowed_report(scanner.engine, paths=args.targets or None)
+    steam_pending = _steam_section(scanner.engine, config)
     # Results the database refused are reported (and alerted on) from memory,
     # so a failed save can never turn a detection into "nothing found".
     infected += unsaved_report(scanner.unsaved)
@@ -742,7 +834,9 @@ def run(args: argparse.Namespace, config: Config) -> int:
     # since been deleted is still listed above, but no longer counts here.
     if any(os.path.lexists(os.fsencode(item["filepath"])) for item in infected):
         return EXIT_INFECTED
-    return EXIT_UNSAVED if scanner.unsaved else 0
+    if scanner.unsaved:
+        return EXIT_UNSAVED
+    return EXIT_STEAM_PENDING if steam_pending else 0
 
 
 if __name__ == "__main__":

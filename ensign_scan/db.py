@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
 from .models import Base
-from .protect import DECISION_TABLES
+from .protect import DECISION_TABLES, LATER_TABLES
 
 
 def make_engine(db_url: str, decisions: Path | None = None) -> Engine:
@@ -42,8 +42,16 @@ def make_engine(db_url: str, decisions: Path | None = None) -> Engine:
         cursor.execute("PRAGMA synchronous=NORMAL")
         if decisions is not None:
             cursor.execute("ATTACH DATABASE ? AS decisions", (str(decisions),))
+            present = {row[0] for row in cursor.execute(
+                "SELECT name FROM decisions.sqlite_master WHERE type = 'table'")}
             for table in DECISION_TABLES:
-                cursor.execute(f"CREATE TEMP VIEW {table} AS SELECT * FROM decisions.{table}")
+                if table in present:
+                    cursor.execute(f"CREATE TEMP VIEW {table} AS SELECT * FROM decisions.{table}")
+                else:
+                    # A table added after root's file was made (protect.LATER_TABLES):
+                    # read as empty, and like the others, it can't be written.
+                    columns = ", ".join(f"NULL AS {c.name}" for c in Base.metadata.tables[table].columns)
+                    cursor.execute(f"CREATE TEMP VIEW {table} AS SELECT {columns} WHERE 0")
         cursor.close()
 
     Base.metadata.create_all(engine)
@@ -196,6 +204,10 @@ def upgrade_decision_tables(conn) -> bool:
             conn.exec_driver_sql(
                 f"INSERT INTO main.{table} ({copied}, engine) SELECT {copied}, 'clamav' FROM main.{old}")
             conn.exec_driver_sql(f"DROP TABLE main.{old}")
+            changed = True
+    for table in LATER_TABLES:   # decision tables added after protected mode shipped
+        if not conn.exec_driver_sql(f"PRAGMA main.table_info({table})").fetchall():
+            Base.metadata.tables[table].create(conn)
             changed = True
     return changed
 

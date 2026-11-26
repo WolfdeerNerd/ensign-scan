@@ -71,6 +71,11 @@ COMMANDS: tuple[Command, ...] = (
     Command("acknowledge", "PATH ... | --all",
             "Accept startup entries the persistence check lists (asks first)", "Decisions",
             "--acknowledge", takes="each", also=("--yes", "--protected")),
+    Command("steam", "", "List Workshop items carrying code and game updates worth a look "
+            "(changes nothing)", "Decisions", "--steam"),
+    Command("acknowledge-steam", "ID ... | --all",
+            "Mark what the Steam watch lists as looked at (asks first)", "Decisions",
+            "--acknowledge-steam", takes="each", also=("--yes", "--protected")),
     Command("verify-packages", "", "Check installed files against the package manager's records "
             "(can be slow)",
             "Checks", "--verify-packages"),
@@ -154,6 +159,8 @@ def _original_form(name: str) -> str:
         return f"{PROG} --list-infected   or   {PROG} --list-allowed"
     if name == "acknowledge":
         return f"{PROG} --acknowledge PATH   or   {PROG} --acknowledge-all"
+    if name == "acknowledge-steam":
+        return f"{PROG} --acknowledge-steam ID   or   {PROG} --acknowledge-steam-all"
     command = BY_NAME[name]
     tail = " PATH" if command.takes == "each" else " FOLDER" if command.takes == "one" else ""
     return f"{PROG} {command.flag}{tail}" + (" --signature NAME" if command.takes == "one" else "")
@@ -171,7 +178,8 @@ def _ambiguous(word: str) -> UsageError:
 def _help_for(command: Command) -> str:
     lines = [usage(command), "", command.summary + "."]
     if command.flag:
-        same = f"{PROG} {command.flag}" + (" PATH" if command.takes == "each" else
+        word = " ID" if command.name == "acknowledge-steam" else " PATH"
+        same = f"{PROG} {command.flag}" + (word if command.takes == "each" else
                                            " VALUE" if command.takes == "one" else "")
         lines.append(f"The same as: {same}")
     if command.name == "scan":
@@ -182,6 +190,8 @@ def _help_for(command: Command) -> str:
                      f"--list-allowed-all")
     if command.name == "acknowledge":
         lines.append(f"acknowledge --all is the same as: {PROG} --acknowledge-all")
+    if command.name == "acknowledge-steam":
+        lines.append(f"acknowledge-steam --all is the same as: {PROG} --acknowledge-steam-all")
     if command.also:
         lines.append(f"Goes with: {', '.join(command.also)} (see {PROG} --help)")
     return "\n".join(lines)
@@ -192,13 +202,15 @@ def _help_for(command: Command) -> str:
 # `ensign-scan --list-infected allow` lists what's infected under a folder
 # called allow, as it always did.
 JOB_OPTIONS = frozenset({c.flag for c in COMMANDS if c.flag} | {
-    "--list-infected", "--list-allowed", "--list-allowed-all", "--acknowledge-all", "--verify-pacman"})
+    "--list-infected", "--list-allowed", "--list-allowed-all", "--acknowledge-all",
+    "--acknowledge-steam-all", "--verify-pacman"})
 
 
 # The command each original option is shown as, in the hints Ensign prints.
 _SHOWN_AS = {c.flag: c.name for c in COMMANDS if c.flag} | {
     "--list-infected": "list infected", "--list-allowed": "list allowed",
-    "--list-allowed-all": "list allowed --all", "--acknowledge-all": "acknowledge --all"}
+    "--list-allowed-all": "list allowed --all", "--acknowledge-all": "acknowledge --all",
+    "--acknowledge-steam-all": "acknowledge-steam --all"}
 
 
 def shown_as(option: str) -> str:
@@ -290,9 +302,9 @@ def translate(argv: list[str], takes_value: set[str], out=print) -> list[str]:
     options, words = _split(rest, takes_value)
     all_flag = "--all" in options
     options = [o for o in options if o != "--all"]
-    if all_flag and command.name not in ("list", "acknowledge"):
-        raise UsageError(f"--all goes with {PROG} list allowed or {PROG} acknowledge.\n"
-                         + usage(command))
+    if all_flag and command.name not in ("list", "acknowledge", "acknowledge-steam"):
+        raise UsageError(f"--all goes with {PROG} list allowed, {PROG} acknowledge or "
+                         f"{PROG} acknowledge-steam.\n" + usage(command))
 
     if command.name == "list":
         kind, paths = (words[0], words[1:]) if words else (None, [])
@@ -307,12 +319,18 @@ def translate(argv: list[str], takes_value: set[str], out=print) -> list[str]:
         if words:
             raise UsageError(f"acknowledge takes PATHs or --all, not both.\n{usage(command)}")
         return before + ["--acknowledge-all", *options]
+    if command.name == "acknowledge-steam" and all_flag:
+        if words:
+            raise UsageError(f"acknowledge-steam takes IDs or --all, not both.\n{usage(command)}")
+        return before + ["--acknowledge-steam-all", *options]
     if command.needs and not words:
         raise UsageError(f"{command.name} needs "
                          f"{'a FOLDER' if command.takes == 'one' else 'at least one PATH'}.\n"
                          + usage(command))
     if command.name == "acknowledge" and not words:
         raise UsageError(f"acknowledge needs at least one PATH, or --all.\n{usage(command)}")
+    if command.name == "acknowledge-steam" and not words:
+        raise UsageError(f"acknowledge-steam needs at least one ID, or --all.\n{usage(command)}")
     if command.takes == "one" and len(words) > 1:
         raise UsageError(f"{command.name} takes one FOLDER.\n{usage(command)}")
     if not command.takes and words:

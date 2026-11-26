@@ -287,13 +287,14 @@ print("old decisions file test passed ✓")
 # ----------------------------------------------------------------------
 def ns(**kw):
     base = dict(config=None, allow=[], unallow=[], allow_folder=None, unallow_folder=None,
-                acknowledge=[], acknowledge_all=False)
+                acknowledge=[], acknowledge_all=False, acknowledge_steam=[], acknowledge_steam_all=False)
     return argparse.Namespace(**{**base, **kw})
 
 
 saved = os.environ.pop("ENSIGN_CONFIG", None)
 assert cli._protected_refusal(ns()) is None, "a plain run goes ahead"
 for kw in ({"config": "/tmp/x.toml"}, {"allow": ["/x"]}, {"unallow": ["/x"]}, {"allow_folder": "/x"},
+           {"acknowledge_steam": ["update-1-2-3"]}, {"acknowledge_steam_all": True},
            {"unallow_folder": "/x"}, {"acknowledge": ["/x"]}, {"acknowledge_all": True}):
     assert cli._protected_refusal(ns(**kw)), f"refused: {kw}"
 os.environ["ENSIGN_CONFIG"] = "/tmp/x.toml"

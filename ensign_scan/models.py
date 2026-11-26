@@ -349,3 +349,56 @@ class PersistenceEntry(Base):
 
     def __repr__(self) -> str:
         return f"<PersistenceEntry {self.path!r} {self.kind}>"
+
+
+class SteamSnapshot(Base):
+    """What one installed Steam depot (a part of a game) looked like the
+    last time Ensign saw it, so the next update can be compared with it
+    (steamwatch.py). State, not a decision: kept in your own database.
+
+    `files` is one 8-byte token per file of the build (from its name and
+    content hashes), sorted, so "how many files did this update add or
+    change" needs no names. `code` keeps the names and SHA-1s of the
+    programs and scripts only, as JSON, so what an update added or changed
+    among those can be named. Encrypted manifests have no names: code is
+    then empty, and only the size of an update is compared."""
+    __tablename__ = "steam_snapshots"
+    __table_args__ = (UniqueConstraint("appid", "depot"),)
+
+    id = Column(Integer, primary_key=True)
+    appid = Column(String, nullable=False, index=True)
+    depot = Column(String, nullable=False)
+    manifest = Column(String, nullable=False)
+    game = Column(SafeText)                    # the game's name then, to notice a rename
+    files = Column(LargeBinary, nullable=False)
+    code = Column(Text, nullable=False, default="{}")
+    seen_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class SteamPending(Base):
+    """Something the Steam watch found that needs a look: a Workshop item
+    carrying code, an update worth a look, or a renamed game. Listed until
+    its key is acknowledged (SteamAcknowledged). State: your own database."""
+    __tablename__ = "steam_pending"
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String, unique=True, nullable=False)
+    kind = Column(String, nullable=False)      # "workshop", "update" or "rename"
+    appid = Column(String, nullable=False)
+    game = Column(SafeText)
+    detail = Column(SafeText, nullable=False)  # what it found, one reason per line
+    found_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class SteamAcknowledged(Base):
+    """A Steam watch finding you've looked at (acknowledge-steam). A
+    decision, like an allowance: in protected mode it lives in root's copy
+    (protect.DECISION_TABLES), and only sudo can add one. The key says
+    exactly what was acknowledged -- a build's manifest, a Workshop item's
+    current code files, a game's new name -- so anything that changes after
+    gets a new key and is listed again."""
+    __tablename__ = "steam_acknowledged"
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String, unique=True, nullable=False)
+    acknowledged_at = Column(DateTime, default=utcnow, nullable=False)
