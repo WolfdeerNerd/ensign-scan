@@ -356,6 +356,25 @@ with tempfile.TemporaryDirectory() as d:
 from ensign_scan.explanations import known_family  # noqa: E402
 
 assert known_family("Win.Trojan.Vidar-1\nInjected") is None and known_family("\n") is None
+# A Workshop finding stored by the first version of the watch (an older ID and
+# layout, and no library) is replaced by the current one, not listed beside it.
+with tempfile.TemporaryDirectory() as d:
+    home = Path(d, "home")
+    item = home / ".local/share/Steam/steamapps/workshop/content/100/2000"
+    item.mkdir(parents=True)
+    (item / "a.exe").write_bytes(b"x")
+    engine = make_engine(f"sqlite:///{d}/system.db")
+    with Session(engine) as session:
+        session.add(SteamPending(key="workshop-100-2000-aaaaaaaaaaaa", kind="workshop", appid="100",
+                                 game="Example Game", detail="Workshop item 2000: Programs: a.exe."))
+        session.commit()
+    scanned(engine, item)
+    steamwatch.watch(engine, home)
+    found = steamwatch.open_findings(engine)
+    assert len(found) == 1 and found[0].key != "workshop-100-2000-aaaaaaaaaaaa", [f.key for f in found]
+    assert found[0].detail[0] == "Workshop item 2000", found[0].detail
+    engine.dispose()
+
 print("hostile input test passed ✓")
 
 

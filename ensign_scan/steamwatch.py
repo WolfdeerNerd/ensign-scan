@@ -394,7 +394,11 @@ def watch(engine: Engine, home: Path) -> dict[str, int]:
         # Workshop findings are what's there now (in the libraries that are
         # here); the others stay until acknowledged, or the game is gone.
         for key, row in list(pending.items()):
-            if (row.kind == "workshop" and row.library in seen_libs and key not in workshop) or \
+            # A Workshop row with no library is from the first version of the watch
+            # (old ID, old layout): Workshop findings are worked out again every run,
+            # so it goes unless it's still current.
+            if (row.kind == "workshop" and (row.library is None or row.library in seen_libs)
+                    and key not in workshop) or \
                     (row.kind != "workshop" and gone(row.library, row.appid)):
                 session.delete(row)
                 del pending[key]
