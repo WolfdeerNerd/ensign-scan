@@ -548,7 +548,8 @@ def list_infected(engine: Engine, paths: list[str] | None = None,
                 _note("›", _file_facts(filepath, owner=not has_package), label="Context",
                       indent=len(_DETAIL))
                 for fact in file_facts:
-                    _note("›", evidence.describe(fact), label=evidence.label(fact), indent=len(_DETAIL))
+                    _note("›", evidence.describe(fact, threat), label=evidence.label(fact, threat),
+                          indent=len(_DETAIL))
                 # The hash of the content that was flagged: paste it into
                 # VirusTotal's search. A lookup sends only the hash, which
                 # can't be turned back into the file; uploading sends the file.

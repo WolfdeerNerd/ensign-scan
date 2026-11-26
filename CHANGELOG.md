@@ -7,7 +7,7 @@ Versions follow `major.minor.patch`: a new feature bumps the middle number, a fi
 ## Unreleased
 
 ### Added
-- A second opinion from Steam: a flagged file in a Steam game folder is looked up in Steam's own record of that game (the depot manifests in `depotcache`, which list every file of your installed build with its SHA-1). When the record has the file with exactly these bytes, the report labels it **Likely false positive**, as it does for an unchanged package file; when the record lists it with other contents, the report says so. Local and read-only: nothing is downloaded, and only the flagged file is hashed. It never changes a verdict.
+- A second opinion from Steam: a flagged file in a Steam game folder is looked up in Steam's own record of that game (the depot manifests in `depotcache`, which list every file of your installed build with its SHA-1). When the record has the file with exactly these bytes, the report says it **matches Steam's build**: where it came from, not that it's safe, since games have shipped malware inside their official Steam builds. When ClamAV also names a known malware family (Vidar, Lumma, StealC, DarkKomet...), that line is a **warning** instead. When the record lists the file with other contents, the report says so. Steam Workshop content gets its own caveat, and Proton prefixes and the shader cache get no line. Local and read-only: nothing is downloaded, and only the flagged file is hashed. It never changes a verdict.
 
 ## 0.11.0
 

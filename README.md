@@ -507,10 +507,12 @@ ClamAV includes heuristic signatures (like `SVGDynamicFunction`) that can match 
 
 **A second opinion from Steam.** For a flagged file in a Steam game folder (`steamapps/common/<game>/...`), Ensign also looks it up in Steam's own record of that game: the depot manifests in Steam's `depotcache` folder, which list every file of the build you have installed with its SHA-1 (what "Verify integrity of game files" checks against). Nothing is downloaded and nothing is sent; Ensign reads those files and hashes only the flagged file. Under the file, the report then says:
 
-- **Likely false positive** when Steam's record has the file with exactly these bytes. It's only as trustworthy as the game's developer, and the record is in your home folder, where anything running as you could change it along with the file. So the file stays flagged until you decide;
-- **Steam** when Steam's record lists the file with other contents. Some games rewrite their own files, so on its own this isn't a warning: the game may have changed it, or something else did.
+- **Matches Steam's build** when Steam's record has the file with exactly these bytes. That shows where the file came from, not that it's safe: games have shipped malware inside their official Steam builds (PirateFi, Chemia, BlockBlasters, Beyond The Dark), and those files matched Steam's record. The record is also in your home folder, where anything running as you could change it along with the file. So it's never called a likely false positive, and the file stays flagged until you decide;
+- **Warning** instead, when the file matches Steam's build but ClamAV names a known malware family (Vidar, Lumma, StealC, DarkKomet and others): real malware has shipped exactly this way. Investigation required;
+- **Steam** when Steam's record lists the file with other contents. Some games rewrite their own files, so on its own this isn't a warning: the game may have changed it, or something else did;
+- **Workshop** for Steam Workshop content (`steamapps/workshop/content/...`): uploaded by community members and not reviewed like a game's own build, and malicious items have been found before (Wallpaper Engine, Project Zomboid, People Playground). Items carrying programs, scripts or password-protected archives deserve the most suspicion.
 
-A file the record doesn't list gets no line. Files elsewhere (a Wine prefix outside Steam, say) aren't covered.
+A file the record doesn't list gets no line, and neither does anything in a Proton prefix (`compatdata`), the shader cache, or files a game's own launcher downloaded: those are where a malicious game's later stages land, and no record of Steam's covers them. Files outside Steam (a Wine prefix of your own, say) aren't covered either.
 
 The answer is kept with the content it was checked against, so once the file changes it's no longer shown. It never changes a verdict, and it's left out of the report sent to ClamAV except for one line: when the package manager vouches for the file, `--clamav-report` names the package, which helps ClamAV find the file. (Steam's answer isn't in that report.)
 
