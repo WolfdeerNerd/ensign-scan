@@ -370,6 +370,7 @@ class SteamSnapshot(Base):
     depot = Column(String, nullable=False)
     manifest = Column(String, nullable=False)
     game = Column(SafeText)                    # the game's name then, to notice a rename
+    library = Column(SafeText)                 # the Steam library it was in
     files = Column(LargeBinary, nullable=False)
     code = Column(Text, nullable=False, default="{}")
     seen_at = Column(DateTime, default=utcnow, nullable=False)
@@ -386,6 +387,7 @@ class SteamPending(Base):
     kind = Column(String, nullable=False)      # "workshop", "update" or "rename"
     appid = Column(String, nullable=False)
     game = Column(SafeText)
+    library = Column(SafeText)                 # the Steam library it was found in
     detail = Column(SafeText, nullable=False)  # what it found, one reason per line
     found_at = Column(DateTime, default=utcnow, nullable=False)
 

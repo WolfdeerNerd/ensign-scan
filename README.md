@@ -444,7 +444,7 @@ After that, a run lists only what changed. Accept an entry you recognize with `-
 
 ## Steam Watch
 
-Steam's record of a game says where a file came from, not whether it's safe (see False Positives): games have shipped malware inside their official Steam builds, often as a clean game first and a malicious update later (BlockBlasters), or an older game renamed and then updated (Beyond The Dark). Workshop items are uploaded by anyone, and malicious ones have been found (Wallpaper Engine, Project Zomboid, People Playground). So every scan also reads Steam's files and, when something needs a look, ends with a section listing it:
+Steam's record of a game says where a file came from, not whether it's safe (see False Positives): games have shipped malware inside their official Steam builds, often as a clean game first and a malicious update later (BlockBlasters), or an older game renamed and then updated (Beyond The Dark). Workshop items are uploaded by anyone, and malicious ones have been found (Wallpaper Engine, Project Zomboid, People Playground). So every scan of everything in your config (a scan of chosen paths skips it) also reads Steam's files and, when something needs a look, ends with a section listing it:
 
 | Listed | When |
 |---|---|

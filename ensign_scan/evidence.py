@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import timezone
 from pathlib import Path
 
 from sqlalchemy import Engine
@@ -104,7 +105,17 @@ def _refresh_steam(engine: Engine) -> int:
         if not rows:
             return 0
         records, kept = steam.Records(), 0
+        ids, before = [r[0] for r in rows], {}
+        for start in range(0, len(ids), 500):   # SQLite's variable limit, as in for_files
+            before.update({e.file_id: e for e in session.query(Evidence).filter(
+                Evidence.source == SOURCE_STEAM, Evidence.file_id.in_(ids[start:start + 500]))})
         for file_id, filepath, digest in rows:
+            last = before.get(file_id)
+            if last is not None and digest and last.content_hash == digest and last.checked_at is not None:
+                checked = last.checked_at if last.checked_at.tzinfo else last.checked_at.replace(tzinfo=timezone.utc)
+                if steam.unchanged_since(filepath, checked.timestamp()):
+                    kept += 1   # same content, same records: the answer stands, unhashed
+                    continue
             try:
                 answer = steam.check(records, filepath, digest) if digest else None
             except Exception:  # a second opinion failing must not fail the run
