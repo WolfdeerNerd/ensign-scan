@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from ensign_scan import steamwatch  # noqa: E402
 from ensign_scan.db import make_engine, upgrade_decision_tables  # noqa: E402
-from ensign_scan.models import Base, SteamAcknowledged, SteamPending, SteamSnapshot  # noqa: E402
+from ensign_scan.models import Base, FileRecord, SteamAcknowledged, SteamPending, SteamSnapshot  # noqa: E402
 
 
 def _varint(n: int) -> bytes:
@@ -95,6 +95,30 @@ def password_zip(path: Path) -> None:
     path.write_bytes(bytes(data))
 
 
+def scanned(engine, folder: Path) -> None:
+    """Record every file under folder the way a scan does: walking without
+    following links to folders, each file with its SHA-256."""
+    import os  # noqa: E402
+    with Session(engine) as session:
+        have = {p for (p,) in session.query(FileRecord.filepath)}
+        for dirpath, _dirs, names in os.walk(folder):
+            for n in names:
+                path = Path(dirpath, n)
+                if str(path) in have or not path.is_file():
+                    continue
+                session.add(FileRecord(filepath=str(path), filename=n,
+                                       file_hash=hashlib.sha256(path.read_bytes()).hexdigest()))
+        for row in session.query(FileRecord).filter(FileRecord.filepath.in_([str(p) for p in have])):
+            if Path(row.filepath).is_file():
+                row.file_hash = hashlib.sha256(Path(row.filepath).read_bytes()).hexdigest()
+        session.commit()
+
+
+def flat(lines) -> str:
+    """Lines as one string, whitespace folded: what they say, not their layout."""
+    return " ".join(" ".join(lines).split())
+
+
 def keys(engine, kind=None) -> list[str]:
     return sorted(f.key for f in steamwatch.open_findings(engine) if kind is None or f.kind == kind)
 
@@ -122,7 +146,7 @@ for name, (files, expected) in cases.items():
     if expected is None:
         assert reasons == [], (name, reasons)
     else:
-        assert len(reasons) == 1 and expected in reasons[0], (name, reasons)
+        assert len(reasons) == 1 and expected in flat(reasons[0]), (name, reasons)
 enc_files, enc_code, enc = steamwatch._snapshot(manifest(1, {**base, "run.bat": b"x"}, encrypted=True))
 assert enc and enc_code == {} and steamwatch.compare(old_files, old_code, enc_files, enc_code, enc) == [], \
     "no names, no guess"
@@ -151,22 +175,35 @@ with tempfile.TemporaryDirectory() as d:
             (workshop / item / rel).parent.mkdir(parents=True, exist_ok=True)
             (workshop / item / rel).write_bytes(data)
     (workshop / "504").mkdir()
+    (apps / "workshop" / "appworkshop_10.acf").write_text(
+        '"AppWorkshop" { "WorkshopItemsInstalled" { "501" { "timeupdated" "1764000000" } } }')
     password_zip(workshop / "504" / "pack.zip")
     elsewhere = Path(d, "elsewhere")
     elsewhere.mkdir()
     (elsewhere / "evil.exe").write_bytes(b"x")
-    (workshop / "506").symlink_to(elsewhere)   # a link: not walked
+    (workshop / "506").symlink_to(elsewhere)   # a link: the scan doesn't follow it, and neither does this
+    (workshop / "507").mkdir()
+    (workshop / "507" / "new.exe").write_bytes(b"x")   # added after the scan: not checked, but counted
 
     engine = make_engine(f"sqlite:///{d}/system.db")
     install()
-    steamwatch.watch(engine, home)
+    for item in ("501", "502", "503", "504", "505"):
+        scanned(engine, workshop / item)
+    uncovered = steamwatch.watch(engine, home)
+    assert uncovered == {str(steam_root.resolve()): 1}, uncovered
     with Session(engine) as session:
         assert session.query(SteamSnapshot).count() == 1, "first sight: recorded"
     assert keys(engine, "update") == [] and keys(engine, "rename") == [], "nothing to compare with yet"
     listed = keys(engine, "workshop")
     assert [k.split("-")[2] for k in listed] == ["501", "504", "505"], listed
-    details = {f.key.split("-")[2]: f.detail for f in steamwatch.open_findings(engine)}
-    assert "Programs: wallpaper.exe" in details["501"][0] and "Password-protected" in details["504"][0], details
+    details = {f.key.split("-")[2]: flat(f.detail) for f in steamwatch.open_findings(engine)}
+    assert "Programs: wallpaper.exe." in details["501"] and "Password-protected archives: pack.zip." in details["504"]
+    assert "filedetails/?id=501" in details["501"] and str(workshop / "501") in details["501"], details
+    assert "Workshop item 501 (updated 2025-11-24)" in details["501"] and "(updated" not in details["505"], details
+    # More names than are shown: the list ends with how many more.
+    lines = steamwatch._listed("Programs:", [f"{i}.exe" for i in range(8)])
+    assert lines[0] == "Programs:" and lines[1] == "    0.exe," and lines[5] == "    4.exe," \
+        and lines[-1] == "    and 3 more.", lines
 
     # A run with nothing new changes nothing.
     steamwatch.watch(engine, home)
@@ -177,7 +214,7 @@ with tempfile.TemporaryDirectory() as d:
     steamwatch.watch(engine, home)
     assert keys(engine, "update") == ["update-10-11-222"], keys(engine)
     found = [f for f in steamwatch.open_findings(engine) if f.kind == "update"][0]
-    assert "adds code: run.bat" in " ".join(found.detail) and found.game == "Rodent Race", found
+    assert "adds code: run.bat." in flat(found.detail) and found.game == "Rodent Race", found
     game_files["run.bat"] = b"x"
 
     # A big update that only changes programs: not listed (the noisy signal).
@@ -203,9 +240,21 @@ with tempfile.TemporaryDirectory() as d:
     assert steamwatch.acknowledge(engine, all_keys) == 0, "twice is once"
     steamwatch.watch(engine, home)
     assert keys(engine) == [], keys(engine)
+    # Touched but not changed (a re-download, a moved library): the same ID.
+    os_module = __import__("os")
+    os_module.utime(workshop / "501" / "wallpaper.exe", (1, 1))
+    scanned(engine, workshop / "501")
+    steamwatch.watch(engine, home)
+    assert keys(engine) == [], "same content, same ID"
+    # Changed content: a new ID, listed again.
     (workshop / "501" / "second.exe").write_bytes(b"y")
+    scanned(engine, workshop / "501")
     steamwatch.watch(engine, home)
     assert [k.split("-")[2] for k in keys(engine)] == ["501"], "a changed item is listed again"
+    # A record outlives its file (until purge-missing): only what's there now counts.
+    (workshop / "505" / "tools" / "run.ps1").unlink()
+    steamwatch.watch(engine, home)
+    assert "505" not in [k.split("-")[2] for k in keys(engine, "workshop")], keys(engine)
 
     # An encrypted manifest's update: compared by size only, so no guesses.
     install(name="Beyond The Dark", manifest_id="555", files={**game_files, "drop.bat": b"z"}, encrypted=True)
@@ -292,19 +341,16 @@ with tempfile.TemporaryDirectory() as d:
     steamwatch.watch(engine, home)
     assert keys(engine, "update") == [], "the library is back, and the game is gone"
 
-    # An item with more files than the cap: walking stops, across folders too.
+    # A big item: no cap, so code after any number of files counts.
     big = apps / "workshop" / "content" / "60" / "61"
-    for i in range(6):
-        (big / f"d{i}").mkdir(parents=True)
-        (big / f"d{i}" / "f.txt").write_text("x")
+    for i in range(300):
+        (big / f"d{i:03}").mkdir(parents=True)
+        (big / f"d{i:03}" / "f.txt").write_text("x")
     (big / "zz").mkdir()
     (big / "zz" / "late.exe").write_bytes(b"x")
-    saved, steamwatch._MAX_WALK = steamwatch._MAX_WALK, 3
-    try:
-        assert steamwatch._workshop_item(big) is None, "stopped before the last folder"
-    finally:
-        steamwatch._MAX_WALK = saved
-    assert steamwatch._workshop_item(big) is not None
+    scanned(engine, big)
+    steamwatch.watch(engine, home)
+    assert any(k.startswith("workshop-60-61-") for k in keys(engine)), keys(engine)
     engine.dispose()
 
 from ensign_scan.explanations import known_family  # noqa: E402

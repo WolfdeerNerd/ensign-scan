@@ -8,9 +8,12 @@ items are uploaded by anyone (Wallpaper Engine, Project Zomboid, People
 Playground). So, on every scan, this reads Steam's files and lists:
 
   workshop  a Workshop item (steamapps/workshop/content/<appid>/<item>) with
-            programs, scripts or password-protected zip archives in it: static
-            content (wallpapers, maps, music) shouldn't need any. Lua on its
-            own doesn't count (some games run Lua mods by design).
+            programs, scripts or password-protected zips in it (a scanner
+            can't look inside those): static content (wallpapers, maps,
+            music) shouldn't need any. Lua on its own doesn't count (some
+            games run Lua mods by design). What's in an item comes from the
+            scan's own records, so every file the scan saw counts; items the
+            scans don't reach are counted in a note under the list.
   update    a game's depot changed build since Ensign last saw it, and
               - a small update (5 files or fewer) adds a program or script,
               - a small update changes a program, or
@@ -27,7 +30,9 @@ after that gets a new ID and is listed again.
 
 What it never does: change, delete or move anything of Steam's, unsubscribe
 from or disable an item, start or stop a game, or talk to Steam's servers.
-It only reads Steam's files and lists folders; it hashes nothing.
+It reads Steam's text files and manifests, lists folders, and reads your
+scans' records. The only files it opens are .zip archives in Workshop
+items, to read the flag that says they're password-protected.
 
 What it can't do: the first time it sees a game, it just records it (there's
 nothing to compare with yet); a game malicious from its first build gives no
@@ -42,15 +47,17 @@ import json
 import logging
 import os
 import re
+import textwrap
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from . import steam
-from .models import SteamAcknowledged, SteamPending, SteamSnapshot, utcnow
+from .models import FileRecord, SteamAcknowledged, SteamPending, SteamSnapshot, path_under, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +66,6 @@ SCRIPTS = frozenset({".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".ws
 CODE = PROGRAMS | SCRIPTS
 SMALL = 5                       # files added or changed, at most, for a "small" update
 _MAX_NAMES = 5                  # file names shown per reason
-_MAX_WALK = 50_000              # files looked at per Workshop item, at most
 
 
 # What an ID looks like: kind, app id, then the parts that pin down what was
@@ -160,14 +166,23 @@ def _tokens(blob: bytes) -> set[bytes]:
     return {blob[i:i + 8] for i in range(0, len(blob), 8)}
 
 
-def _names(names: list[str]) -> str:
-    shown = ", ".join(names[:_MAX_NAMES])
-    return shown + (f" and {len(names) - _MAX_NAMES} more" if len(names) > _MAX_NAMES else "")
+def _listed(label: str, names: list[str]) -> list[str]:
+    """A label, then its names one per line under it, the last one ending
+    the list (or "and N more.")."""
+    shown_names = names[:_MAX_NAMES]
+    rest = len(names) - len(shown_names)
+    lines = [label]
+    for i, name in enumerate(shown_names):
+        last = i == len(shown_names) - 1
+        lines.append(f"    {name}{'.' if last and not rest else ','}")
+    if rest:
+        lines.append(f"    and {rest} more.")
+    return lines
 
 
 def compare(old_files: bytes, old_code: dict[str, str], new_files: bytes, new_code: dict[str, str],
-            encrypted: bool) -> list[str]:
-    """The reasons an update is worth a look; [] if none."""
+            encrypted: bool) -> list[list[str]]:
+    """The reasons an update is worth a look, each as its lines; [] if none."""
     touched = len(_tokens(new_files) - _tokens(old_files))   # files added or changed
     if encrypted:
         return []   # no names to tell code from data
@@ -176,14 +191,13 @@ def compare(old_files: bytes, old_code: dict[str, str], new_files: bytes, new_co
                               and _suffix(n) in PROGRAMS)
     added_scripts = [n for n in added if _suffix(n) in SCRIPTS]
     reasons = []
+    small = f"A small update ({touched} file{'s' if touched != 1 else ''} added or changed)"
     if touched <= SMALL and added:
-        reasons.append(f"A small update ({touched} file{'s' if touched != 1 else ''} added or changed) "
-                       f"adds code: {_names(added)}.")
+        reasons.append(_listed(f"{small} adds code:", added))
     if touched <= SMALL and changed_programs:
-        reasons.append(f"A small update ({touched} file{'s' if touched != 1 else ''} added or changed) "
-                       f"changes a program: {_names(changed_programs)}.")
+        reasons.append(_listed(f"{small} changes a program:", changed_programs))
     if added_scripts and not (touched <= SMALL and added):
-        reasons.append(f"The update adds scripts: {_names(added_scripts)}.")
+        reasons.append(_listed("The update adds scripts:", added_scripts))
     return reasons
 
 
@@ -191,74 +205,99 @@ def compare(old_files: bytes, old_code: dict[str, str], new_files: bytes, new_co
 # Workshop
 # ----------------------------------------------------------------------
 
-def _workshop_item(item: Path) -> tuple[list[str], str] | None:
-    """(what's in it worth a look, a fingerprint of those files), or None."""
-    code, protected, fingerprint = [], [], hashlib.sha1()
-    seen = 0
-    for dirpath, dirnames, names in os.walk(item):
-        dirnames.sort()
-        if seen > _MAX_WALK:
-            break   # an item this big: what's been seen so far is what's listed
-        for n in sorted(names):
-            seen += 1
-            if seen > _MAX_WALK:
-                break
-            path = Path(dirpath, n)
-            s = _suffix(n)
-            if s not in CODE and s != ".zip":
-                continue
+def _workshop_updated(library: Path, appid: str) -> dict[str, str]:
+    """{item id: the day Steam last updated it} from appworkshop_<appid>.acf.
+    Steam keeps no item names on disk (those are on its servers)."""
+    text = steam._read_text(library / "steamapps" / "workshop" / f"appworkshop_{appid}.acf")
+    state = steam.parse_vdf(text).get("appworkshop", {}) if text else {}
+    items = state.get("workshopitemsinstalled", {}) if isinstance(state, dict) else {}
+    days = {}
+    for item, info in items.items() if isinstance(items, dict) else ():
+        stamp = info.get("timeupdated") if isinstance(info, dict) else None
+        if _number(item) and _number(stamp):
             try:
-                st = path.lstat()
-            except OSError:
-                continue
-            rel = os.fsdecode(path.relative_to(item))
-            if s == ".zip":
-                if not path.is_file() or path.is_symlink():
-                    continue
-                try:
-                    with zipfile.ZipFile(path) as zf:
-                        if not any(i.flag_bits & 1 for i in zf.infolist()):
-                            continue
-                except (OSError, zipfile.BadZipFile, ValueError):
-                    continue
-                protected.append(rel)
-            else:
-                code.append(rel)
-            fingerprint.update(f"{rel}\0{st.st_size}\0{st.st_mtime_ns}\0".encode("utf-8", "surrogateescape"))
-    if not code and not protected:
-        return None
-    detail = []
-    programs = [c for c in code if _suffix(c) in PROGRAMS]
-    scripts = [c for c in code if _suffix(c) in SCRIPTS]
-    if programs:
-        detail.append(f"Programs: {_names(programs)}.")
-    if scripts:
-        detail.append(f"Scripts: {_names(scripts)}.")
-    if protected:
-        detail.append(f"Password-protected archives: {_names(protected)}.")
-    return detail, fingerprint.hexdigest()[:12]
+                days[item] = datetime.fromtimestamp(int(stamp), timezone.utc).strftime("%Y-%m-%d")
+            except (OverflowError, OSError, ValueError):
+                pass
+    return days
 
 
-def _workshop(library: Path, apps: dict[str, tuple[str | None, dict[str, str]]]) -> list[Finding]:
+def _locked_zip(path: Path) -> bool:
+    """A zip archive whose files need a password to open: its header flags
+    say so. Only that flag is read; nothing in the archive is opened. A
+    scanner can't look inside, which is why such an archive has carried
+    malware in Workshop items (the password in its file name)."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        with zipfile.ZipFile(path) as zf:
+            return any(info.flag_bits & 1 for info in zf.infolist())
+    except (OSError, zipfile.BadZipFile, ValueError, RuntimeError):
+        return False
+
+
+def _workshop(session: Session, library: Path,
+              apps: dict[str, tuple[str | None, dict[str, str]]]) -> tuple[list[Finding], int]:
+    """(Workshop items in this library with programs, scripts or
+    password-protected zips in them, how many items there are no scan
+    records for).
+
+    No walk of its own: what's in each item comes from your scans' records
+    (the files table), which every file the scan saw is in. So nothing is
+    skipped, and an item's ID comes from its files' content (SHA-256), so
+    a re-download or a moved library doesn't make it new. An item on disk
+    with no records at all is outside what your scans cover (not in
+    scan_targets, or excluded), and is only counted."""
     content = library / "steamapps" / "workshop" / "content"
-    found = []
+    found: list[Finding] = []
     try:
         app_dirs = sorted(d for d in content.iterdir() if _number(d.name) and d.is_dir() and not d.is_symlink())
     except OSError:
-        return found
+        return found, 0
+    records: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    base = str(content)
+    for filepath, digest in session.query(FileRecord.filepath, FileRecord.file_hash).filter(
+            path_under(FileRecord.filepath, base)):
+        parts = Path(filepath).relative_to(content).parts
+        if len(parts) >= 3:
+            records.setdefault((parts[0], parts[1]), []).append(("/".join(parts[2:]), digest or ""))
+    uncovered = 0
     for app in app_dirs:
         game = apps.get(app.name, (None, {}))[0] or f"app {app.name}"
         try:
             items = sorted(d for d in app.iterdir() if _number(d.name) and d.is_dir() and not d.is_symlink())
         except OSError:
             continue
+        updated = _workshop_updated(library, app.name) if items else {}
         for item in items:
-            result = _workshop_item(item)
-            if result:
-                detail, fp = result
-                found.append(Finding(f"workshop-{app.name}-{item.name}-{fp}", "workshop", app.name, game,
-                                     [f"Workshop item {item.name}: {line}" for line in detail]))
-    return found
+            files = records.get((app.name, item.name))
+            if not files:
+                uncovered += 1
+                continue
+            # Records can outlive a file (until purge-missing): only what's there now.
+            code = sorted((rel, digest) for rel, digest in files
+                          if (_suffix(rel) in CODE and os.path.lexists(item / rel))
+                          or (_suffix(rel) == ".zip" and _locked_zip(item / rel)))
+            if not code:
+                continue
+            fingerprint = hashlib.sha1("".join(f"{rel}\0{digest}\0" for rel, digest in code)
+                                       .encode("utf-8", "surrogateescape")).hexdigest()[:12]
+            programs = [rel for rel, _ in code if _suffix(rel) in PROGRAMS]
+            scripts = [rel for rel, _ in code if _suffix(rel) in SCRIPTS]
+            locked = [rel for rel, _ in code if _suffix(rel) == ".zip"]
+            when = f" (updated {updated[item.name]})" if item.name in updated else ""
+            detail = [f"Workshop item {item.name}{when}",
+                      f"    {os.fsdecode(item)}",
+                      f"    https://steamcommunity.com/sharedfiles/filedetails/?id={item.name}"]
+            if programs:
+                detail += [f"    {line}" for line in _listed("Programs:", programs)]
+            if scripts:
+                detail += [f"    {line}" for line in _listed("Scripts:", scripts)]
+            if locked:
+                detail += [f"    {line}" for line in _listed("Password-protected archives:", locked)]
+            found.append(Finding(f"workshop-{app.name}-{item.name}-{fingerprint}", "workshop", app.name, game,
+                                 detail, str(library)))
+    return found, uncovered
 
 
 # ----------------------------------------------------------------------
@@ -273,9 +312,11 @@ def _manifest_path(library: Path, home: Path, depot: str, manifest: str) -> Path
     return None
 
 
-def watch(engine: Engine, home: Path) -> None:
+def watch(engine: Engine, home: Path) -> dict[str, int]:
     """Look at Steam now: record each installed depot's build, note what's
-    worth a look since last time, and refresh the Workshop findings."""
+    worth a look since last time, and refresh the Workshop findings from
+    your scans' records. Returns {library: Workshop items your scans have
+    no records for}, for the note under the list."""
     libs = libraries(home)
     seen_libs = {str(lib) for lib in libs}
     with Session(engine) as session:
@@ -283,6 +324,7 @@ def watch(engine: Engine, home: Path) -> None:
         pending = {r.key: r for r in session.query(SteamPending)}
         installed: set[str] = set()
         workshop: dict[str, Finding] = {}
+        uncovered: dict[str, int] = {}
         for library in libs:
             apps = _apps(library)
             for appid, (name, depots) in apps.items():
@@ -331,14 +373,17 @@ def watch(engine: Engine, home: Path) -> None:
                         pending[key] = SteamPending(key=key, kind="update", appid=appid, game=game,
                                                     library=str(library),
                                                     detail="\n".join([f"Depot {depot}, build {manifest}:",
-                                                                      *reasons]))
+                                                                      *(f"    {line}" for reason in reasons
+                                                                        for line in reason)]))
                         session.add(pending[key])
                     row.manifest, row.files, row.code = manifest, files, json.dumps(code)
                     row.game = name or row.game
                     row.seen_at = utcnow()
-            for f in _workshop(library, apps):
-                f.library = str(library)
+            items, missing = _workshop(session, library, apps)
+            for f in items:
                 workshop[f.key] = f
+            if missing:
+                uncovered[str(library)] = missing
 
         def gone(library: str | None, appid: str) -> bool:
             """No longer installed, as far as can be seen: its library is here
@@ -358,10 +403,13 @@ def watch(engine: Engine, home: Path) -> None:
                 pending[key] = SteamPending(key=key, kind="workshop", appid=f.appid, game=f.game,
                                             library=f.library, detail="\n".join(f.detail))
                 session.add(pending[key])
+            else:   # what's there now, in the current layout
+                pending[key].detail, pending[key].game = "\n".join(f.detail), f.game
         for row in list(snapshots.values()):
             if gone(row.library, row.appid):
                 session.delete(row)
         session.commit()
+    return uncovered
 
 
 def open_findings(engine: Engine, decisions: Engine | None = None) -> list[Finding]:
@@ -400,26 +448,56 @@ _WHY = {"workshop": "Workshop items are uploaded by anyone and not reviewed like
         "rename": "A game renamed and then updated is how one malicious game reached players (Beyond The Dark)."}
 
 
-def report(findings: list[Finding]) -> None:
+def uncovered_note(uncovered: dict[str, int]) -> None:
+    """Workshop items the scans have no records for, so weren't checked."""
+    from rich import print as rprint
+
+    from .fsutil import print_unwrapped, shown
+    from rich.console import Console
+    width = max(40, Console().width - 1)
+    for library, count in sorted(uncovered.items()):
+        note = (f"Not checked: {count} Workshop item{'s' if count != 1 else ''} in this Steam library "
+                f"{'aren' if count != 1 else 'isn'}'t in your scans' records (outside scan_targets, or "
+                f"excluded, or added since the last scan):")
+        rprint("")
+        for line in textwrap.wrap(note, width - 2, break_long_words=False):
+            rprint(f"  [dim]{line}[/dim]")
+        print_unwrapped(f"    [dim]{shown(library)}[/dim]")
+
+
+def report(findings: list[Finding], uncovered: dict[str, int] | None = None) -> None:
     """The section printed at the end of a scan, and by `ensign-scan steam`."""
     from rich import print as rprint
 
     from .commands import prefix
     from .fsutil import print_unwrapped, shown
     if not findings:
+        if uncovered:
+            rprint("\n=== STEAM ===")
+            uncovered_note(uncovered)
         return
+    from rich.console import Console
+    width = max(40, Console().width - 1)
     rprint(f"\n=== STEAM: WORTH A LOOK ({len(findings)}) ===")
     rprint("Ensign read Steam's files only. Each of these is a reason to look, not a verdict.")
     for kind in ("update", "rename", "workshop"):
         group = [f for f in findings if f.kind == kind]
         if not group:
             continue
-        rprint(f"\n[bold]{_KIND[kind]}[/bold] ({len(group)}): {_WHY[kind]}")
+        heading = f"{_KIND[kind]} ({len(group)}): {_WHY[kind]}"
+        rprint("")
+        for i, line in enumerate(textwrap.wrap(heading, width - 4, break_long_words=False)):
+            if i == 0:
+                rprint(f"    [bold]{_KIND[kind]}[/bold]{line[len(_KIND[kind]):]}")
+            else:
+                rprint(f"    {line}")
         for f in group:
             print_unwrapped(f"\n  {shown(f.game)} (app {f.appid})")
             for line in f.detail:
                 print_unwrapped(f"      {shown(line)}")
             print(f"      ID: {shown(f.key)}")
+    if uncovered:
+        uncovered_note(uncovered)
     keys = " ".join(f.key for f in findings)
     if _PROTECTED:
         rprint("\n  Looked at them? Your decisions are protected, so acknowledging needs sudo:")
