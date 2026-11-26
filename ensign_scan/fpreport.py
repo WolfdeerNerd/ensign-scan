@@ -33,7 +33,7 @@ from rich import print
 from sqlalchemy.orm import Session
 
 from .config import HOME
-from .diagnostics import _pkg_version, _scrub
+from .diagnostics import _scrub
 from .fsutil import NotScannable, human_size, open_for_scan, print_unwrapped, shell_quote, shown
 from .models import FileRecord, ScanStatus, utcnow
 
@@ -99,6 +99,80 @@ def _rescan(scanner, fd: int, path: Path, size: int):
     if _clamd_skipped(outcome):
         return None, "clamd skipped it as too large (a limit Ensign didn't know about); scan it again"
     return outcome, "clamd, whole file"
+
+
+def _evidence(path: Path, sha256: str, threat: str) -> tuple[list[str], list[str], list[str]]:
+    """What the package manager and Steam say about the file, asked now rather
+    than taken from stored evidence, so the report says what's true today.
+
+    Returns (report lines, draft sentences for the "why", cautions for the
+    screen). The game or package name is in the report on purpose: a file in
+    a game folder is usually unique to that game, and the name is what lets
+    ClamAV's analysts find it. A draft is only offered when the evidence
+    supports it, and never for a known malware family's name."""
+    from . import pkgdb, steam
+    from .explanations import known_family
+
+    lines: list[str] = []
+    draft: list[str] = []
+    cautions: list[str] = []
+    family = known_family(threat)
+    if family:
+        cautions.append(f"ClamAV names a known malware family ({family}). False positives under "
+                        f"such names are rare: real malware has shipped inside official game builds "
+                        f"and packages.")
+    try:  # a second opinion failing must not stop the report
+        state, package = pkgdb.origins([str(path)]).get(str(path), (pkgdb.UNKNOWN, None))
+        backend = pkgdb.active().name
+    except Exception:
+        state, package, backend = pkgdb.UNKNOWN, None, ""
+    if package and state == pkgdb.FROM_PACKAGE:
+        lines.append(f"Package:          installed by {package} ({backend}), unchanged since")
+        draft.append(f"The file is part of the {package} package ({backend}), unchanged from "
+                     f"what that package installed.")
+    elif package and state == pkgdb.MODIFIED:
+        lines.append(f"Package:          belongs to {package} ({backend}), but differs from what "
+                     f"the package installed")
+        cautions.append(f"It differs from what the {package} package installed, so it isn't the "
+                        f"file the package shipped.")
+    elif package and state == pkgdb.OWNED:
+        lines.append(f"Package:          belongs to {package} ({backend}); couldn't be compared "
+                     f"with what the package installed")
+    try:
+        answer = steam.check(steam.Records(), str(path), sha256)
+    except Exception:
+        answer = None
+    if answer is not None and answer.verdict == steam.MATCH:
+        lines.append(f"Steam:            installed by Steam for {answer.game}, exactly as Steam's "
+                     f"record of the current build lists it")
+        draft.append(f"The file is part of {answer.game}, installed by Steam, and matches Steam's "
+                     f"record of the game's current build.")
+    elif answer is not None and answer.verdict == steam.DIFFERS:
+        lines.append(f"Steam:            a file of {answer.game}, but with other contents than "
+                     f"Steam's record of the current build")
+        cautions.append(f"Steam's record of {answer.game} lists this file with other contents, so "
+                        f"it isn't the file Steam shipped (a pending update can cause this too).")
+    elif answer is not None and answer.verdict == steam.WORKSHOP:
+        lines.append(f"Steam:            part of a Steam Workshop item for {answer.game} "
+                     f"(community-made content)")
+        draft.append(f"The file is part of a Steam Workshop item for {answer.game}.")
+    if family or cautions:
+        draft = []   # nothing that argues for a false positive when the checks point the other way
+    return lines, draft, cautions
+
+
+def _first_flagged(engine, sha256: str):
+    """When Ensign first saw ClamAV flag this exact content, under any name
+    and in any copy, or None."""
+    from sqlalchemy import func
+
+    from .models import CLAMAV_ENGINES, Finding
+    try:
+        with Session(engine) as session:
+            return (session.query(func.min(Finding.first_seen))
+                    .filter(Finding.content_hash == sha256, Finding.engine.in_(CLAMAV_ENGINES)).scalar())
+    except Exception:  # an older database, say: the date is a nicety
+        return None
 
 
 def make_report(scanner, config, path_text: str) -> Path | None:
@@ -172,11 +246,10 @@ def make_report(scanner, config, path_text: str) -> Path | None:
                         f"set (its files are in clamd's signature folder).")
         return None
 
-    ensign_version = _pkg_version("ensign-scan")
     version = getattr(scanner.clamd, "version_string", lambda: None)() or "unknown"
     when = utcnow().strftime("%Y-%m-%d %H:%M UTC")
     lines = [
-        f"ClamAV false positive report (prepared by Ensign {ensign_version})",
+        "ClamAV false positive report",
         "",
         f"Signature name:   {current}",
         f"SHA-256:          {sha256}",
@@ -189,40 +262,20 @@ def make_report(scanner, config, path_text: str) -> Path | None:
     ]
     if changed_name:
         lines.append(f"Earlier name:     {threat} (newer signatures name it {current})")
-    # Asked now, not taken from the stored evidence: the report says what's true today.
-    from . import pkgdb
-    try:
-        state, package = pkgdb.origins([str(path)]).get(str(path), (pkgdb.UNKNOWN, None))
-    except Exception:  # a second opinion failing must not stop the report
-        state, package = pkgdb.UNKNOWN, None
-    if state == pkgdb.FROM_PACKAGE and package:
-        backend = pkgdb.active().name
-        lines.append(f"Package:          installed by {package} ({backend}), unchanged since")
-    # Steam's record, asked now too. The game's name is in the report on
-    # purpose: a file in a game folder is usually unique to that game, and
-    # it's what ClamAV's analysts need to find the file themselves.
-    from . import steam
-    try:
-        answer = steam.check(steam.Records(), str(path), sha256)
-    except Exception:  # a second opinion failing must not stop the report
-        answer = None
-    if answer is not None and answer.verdict == steam.MATCH:
-        lines.append(f"Steam:            installed by Steam for {answer.game}, exactly as Steam's "
-                     f"record of the current build lists it")
-    elif answer is not None and answer.verdict == steam.DIFFERS:
-        lines.append(f"Steam:            a file of {answer.game}, but with other contents than "
-                     f"Steam's record of the current build")
-    elif answer is not None and answer.verdict == steam.WORKSHOP:
-        lines.append(f"Steam:            part of a Steam Workshop item for {answer.game} "
-                     f"(community-made content)")
-    lines += [
-        "",
-        "Why I believe this is a false positive:",
-        "  <In your own words: what the file is, and where it came from -- which",
-        "   program, game or download it belongs to.>",
-        "",
-        "This report contains no file name, path, username or hostname.",
-    ]
+    package_lines, draft, cautions = _evidence(path, sha256, current)
+    lines += package_lines
+    first = _first_flagged(scanner.engine, sha256)
+    if first is not None:
+        lines.append(f"First flagged:    {first:%Y-%m-%d} (this exact content)")
+    lines += ["", "Why I believe this is a false positive:"]
+    if draft:
+        lines += ["  <A starting point, drafted from the package manager's and Steam's records.",
+                  "   Check it, then add in your own words what the file is and where it came from.>"]
+        lines += [f"  {sentence}" for sentence in draft]
+    else:
+        lines += ["  <In your own words: what the file is, and where it came from -- which",
+                  "   program, game or download it belongs to.>"]
+    lines += ["", "This report contains no file name, path, username or hostname."]
     text = _scrub("\n".join(lines)) + "\n"
 
     folder = Path(config.data_dir) / "clamav-reports"
@@ -254,6 +307,11 @@ def make_report(scanner, config, path_text: str) -> Path | None:
     sig = shell_quote(current)
     print_unwrapped(f"  Or with ClamAV's own tool: clamsubmit -p {shown(shell_quote(str(path)))} "
                     f"-V {shown(sig)} -N 'Your name' -e 'you@example.com'")
+    if cautions:
+        print("  [bold yellow]Before you submit:[/bold yellow] Ensign's checks point the other way.")
+        for caution in cautions:
+            print_unwrapped(f"  [yellow]![/yellow] {caution}")
+        print("    A report says you've checked the file is safe. If you're not sure, don't send it.")
     print("  [yellow]Submitting sends the file's whole contents to Cisco (ClamAV's owner).[/yellow]")
     print("  [yellow]Only submit a file with nothing private in it.[/yellow]")
     folder_name = _personal_folder(path)
