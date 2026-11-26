@@ -15,7 +15,7 @@ Never writes to either database. Standard library only.
 
     python experiments/hash-libraries/nsrl_probe.py RDS_xxxx_modern_minimal.db
     python experiments/hash-libraries/nsrl_probe.py NSRL.db --ensign-db ~/.local/share/ensign-scan/system.db
-    python experiments/hash-libraries/nsrl_probe.py NSRL.db --hash   # SHA-256 of the db, to compare with NIST's
+    python experiments/hash-libraries/nsrl_probe.py NSRL.db --hash   # SHA-256 of the file (not NIST's dbhash: see --help)
 """
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ def main() -> int:
     ap.add_argument("--ensign-db", type=Path, help="Ensign's system.db, to count flagged files found in NSRL")
     ap.add_argument("--samples", type=int, default=200, help="lookups to time (default 200)")
     ap.add_argument("--show", action="store_true", help="print each flagged file found (path and threat)")
-    ap.add_argument("--hash", action="store_true", help="SHA-256 of the NSRL file, to compare with NIST's .sha")
+    ap.add_argument("--hash", action="store_true", help="SHA-256 of the file. Not comparable with NIST's dbhashes.txt, which lists SQLite dbhash values (a hash of the contents); check those with: dbhash FILE")
     args = ap.parse_args()
 
     size = args.nsrl_db.stat().st_size
