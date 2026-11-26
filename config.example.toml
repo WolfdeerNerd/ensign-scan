@@ -33,6 +33,13 @@ clamscan_memory_percent = 25
 # while the first time. false = off (--sweep then runs it for one scan).
 sweep_huge_files = true
 
+# Watch Steam: list Workshop items that carry programs, scripts or
+# password-protected archives, and game updates worth a look (a small update
+# that adds code or changes a program, an update that adds scripts, a game
+# renamed). Reads Steam's files only, and never changes them. Each finding is
+# listed until you acknowledge it: ensign-scan acknowledge-steam ID. false = off.
+steam_watch = true
+
 # Sweep an unchanged file again once the signatures have moved this many
 # versions on (about one a day), or this many days have passed since its
 # last sweep, whichever comes first. Allowed range 7-90 (anything else is

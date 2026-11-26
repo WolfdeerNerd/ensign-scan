@@ -108,6 +108,11 @@ assert parsed(["allow-folder", "/f", "--sig", "S"])["signature"] == "S"
 assert parsed(["allow", "--", "-odd"])["allow"] == ["-odd"]
 assert parsed(["allow-folder", "--signature", "S", "--", "-odd"])["allow_folder"] == "-odd"
 assert parsed(["allow", "--", "-h"])["allow"] == ["-h"], "after --, -h is a path, not a help request"
+# The Steam watch's commands.
+assert parsed(["steam"])["steam"] and parsed(["steam"]) == parsed(["--steam"])
+assert parsed(["acknowledge-steam", "update-1-2-3", "rename-1-abcdef012345"])["acknowledge_steam"] == [
+    "update-1-2-3", "rename-1-abcdef012345"]
+assert parsed(["acknowledge-steam", "--all"]) == parsed(["--acknowledge-steam-all"])
 got = parsed(["list", "infected", "--", "-odd"])
 assert got["list_infected"] and got["targets"] == ["-odd"], "a path starting with - stays a path"
 # A command that's also a file or folder where you are: never a guess.
@@ -199,12 +204,12 @@ print("help test passed ✓")
 # the same as the option it stands for.
 for option, shown in commands._SHOWN_AS.items():
     value = ["/x"] if option in ("--allow", "--unallow", "--clamav-report", "--acknowledge",
-                                 "--allow-folder", "--unallow-folder") else []
+                                 "--allow-folder", "--unallow-folder", "--acknowledge-steam") else []
     extra = ["--signature", "S"] if option in ("--allow-folder", "--unallow-folder") else []
     hint = shown.split() + value + extra
     assert parsed(hint) == parsed([option, *value, *extra]), (option, hint)
     if option in ("--allow", "--unallow", "--allow-folder", "--unallow-folder", "--persistence",
-                  "--acknowledge", "--acknowledge-all"):
+                  "--acknowledge", "--acknowledge-all", "--acknowledge-steam"):
         # The protected-mode hints: sudo ensign-scan --protected <command>
         assert parsed(["--protected", *hint]) == parsed(["--protected", option, *value, *extra]), option
 

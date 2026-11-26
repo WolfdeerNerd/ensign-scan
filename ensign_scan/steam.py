@@ -148,9 +148,17 @@ def _fields(buf: bytes):
         yield tag >> 3, value
 
 
-def parse_manifest(data: bytes) -> dict[bytes, set[bytes]]:
-    """{SHA-1 of the lowercased name: {SHA-1s of the content}} for every
-    file (not folder) in a manifest. Raises ValueError if it can't be read."""
+@dataclass(frozen=True)
+class Entry:
+    name: bytes                  # as stored: Windows separators; unreadable if names are encrypted
+    name_hash: bytes             # SHA-1 of the lowercased name
+    content_hash: bytes          # SHA-1 of the content
+
+
+def read_entries(data: bytes) -> tuple[bool, list[Entry]]:
+    """(names encrypted, every file (not folder) in a manifest). Raises
+    ValueError if it can't be read: size-capped, including after unzipping,
+    and every field bounds-checked."""
     if data[:2] == b"PK":
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -163,7 +171,8 @@ def parse_manifest(data: bytes) -> dict[bytes, set[bytes]]:
             raise ValueError(f"bad zip: {e}") from e
         if len(data) > _MAX_MANIFEST:
             raise ValueError("manifest too large")
-    files: dict[bytes, set[bytes]] = {}
+    entries: list[Entry] = []
+    encrypted = False
     i = 0
     while i + 4 <= len(data):
         (magic,) = struct.unpack_from("<I", data, i)
@@ -179,18 +188,33 @@ def parse_manifest(data: bytes) -> dict[bytes, set[bytes]]:
             for number, mapping in _fields(body):
                 if number != 1 or not isinstance(mapping, bytes):
                     continue
-                flags, name_hash, content_hash = 0, b"", b""
+                name, flags, name_sha, content_sha = b"", 0, b"", b""
                 for n, v in _fields(mapping):
-                    if n == 3 and isinstance(v, int):
+                    if n == 1 and isinstance(v, bytes):
+                        name = v
+                    elif n == 3 and isinstance(v, int):
                         flags = v
                     elif n == 4 and isinstance(v, bytes):
-                        name_hash = v
+                        name_sha = v
                     elif n == 5 and isinstance(v, bytes):
-                        content_hash = v
-                if not flags & _DIRECTORY and len(name_hash) == 20 and len(content_hash) == 20:
-                    files.setdefault(name_hash, set()).add(content_hash)
-        elif magic not in (_METADATA, _SIGNATURE):
+                        content_sha = v
+                if not flags & _DIRECTORY and len(name_sha) == 20 and len(content_sha) == 20:
+                    entries.append(Entry(name, name_sha, content_sha))
+        elif magic == _METADATA:
+            for n, v in _fields(body):
+                if n == 4 and isinstance(v, int):
+                    encrypted = bool(v)
+        elif magic != _SIGNATURE:
             raise ValueError(f"unknown section 0x{magic:08x}")
+    return encrypted, entries
+
+
+def parse_manifest(data: bytes) -> dict[bytes, set[bytes]]:
+    """{SHA-1 of the lowercased name: {SHA-1s of the content}} for every
+    file (not folder) in a manifest. Raises ValueError if it can't be read."""
+    files: dict[bytes, set[bytes]] = {}
+    for e in read_entries(data)[1]:
+        files.setdefault(e.name_hash, set()).add(e.content_hash)
     return files
 
 

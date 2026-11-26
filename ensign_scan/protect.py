@@ -57,7 +57,12 @@ DATA_ROOT = Path("/var/lib/ensign-scan")
 
 # The tables that hold decisions, and live in root's decisions file in
 # protected mode. Everything else (the verdict for each file) stays yours.
-DECISION_TABLES = ("allowances", "allowed_folders", "persistence_entries")
+DECISION_TABLES = ("allowances", "allowed_folders", "persistence_entries", "steam_acknowledged")
+# Decision tables added after protected mode shipped. A decisions file made
+# by an older Ensign doesn't have them: it's read as if they were empty
+# (db.make_engine), and the next sudo run adds them (db.upgrade_decision_tables
+# via upgrade_all), so a protected run never stops over one.
+LATER_TABLES = ("steam_acknowledged",)
 
 
 class Unsafe(Exception):
@@ -153,7 +158,10 @@ def _check_readable(found: Protected) -> None:
                                  f"once, and it's upgraded: sudo ensign-scan list allowed")
                 raise Unsafe(f"root's copy of your decisions was made by an older Ensign ({what}), "
                              f"and this version can't upgrade it: report it as a bug.")
+            present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             for table, columns in _expected_columns().items():
+                if table in LATER_TABLES and table not in present:
+                    continue
                 conn.execute(f"SELECT {', '.join(columns)} FROM {table} LIMIT 1").fetchall()
         finally:
             conn.close()
@@ -213,6 +221,8 @@ def missing_columns(conn: sqlite3.Connection) -> dict[str, list[str]]:
     missing = {}
     for table, columns in _expected_columns().items():
         have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not have and table in LATER_TABLES:
+            continue   # added later: read as empty until a sudo run adds it
         lacking = sorted(set(columns) - have)
         if lacking:
             missing[table] = lacking

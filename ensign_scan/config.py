@@ -117,7 +117,7 @@ KNOWN_SETTINGS = frozenset({
     "resweep_after_signature_updates", "resweep_after_days",
     "rescan_after_days", "rescan_after_signature_updates",
     "infected_alert_seconds", "infected_alert_only_while_gaming",
-    "never_open_credentials",
+    "never_open_credentials", "steam_watch",
     "log_keep_days", "log_max_total_mb",
     "scan_targets", "snapshot_roots",
     "excludes", "signature_max_age_days", "package_verification",
@@ -133,7 +133,8 @@ KNOWN_SETTINGS = frozenset({
 # of the wrong type fails loudly: "no" in quotes is a non-empty string, which
 # Python treats as true, so sweep_huge_files = "no" would quietly mean yes,
 # and a quoted number crashed the run hours in, when it was first compared.
-_BOOL_SETTINGS = ("sweep_huge_files", "infected_alert_only_while_gaming", "never_open_credentials")
+_BOOL_SETTINGS = ("sweep_huge_files", "infected_alert_only_while_gaming", "never_open_credentials",
+                  "steam_watch")
 _INT_SETTINGS = ("max_workers", "cpu_share", "max_clamscans", "clamscan_memory_percent",
                  "resweep_after_signature_updates", "resweep_after_days", "rescan_after_days",
                  "rescan_after_signature_updates", "infected_alert_seconds", "log_keep_days",
@@ -231,6 +232,10 @@ class Config:
     # marks a file clean. On by default; false turns it off (--sweep then
     # runs it for one scan).
     sweep_huge_files: bool = True
+    # Watch Steam (steamwatch.py): Workshop items that carry programs or
+    # scripts, and game updates worth a look. Reads Steam's files only;
+    # listed at the end of a scan when something needs a look.
+    steam_watch: bool = True
     # Sweep an unchanged, already-swept file again once the signatures have
     # moved this many versions on, or this many days have passed since its
     # last sweep, whichever comes first. Longer than for ordinary files: a
@@ -360,7 +365,7 @@ class Config:
                     "rescan_after_days",
                     "rescan_after_signature_updates", "infected_alert_seconds",
                     "infected_alert_only_while_gaming", "never_open_credentials", "log_keep_days",
-                    "log_max_total_mb", "signature_max_age_days", "sweep_huge_files",
+                    "log_max_total_mb", "signature_max_age_days", "sweep_huge_files", "steam_watch",
                     "resweep_after_signature_updates", "resweep_after_days"):
             if key in raw:
                 kwargs[key] = raw[key]
@@ -473,6 +478,13 @@ clamscan_memory_percent = 25
 # more when it is new or has changed, which on a big game library takes a
 # while the first time. false = off (--sweep then runs it for one scan).
 sweep_huge_files = true
+
+# Watch Steam: list Workshop items that carry programs, scripts or
+# password-protected archives, and game updates worth a look (a small update
+# that adds code or changes a program, an update that adds scripts, a game
+# renamed). Reads Steam's files only, and never changes them. Each finding is
+# listed until you acknowledge it: ensign-scan acknowledge-steam ID. false = off.
+steam_watch = true
 
 # Sweep an unchanged file again once the signatures have moved this many
 # versions on (about one a day), or this many days have passed since its

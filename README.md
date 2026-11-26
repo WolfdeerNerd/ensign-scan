@@ -169,6 +169,7 @@ Your config and your database belong to you, so only you (and root) can change t
 | `clamd_socket` in your config, pointed at a fake clamd it runs itself | Every file is reported clean | Ensign refuses a clamd running as you (see How clamd Reads Your Files). In protected mode it can't change your config |
 | An allowance (its file's hash, signature name and engine) | That hit is reported as "allowed by you" for as long as the file stays the same | The "Allowed by you" count at the end of each run, and `--list-allowed`. In protected mode it can't add one |
 | An acknowledged startup entry | The persistence audit stops listing its entry | `persistence_acknowledged.log`, which sits in the same folder, so it could edit that too. In protected mode it can't acknowledge one |
+| The Steam watch's records, or an acknowledgment | A Workshop item or an update isn't listed | Nothing in your own runs. In protected mode it can't acknowledge one, but the watch's record of each game stays in your database |
 | A file's record, set to clean | The file isn't sent to ClamAV again until the next signature rescan (`rescan_after_signature_updates`) | The signature rescan, unless your config was also changed to switch it off. A record claiming a newer signature version than clamd has is rescanned at once |
 | Ensign itself, if it's installed where you can write (a checkout, a venv in your home, `pip install --user`), or the command you type: an alias, a `PATH` entry, or a variable like `LD_PRELOAD` or `PYTHONPATH` set in your shell's startup files, which could also run an older copy of Ensign that doesn't know protected mode | Anything, protected mode included. Under `sudo`, the changed code runs as root | Nothing Ensign can do. Install it where only root can write if this matters to you. A change to your shell's startup files shows up in the persistence audit |
 
@@ -286,6 +287,8 @@ From 0.11.0, every job has a short command, like pipx's or git's: `ensign-scan a
 | `ensign-scan allow-folder FOLDER --signature NAME` / `unallow-folder ...` | `--allow-folder` / `--unallow-folder` |
 | `ensign-scan persistence` | `--persistence` |
 | `ensign-scan acknowledge PATH` / `acknowledge --all` | `--acknowledge PATH` / `--acknowledge-all` |
+| `ensign-scan steam` | `--steam` |
+| `ensign-scan acknowledge-steam ID` / `acknowledge-steam --all` | `--acknowledge-steam ID` / `--acknowledge-steam-all` |
 | `ensign-scan verify-packages` / `suggest-fixes [PATH ...]` / `diagnostics` | `--verify-packages` / `--suggest-fixes` / `--diagnostics` |
 | `sudo ensign-scan protect` / `unprotect` / `uninstall` | `--protect` / `--unprotect` / `--uninstall` |
 
@@ -328,10 +331,13 @@ These run one job and exit — no full scan.
 | `python3 main.py --persistence` | List startup entries that are new, changed or gone since you acknowledged them (see Persistence Audit). Changes nothing |
 | `python3 main.py --acknowledge PATH` | Accept one startup entry the persistence audit lists, as it is now. Asks to confirm; `--yes` skips the question |
 | `python3 main.py --acknowledge-all` | Show the persistence audit, then accept everything it lists. Asks to confirm |
+| `python3 main.py --steam` | List what the Steam watch found: Workshop items carrying code, game updates worth a look, renamed games (see Steam Watch). Changes nothing |
+| `python3 main.py --acknowledge-steam ID` | Mark one Steam watch finding as looked at, by the ID it's listed with. Asks to confirm; `--yes` skips the question |
+| `python3 main.py --acknowledge-steam-all` | Show the Steam watch, then mark everything it lists as looked at. Asks to confirm |
 | `sudo python3 main.py --protect` | Keep your config and decisions where only root can change them (see Protected mode). Shows your config and asks first |
 | `sudo python3 main.py --unprotect` | Undo `--protect`: your runs use your own config and database again. Asks first |
 | `sudo python3 main.py --uninstall` | Delete everything Ensign made, yours and root's, after listing it and asking you to type `uninstall` (see Uninstalling). Without `sudo`, only yours |
-| `sudo python3 main.py --protected --allow PATH` | In protected mode, change your decisions: goes with `--allow`, `--unallow`, `--allow-folder`, `--unallow-folder`, `--persistence`, `--acknowledge` and `--acknowledge-all` |
+| `sudo python3 main.py --protected --allow PATH` | In protected mode, change your decisions: goes with `--allow`, `--unallow`, `--allow-folder`, `--unallow-folder`, `--persistence`, `--acknowledge`, `--acknowledge-all` and `--acknowledge-steam ID` |
 | `python3 main.py --clamav-report PATH` | Prepare a false-positive report for ClamAV about a flagged file (see False Positives). Nothing is sent: you submit it |
 
 ### Only one run at a time
@@ -349,9 +355,10 @@ A scan's exit code says how it went, so a script or a scheduled run can act on i
 | 0 | Finished, nothing infected |
 | 3 | Finished, and infected files are present: found this run, or found before and still on disk. One you've deleted no longer counts. This outranks code 1 |
 | 1 | Finished, but some results couldn't be saved to the database (a full disk, say). Those results are still reported and alerted on, listed at the end under "scanned but not saved" |
+| 5 | Finished, nothing infected and nothing unsaved, and the Steam watch lists something you haven't acknowledged (see Steam Watch). Codes 3 and 1 outrank it |
 | 75 | Another Ensign is running; nothing was scanned |
 
-`--persistence` has one more: **4** when startup entries are new, changed or gone since you last acknowledged them (0 when there are none). Entries it couldn't read without root don't count, so a run without sudo doesn't report them every time. `--acknowledge-all` exits 0 once it has acknowledged everything, and 4 if you answered no.
+`--persistence` has one more: **4** when startup entries are new, changed or gone since you last acknowledged them (0 when there are none). Entries it couldn't read without root don't count, so a run without sudo doesn't report them every time. `--acknowledge-all` exits 0 once it has acknowledged everything, and 4 if you answered no. `--steam` exits **5** when something is listed and 0 when nothing is; `--acknowledge-steam-all` exits 0 once everything is acknowledged.
 
 ### Large files
 
@@ -434,6 +441,24 @@ After that, a run lists only what changed. Accept an entry you recognize with `-
 **Every acknowledgment is logged** to `persistence_acknowledged.log` in your data directory: one line per entry, with the time, the path, and the hash or link target, separated by tabs.
 
 **The limit to know about:** your baseline lives in your data directory, which you own. Malware running as you can write there too, so it could acknowledge its own entry. The log makes such a change visible, but it sits in the same folder. A sudo run's baseline is kept where only root can write, so `sudo python3 main.py --persistence` isn't fooled by such a change (see Malware running as you).
+
+## Steam Watch
+
+Steam's record of a game says where a file came from, not whether it's safe (see False Positives): games have shipped malware inside their official Steam builds, often as a clean game first and a malicious update later (BlockBlasters), or an older game renamed and then updated (Beyond The Dark). Workshop items are uploaded by anyone, and malicious ones have been found (Wallpaper Engine, Project Zomboid, People Playground). So every scan also reads Steam's files and, when something needs a look, ends with a section listing it:
+
+| Listed | When |
+|---|---|
+| **Workshop item carries code** | An item in `steamapps/workshop/content/<appid>/<item>` has programs (`.exe`, `.dll`, ...), scripts (`.bat`, `.ps1`, `.vbs`, `.js`, `.py`, ...) or a password-protected zip in it. Static content (wallpapers, maps, music) shouldn't need any. Lua on its own doesn't count: some games run Lua mods by design |
+| **Update worth a look** | A game's build changed since the last scan, and a small update (5 files or fewer added or changed) adds a program or script or changes a program, or the update adds scripts |
+| **Game renamed** | A game's name changed since the last scan |
+
+These were measured before they were chosen: across 80 legitimate updates on one gaming machine, the three update rules fired 0, 2 and 3 times. "An update changes a program" fired 25 times, so it isn't one of them.
+
+Each finding has an ID, which says exactly what it's about: the build's manifest, the item's current files, the game's new name. It's listed until you acknowledge it (`ensign-scan acknowledge-steam ID`, or `--all`), and anything that changes after that gets a new ID and is listed again. `ensign-scan steam` shows the list without scanning. In protected mode, acknowledging needs `sudo --protected`, and the list prints the command to paste.
+
+**What it never does:** change, delete or move anything of Steam's, unsubscribe from or disable an item, start or stop a game, or contact Steam. It reads Steam's text files and manifests and lists folders; it hashes nothing. `steam_watch = false` turns it off.
+
+**What it can't do:** the first time it sees a game it only records it, since there's nothing to compare with yet. A game that's malicious from its first build gives no "update" (the scan and the Steam line under a hit still apply). And like the rest of Ensign's records, the watch's own record of each game is in your database, where malware running as you could change it (see Malware running as you).
 
 ## What Gets Rescanned
 
