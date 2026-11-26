@@ -10,10 +10,12 @@ Two sources so far:
   steam    Steam's record of a game's files (steam.py): is a flagged file in
            a game folder exactly what Steam installed for that game?
 
-A yes from either gets the "likely false positive" label. Neither is a
-guarantee -- an AUR package is a script anyone can publish, a game is only
-as trustworthy as its developer, and Steam's record is in your home folder
--- so the label says what was checked, and the file stays flagged.
+An unchanged package file gets the "likely false positive" label; an AUR
+package is a script anyone can publish, so it says what was checked, and
+the file stays flagged. Steam's match never gets that label: games have
+shipped malware inside their official Steam builds, so it says only where
+the file came from, and it turns into a warning when ClamAV names a known
+malware family. Workshop files get a caveat instead (see steam.py).
 
 Each fact is stored with the hash of the content it was checked against
 (models.Evidence), and shown only while the finding is about that same
@@ -34,6 +36,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from . import pkgdb, steam
+from .explanations import known_family
 from .findings import OPEN
 from .fsutil import NotScannable, open_for_scan, sha256_fd
 from .models import Evidence, FileRecord, Finding, utcnow
@@ -96,7 +99,8 @@ def _refresh_steam(engine: Engine) -> int:
     """Steam's record, for flagged files in Steam game folders. steam.check
     hashes the file itself and answers only for the flagged content."""
     with Session(engine) as session:
-        rows = [r for r in _open_flagged(session) if "/steamapps/common/" in r.filepath]
+        rows = [r for r in _open_flagged(session)
+                if "/steamapps/common/" in r.filepath or "/steamapps/workshop/content/" in r.filepath]
         if not rows:
             return 0
         records, kept = steam.Records(), 0
@@ -162,29 +166,41 @@ def for_files(session: Session, files: dict[int, str | None]) -> dict[int, list[
 
 
 def likely_false_positive(found: Evidence | None) -> bool:
-    """A package, or Steam, installed exactly this content (decisions: only
-    an unchanged package file, or a file Steam's record lists with these
-    exact bytes, earns the label)."""
-    return found is not None and (
-        (found.source == SOURCE_PACKAGE and found.verdict == pkgdb.FROM_PACKAGE)
-        or (found.source == SOURCE_STEAM and found.verdict == steam.MATCH))
+    """A package installed exactly this content (decision: only an unchanged
+    package file earns the label; Steam's match never does)."""
+    return found is not None and found.source == SOURCE_PACKAGE and found.verdict == pkgdb.FROM_PACKAGE
 
 
-def label(found: Evidence) -> str:
+def label(found: Evidence, threat: str | None = None) -> str:
     """The label in front of describe()'s line."""
     if likely_false_positive(found):
         return "Likely false positive"
-    return "Steam" if found.source == SOURCE_STEAM else "Package"
+    if found.source == SOURCE_STEAM:
+        if found.verdict == steam.MATCH:
+            return "Warning" if known_family(threat) else "Matches Steam's build"
+        return "Workshop" if found.verdict == steam.WORKSHOP else "Steam"
+    return "Package"
 
 
-def describe(found: Evidence) -> str:
-    """One line for the reports."""
+def describe(found: Evidence, threat: str | None = None) -> str:
+    """One line for the reports. threat: the signature that flagged the file."""
     if found.source == SOURCE_STEAM:
         game = found.subject or "a game"
         if found.verdict == steam.MATCH:
-            return (f"Installed by Steam for {game}: Steam's record of this build has exactly these bytes. "
-                    f"That's only as trustworthy as the game's developer, and the record is in your home "
-                    f"folder, where anything running as you could change it.")
+            family = known_family(threat)
+            if family:
+                return (f"Steam shipped this file for {game}, and ClamAV names a known malware family "
+                        f"({family}): real malware has shipped this way, inside games' official Steam "
+                        f"builds (PirateFi, BlockBlasters). Treat it as real. Investigation required.")
+            return (f"Steam installed exactly this file for {game}. That shows where it came from, not that "
+                    f"it's safe: games have shipped malware inside their official Steam builds (PirateFi, "
+                    f"BlockBlasters). Steam's record is in your home folder, where anything running as you "
+                    f"could change it.")
+        if found.verdict == steam.WORKSHOP:
+            return (f"Steam Workshop content for {game}: uploaded by a community member, not reviewed like "
+                    f"a game's own build. Malicious Workshop items have been found before (Wallpaper "
+                    f"Engine, Project Zomboid, People Playground); items carrying programs, scripts or "
+                    f"password-protected archives deserve the most suspicion.")
         return (f"Steam's record for {game} lists this file with other contents. The game may have "
                 f"changed it itself (some rewrite their own files), or something else did.")
     package = found.subject or "a package"

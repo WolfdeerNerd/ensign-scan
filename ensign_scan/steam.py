@@ -6,18 +6,26 @@ what "Verify integrity of game files" checks against. When a flagged file
 sits in a Steam library's steamapps/common folder, check() finds the game
 that owns that folder and looks the file up in that game's manifests:
 
-  MATCH    Steam's record has this file with exactly these bytes
-  DIFFERS  Steam's record has this file, with other bytes (games rewrite
-           some of their own files, so this alone isn't a warning)
+  MATCH     Steam's record has this file with exactly these bytes
+  DIFFERS   Steam's record has this file, with other bytes (games rewrite
+            some of their own files, so this alone isn't a warning)
+  WORKSHOP  the file is Steam Workshop content (steamapps/workshop/content/
+            <appid>/<item>/...): uploaded by a community member, so it gets
+            a caveat and never a match, whatever Steam's records say
 
-A file the record doesn't list gets no answer. Everything is local and
+A file the record doesn't list gets no answer, and neither does anything
+in a Proton prefix (compatdata), the shader cache, or anywhere else Steam
+doesn't install from a game's depots. Everything is local and
 read-only: Steam's text files (libraryfolders.vdf, appmanifest_*.acf) and
 its manifests, which are a zip around sections of protobuf.
 
-What a MATCH is worth: the file is what the game's developer shipped
-through Steam, and the record lives in your home folder, where anything
-running as you could change it along with the file. So, like package
-evidence, it's a label next to the hit and never a verdict.
+What a MATCH is worth: where the file came from, not whether it's safe.
+Games have shipped malware inside their official Steam builds (PirateFi,
+Chemia, BlockBlasters, Beyond The Dark, 2023's hijacked developer
+accounts), and those files matched Steam's record. The record also lives
+in your home folder, where anything running as you could change it along
+with the file, and Ensign can't check Valve's signature on it. So it's a
+line next to the hit, never a verdict, and never "likely false positive".
 
 Format notes (checked against a real Steam install, Nov 2026): sections
 are <uint32 LE magic><uint32 LE length><protobuf>; a file's entry has its
@@ -44,6 +52,7 @@ log = logging.getLogger(__name__)
 
 MATCH = "steam-installed"
 DIFFERS = "steam-differs"
+WORKSHOP = "steam-workshop"
 
 _PAYLOAD, _METADATA, _SIGNATURE, _END = 0x71F617D0, 0x1F4812BE, 0x1B81B817, 0x32C415AB
 _DIRECTORY = 64                  # EDepotFileFlag.Directory
@@ -55,7 +64,7 @@ _ROOTS = (".local/share/Steam", ".steam/steam", ".steam/root",
 
 @dataclass(frozen=True)
 class Answer:
-    verdict: str                 # MATCH or DIFFERS
+    verdict: str                 # MATCH, DIFFERS or WORKSHOP
     game: str                    # the game's name, as Steam has it
 
 
@@ -195,6 +204,16 @@ def name_hash(relative: tuple[str, ...]) -> bytes:
 # Finding a file's game and its manifests
 # ----------------------------------------------------------------------
 
+def _in_workshop(path: Path) -> tuple[Path, str] | None:
+    """(library, app id) for a path under
+    <library>/steamapps/workshop/content/<appid>/<item>/..., else None."""
+    parts = path.parts
+    for i in range(len(parts) - 5, 0, -1):   # at least <appid>/<item>/<file> after content
+        if parts[i:i + 3] == ("steamapps", "workshop", "content") and parts[i + 3].isdigit():
+            return Path(*parts[:i]), parts[i + 3]
+    return None
+
+
 def _in_library(path: Path) -> tuple[Path, str, tuple[str, ...]] | None:
     """(library, game folder name, path inside it) for a path under
     <library>/steamapps/common/<game>/..., else None."""
@@ -211,6 +230,13 @@ class Records:
     def __init__(self):
         self._games: dict[Path, dict[str, tuple[str, dict[str, str]]]] = {}
         self._manifests: dict[Path, dict[bytes, set[bytes]] | None] = {}
+
+    def game_name(self, library: Path, appid: str) -> str | None:
+        """The name Steam has for an app in this library, from its appmanifest."""
+        text = _read_text(library / "steamapps" / f"appmanifest_{appid}.acf")
+        state = parse_vdf(text).get("appstate", {}) if text else {}
+        name = state.get("name") if isinstance(state, dict) else None
+        return name if isinstance(name, str) else None
 
     def _library_games(self, library: Path) -> dict[str, tuple[str, dict[str, str]]]:
         """{game folder: (name, {depot: manifest id})} from a library's appmanifests."""
@@ -306,6 +332,10 @@ def check(records: Records, filepath: str, flagged_hash: str) -> Answer | None:
     a Steam game folder, not listed, unreadable, or the file has changed
     since it was flagged."""
     path = Path(filepath)
+    workshop = _in_workshop(path)
+    if workshop is not None:
+        library, appid = workshop
+        return Answer(WORKSHOP, records.game_name(library, appid) or f"app {appid}")
     try:
         owner = path.stat().st_uid
     except OSError:

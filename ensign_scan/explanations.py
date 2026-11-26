@@ -238,6 +238,33 @@ def decode_threat_name(threat_name: str | None) -> ThreatExplanation | None:
 
 
 
+# Malware families whose names in a signature mean a specific, known
+# strain: stealers, RATs, backdoors and loaders seen in real incidents,
+# including those shipped inside Steam games (Vidar, StealC, Epsilon, Fickle,
+# HijackLoader) and Workshop items (DarkKomet, Lumma). Matched against the
+# start of the family part of a ClamAV name, case and punctuation ignored.
+KNOWN_FAMILIES = (
+    "agenttesla", "amadey", "asyncrat", "darkkomet", "dcrat", "epsilon", "fickle", "formbook",
+    "hijackloader", "lumma", "nanocore", "njrat", "quasar", "raccoon", "redline", "remcos",
+    "renengine", "rhadamanthys", "stealc", "vidar", "xworm",
+)
+
+
+def known_family(threat_name: str | None) -> str | None:
+    """The family part of a ClamAV name (Win.Trojan.Vidar-123-0 -> "Vidar")
+    when it's one of KNOWN_FAMILIES, else None."""
+    if not threat_name:
+        return None
+    parts = _NAME_RE.match(threat_name)["body"].split(".")
+    if parts and parts[0] == "PUA":
+        parts = parts[1:]
+    if len(parts) < 3:
+        return None
+    family = ".".join(parts[2:])
+    flat = "".join(c for c in family.lower() if c.isalnum())
+    return family if any(flat.startswith(k) for k in KNOWN_FAMILIES) else None
+
+
 def explain_threat(threat_name: str | None) -> ThreatExplanation | None:
     """Curated entry (built-in or config) if one exists, else a structural
     decode of the name, else None."""
