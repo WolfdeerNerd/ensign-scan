@@ -448,7 +448,7 @@ Steam's record of a game says where a file came from, not whether it's safe (see
 
 | Listed | When |
 |---|---|
-| **Workshop item carries code** | An item in `steamapps/workshop/content/<appid>/<item>` has programs (`.exe`, `.dll`, ...), scripts (`.bat`, `.ps1`, `.vbs`, `.js`, `.py`, ...) or a password-protected zip in it. Static content (wallpapers, maps, music) shouldn't need any. Lua on its own doesn't count: some games run Lua mods by design |
+| **Workshop item carries code** | An item in `steamapps/workshop/content/<appid>/<item>` has programs (`.exe`, `.dll`, ...), scripts (`.bat`, `.ps1`, `.vbs`, `.js`, `.py`, ...) or a password-protected zip in it (a scanner can't look inside one, which is how such an archive has carried malware, the password in its file name). Static content (wallpapers, maps, music) shouldn't need any. Lua on its own doesn't count: some games run Lua mods by design |
 | **Update worth a look** | A game's build changed since the last scan, and a small update (5 files or fewer added or changed) adds a program or script or changes a program, or the update adds scripts |
 | **Game renamed** | A game's name changed since the last scan |
 
@@ -458,7 +458,7 @@ A Workshop item is listed with its folder, its Workshop page address (as text: E
 
 Each finding has an ID, which says exactly what it's about: the build's manifest, the item's current files, the game's new name. It's listed until you acknowledge it (`ensign-scan acknowledge-steam ID`, or `--all`), and anything that changes after that gets a new ID and is listed again. `ensign-scan steam` shows the list without scanning. In protected mode, acknowledging needs `sudo --protected`, and the list prints the command to paste.
 
-**What it never does:** change, delete or move anything of Steam's, unsubscribe from or disable an item, start or stop a game, or contact Steam. It reads Steam's text files and manifests and lists folders; it hashes nothing. `steam_watch = false` turns it off.
+**What it never does:** change, delete or move anything of Steam's, unsubscribe from or disable an item, start or stop a game, or contact Steam. It reads Steam's text files and manifests and lists folders. What's in each Workshop item comes from the scan's own records, so every file the scan saw counts, with no second walk and nothing skipped; the only files the watch opens are `.zip` archives in Workshop items, to read the flag that says they're password-protected. Workshop items your scans don't reach (a library outside `scan_targets`, or excluded) are counted in a note under the list, so you know they weren't checked. `steam_watch = false` turns it off.
 
 **What it can't do:** the first time it sees a game it only records it, since there's nothing to compare with yet. A game that's malicious from its first build gives no "update" (the scan and the Steam line under a hit still apply). And like the rest of Ensign's records, the watch's own record of each game is in your database, where malware running as you could change it (see Malware running as you).
 

@@ -599,7 +599,7 @@ def run_steam(args: argparse.Namespace, engine, decisions) -> int:
               "acknowledge with: sudo ensign-scan --protected acknowledge-steam ID ... "
               "(ensign-scan steam prints the command).")
         return 2
-    steamwatch.watch(engine, HOME)
+    uncovered = steamwatch.watch(engine, HOME)
     findings = steamwatch.open_findings(engine)
     if args.acknowledge_steam and not args.acknowledge_steam_all:
         listed = {f.key for f in findings}
@@ -620,8 +620,9 @@ def run_steam(args: argparse.Namespace, engine, decisions) -> int:
     if not findings:
         print("The Steam watch has nothing to show: no Workshop items carrying code, and no updates "
               "or renames worth a look since it started watching.")
+        steamwatch.uncovered_note(uncovered)
         return 0
-    steamwatch.report(findings)
+    steamwatch.report(findings, uncovered)
     if args.acknowledge_steam_all:
         print()
         if not confirm(f"Acknowledge all {len(findings)} listed above? [y/N] "):
@@ -639,12 +640,12 @@ def _steam_section(engine, config: Config) -> bool:
     if not config.steam_watch or AS_ROOT:
         return False
     try:
-        steamwatch.watch(engine, HOME)
+        uncovered = steamwatch.watch(engine, HOME)
         findings = steamwatch.open_findings(engine)
     except Exception:  # a watch failing must not fail the scan
         logging.getLogger(__name__).exception("the Steam watch failed")
         return False
-    steamwatch.report(findings)
+    steamwatch.report(findings, uncovered)
     return bool(findings)
 
 
