@@ -28,6 +28,7 @@ import getpass  # noqa: E402
 import hashlib  # noqa: E402
 import io  # noqa: E402
 import os  # noqa: E402
+import re  # noqa: E402
 import socket  # noqa: E402
 import stat  # noqa: E402
 import tempfile  # noqa: E402
@@ -297,15 +298,54 @@ with tempfile.TemporaryDirectory() as d:
     config = Config(db_url=f"sqlite:///{d}/data/system.db", log_file=Path(d, "data", "e.txt"), max_workers=2)
     s = Scanner(config, clamd=FakeClamd())
     quiet(s.scan_tree, library)
-    out, text = quiet(fpreport.make_report, s, config, str(game / "bin" / "plugin.dll"))
+    plugin = str(game / "bin" / "plugin.dll")
+    out, text = quiet(fpreport.make_report, s, config, plugin)
     report = out.read_text()
     assert "Steam:            installed by Steam for Example Game, exactly as Steam's record" in report, report
     assert str(library) not in report and "plugin.dll" not in report, "the game, but no path or file name"
     assert "email address" in text and "isn't tied to your Steam account" in text, text
-    # Content Steam's record doesn't have: said so, honestly.
-    (library / "depotcache" / "101_7.manifest").write_bytes(_steam_manifest(101, {"bin/plugin.dll": b"other"}))
-    out, _ = quiet(fpreport.make_report, s, config, str(game / "bin" / "plugin.dll"))
-    assert "with other contents than Steam's record" in out.read_text()
+    # the evidence drafts the "why", marked as Ensign's for you to check
+    assert "A starting point, drafted from" in report and "The file is part of Example Game, installed by Steam" in report
+    assert "Before you submit" not in text, text
+    # the date ClamAV first flagged this content, and the footer
+    assert re.search(r"First flagged: +\d{4}-\d\d-\d\d \(this exact content\)", report), report
+    assert "ensign" not in report.lower(), "anonymous: nothing says which tool prepared it"
     print("Steam line test passed ✓")
+
+    # Content Steam's record doesn't have: said so, no draft, and a warning on screen.
+    (library / "depotcache" / "101_7.manifest").write_bytes(_steam_manifest(101, {"bin/plugin.dll": b"other"}))
+    out, text = quiet(fpreport.make_report, s, config, plugin)
+    report = out.read_text()
+    assert "with other contents than Steam's record" in report and "A starting point, drafted from" not in report
+    assert "Before you submit" in text and "isn't the file Steam shipped" in text, text
+    assert "Before you submit" not in report, "the warning is for you, not ClamAV"
+
+    # A known malware family's name: warned, and no draft even for Steam's exact build.
+    (library / "depotcache" / "101_7.manifest").write_bytes(_steam_manifest(101, {"bin/plugin.dll": content}))
+    s.clamd.name = "Win.Trojan.Vidar-1-0"
+    quiet(s.scan_tree, library)
+    out, text = quiet(fpreport.make_report, s, config, plugin)
+    assert "known malware family (Vidar)" in text and "A starting point, drafted from" not in out.read_text(), text
+    s.clamd.name = "Test.Evil"
+    print("warnings test passed ✓")
+
+    # The package manager's other answers: named, and a changed file warned about.
+    import ensign_scan.pkgdb as pkgdb  # noqa: E402
+    real_origins = pkgdb.origins
+    try:
+        for state, line, warned in ((pkgdb.FROM_PACKAGE, "installed by example-pkg", False),
+                                    (pkgdb.MODIFIED, "belongs to example-pkg", True),
+                                    (pkgdb.OWNED, "couldn't be compared", False)):
+            pkgdb.origins = lambda paths, state=state: {p: (state, "example-pkg") for p in paths}
+            out, text = quiet(fpreport.make_report, s, config, plugin)
+            report = out.read_text()
+            assert line in report, (state, report)
+            assert ("isn't the file the package shipped" in text) == warned, (state, text)
+            assert ("part of the example-pkg package" in report) == (state == pkgdb.FROM_PACKAGE), report
+        pkgdb.origins = lambda paths: (_ for _ in ()).throw(RuntimeError("broken"))
+        assert quiet(fpreport.make_report, s, config, plugin)[0] is not None, "a failing check never stops it"
+    finally:
+        pkgdb.origins = real_origins
+    print("package states test passed ✓")
 
 print("\nAll ClamAV report tests passed ✓")
